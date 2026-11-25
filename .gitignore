@@ -1,0 +1,15 @@
+# Per-machine learned state written next to install.ps1 by the self-healing
+# package-ID logic. Lives in the OneDrive copy on purpose; never in git.
+winget-id-overrides.json
+
+# Logs / scratch
+*.log
+*.tmp
+*.bak
+
+# OS / editor junk
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
