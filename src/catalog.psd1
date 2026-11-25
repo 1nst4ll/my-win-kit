@@ -1,0 +1,141 @@
+# my-win-kit package catalogue - the ONE home of the app list.
+# Read by src/core.psm1 (Import-PowerShellDataFile: data only, no code).
+#
+# Package fields
+#   Id       permanent number - never renumber or reuse (next free Id: docs/STATUS.md)
+#   Name     display name (unique)
+#   Group    key from Groups below
+#   On       in the recommended set (pre-selected)
+#   Method   winget | msstore | script | direct | npm | builtin
+#   Ref      winget ID | Store product ID | script URL | Direct key | npm package | builtin name
+#   Desc     one line shown in search and the confirm screen
+# Optional
+#   AI       $true = listed under "Update AI tools"
+#   Update   native self-update command run when the tool is already installed
+#   Version  command whose output contains the installed version
+#   Exe      file that proves a script/npm install (env vars expanded)
+#   Appx     Appx package name that proves an install (MSIX apps)
+#   Uninstall  regex on the Windows uninstall DisplayName (direct installers)
+#   Fallback winget ID used when a direct download cannot be resolved
+#   Requires command that must exist first (git, npm)
+#   Interactive  $true = needs the console (UAC, own menus): never run under a spinner
+#
+# Keep this file ASCII-only.
+@{
+    Groups = @(
+        @{ Key = 'UTIL'; Label = 'Utilities';        Letter = 'U' }
+        @{ Key = 'OFCE'; Label = 'Office';           Letter = 'A' }
+        @{ Key = 'BROW'; Label = 'Browsers & AI';    Letter = 'B' }
+        @{ Key = 'CLOU'; Label = 'Cloud storage';    Letter = 'C' }
+        @{ Key = 'PDF';  Label = 'PDF tools';        Letter = 'P' }
+        @{ Key = 'COMM'; Label = 'Communication';    Letter = 'M' }
+        @{ Key = 'REMO'; Label = 'Remote access';    Letter = 'R' }
+        @{ Key = 'SECU'; Label = 'Security & VPN';   Letter = 'S' }
+        @{ Key = 'MEDI'; Label = 'Media & creative'; Letter = 'E' }
+        @{ Key = 'MAIN'; Label = 'Maintenance';      Letter = 'T' }
+        @{ Key = 'DSGN'; Label = 'Design';           Letter = 'G' }
+        @{ Key = 'OTHR'; Label = 'Other';            Letter = 'O' }
+        @{ Key = 'DEV';  Label = 'Dev tools';        Letter = 'D' }
+        @{ Key = 'POST'; Label = 'Post-install';     Letter = 'X' }
+    )
+
+    Packages = @(
+        # -- Utilities
+        @{ Id = 1;  Name = 'UniGetUI';            Group = 'UTIL'; On = $true;  Method = 'winget';  Ref = 'Devolutions.UniGetUI';             Desc = 'GUI for winget, Scoop and other package managers' }
+        @{ Id = 2;  Name = 'Notepad++';           Group = 'UTIL'; On = $true;  Method = 'winget';  Ref = 'Notepad++.Notepad++';              Desc = 'Text and code editor' }
+        @{ Id = 3;  Name = 'PowerToys';           Group = 'UTIL'; On = $true;  Method = 'winget';  Ref = 'Microsoft.PowerToys';              Desc = 'Microsoft power-user utilities' }
+        @{ Id = 4;  Name = 'Obsidian';            Group = 'UTIL'; On = $true;  Method = 'winget';  Ref = 'Obsidian.Obsidian';                Desc = 'Markdown notes' }
+        # -- Office
+        @{ Id = 5;  Name = 'Microsoft Office';    Group = 'OFCE'; On = $true;  Method = 'winget';  Ref = 'Microsoft.Office';                 Desc = 'Microsoft 365 apps' }
+        @{ Id = 6;  Name = 'LibreOffice';         Group = 'OFCE'; On = $true;  Method = 'winget';  Ref = 'TheDocumentFoundation.LibreOffice'; Desc = 'Free office suite' }
+        # -- Browsers & AI
+        @{ Id = 7;  Name = 'Google Chrome';       Group = 'BROW'; On = $true;  Method = 'winget';  Ref = 'Google.Chrome';                    Desc = 'Web browser' }
+        @{ Id = 8;  Name = 'Perplexity';          Group = 'BROW'; On = $true;  Method = 'msstore'; Ref = 'XP8JNQFBQH6PVF';                   Desc = 'AI answer engine (Microsoft Store)' }
+        # Claude Desktop stays on winget: the official "latest" link
+        # (claude.ai/api/desktop/.../latest/redirect) refuses scripted clients
+        # (HTTP 403), and the app updates itself after the first install.
+        @{ Id = 9;  Name = 'Claude Desktop';      Group = 'BROW'; On = $true;  Method = 'winget';  Ref = 'Anthropic.Claude';                 Desc = 'Anthropic Claude desktop app (updates itself)'; AI = $true; Appx = 'Claude' }
+        # -- Cloud storage
+        @{ Id = 10; Name = 'OneDrive';            Group = 'CLOU'; On = $true;  Method = 'winget';  Ref = 'Microsoft.OneDrive';               Desc = 'Microsoft cloud storage' }
+        @{ Id = 11; Name = 'Dropbox';             Group = 'CLOU'; On = $true;  Method = 'winget';  Ref = 'Dropbox.Dropbox';                  Desc = 'Cloud storage' }
+        @{ Id = 12; Name = 'Google Drive';        Group = 'CLOU'; On = $true;  Method = 'winget';  Ref = 'Google.GoogleDrive';               Desc = 'Google cloud storage' }
+        # -- PDF tools
+        @{ Id = 13; Name = 'Adobe Acrobat';       Group = 'PDF';  On = $true;  Method = 'winget';  Ref = 'Adobe.Acrobat.Reader.64-bit';      Desc = 'Adobe PDF reader' }
+        @{ Id = 14; Name = 'PDFgear';             Group = 'PDF';  On = $true;  Method = 'winget';  Ref = 'PDFgear.PDFgear';                  Desc = 'Free PDF editor' }
+        @{ Id = 15; Name = 'Foxit PDF Reader';    Group = 'PDF';  On = $true;  Method = 'winget';  Ref = 'Foxit.FoxitReader';                Desc = 'PDF reader' }
+        # -- Communication
+        @{ Id = 16; Name = 'Microsoft Teams';     Group = 'COMM'; On = $true;  Method = 'winget';  Ref = 'Microsoft.Teams';                  Desc = 'Chat and meetings' }
+        @{ Id = 17; Name = 'Zoom';                Group = 'COMM'; On = $true;  Method = 'winget';  Ref = 'Zoom.Zoom';                        Desc = 'Video meetings' }
+        @{ Id = 18; Name = 'WhatsApp Desktop';    Group = 'COMM'; On = $true;  Method = 'msstore'; Ref = '9NKSQGP7F2NH';                     Desc = 'WhatsApp (Microsoft Store)' }
+        @{ Id = 19; Name = 'Signal';              Group = 'COMM'; On = $true;  Method = 'winget';  Ref = 'OpenWhisperSystems.Signal';        Desc = 'Private messenger' }
+        @{ Id = 52; Name = 'Telegram';            Group = 'COMM'; On = $true;  Method = 'winget';  Ref = 'Telegram.TelegramDesktop';         Desc = 'Messenger' }
+        # -- Remote access
+        @{ Id = 20; Name = 'AnyDesk';             Group = 'REMO'; On = $true;  Method = 'winget';  Ref = 'AnyDesk.AnyDesk';                  Desc = 'Remote desktop' }
+        @{ Id = 21; Name = 'RealVNC Viewer';      Group = 'REMO'; On = $true;  Method = 'msstore'; Ref = 'XP99DVCPGKTXNJ';                   Desc = 'VNC viewer (Microsoft Store)' }
+        @{ Id = 50; Name = 'Tailscale';           Group = 'REMO'; On = $true;  Method = 'winget';  Ref = 'Tailscale.Tailscale';              Desc = 'Private mesh VPN' }
+        # -- Security & VPN
+        @{ Id = 22; Name = 'Bitwarden';           Group = 'SECU'; On = $true;  Method = 'winget';  Ref = 'Bitwarden.Bitwarden';              Desc = 'Password manager' }
+        @{ Id = 23; Name = 'NordVPN';             Group = 'SECU'; On = $true;  Method = 'winget';  Ref = 'NordSecurity.NordVPN';             Desc = 'VPN' }
+        # -- Media & creative
+        @{ Id = 24; Name = 'CapCut';              Group = 'MEDI'; On = $true;  Method = 'winget';  Ref = 'ByteDance.CapCut';                 Desc = 'Video editor' }
+        @{ Id = 25; Name = 'VLC';                 Group = 'MEDI'; On = $true;  Method = 'winget';  Ref = 'VideoLAN.VLC';                     Desc = 'Media player' }
+        @{ Id = 26; Name = 'qBittorrent';         Group = 'MEDI'; On = $true;  Method = 'winget';  Ref = 'qBittorrent.qBittorrent';          Desc = 'Torrent client' }
+        @{ Id = 27; Name = 'OBS Studio';          Group = 'MEDI'; On = $true;  Method = 'winget';  Ref = 'OBSProject.OBSStudio';             Desc = 'Screen recording and streaming' }
+        # -- Maintenance
+        @{ Id = 28; Name = 'Revo Uninstaller';    Group = 'MAIN'; On = $true;  Method = 'winget';  Ref = 'RevoUninstaller.RevoUninstaller';  Desc = 'Thorough uninstaller' }
+        @{ Id = 29; Name = 'Adv. IP Scanner';     Group = 'MAIN'; On = $true;  Method = 'winget';  Ref = 'Famatech.AdvancedIPScanner';       Desc = 'LAN scanner' }
+        # -- Design
+        @{ Id = 30; Name = 'Affinity Suite';      Group = 'DSGN'; On = $true;  Method = 'winget';  Ref = 'Canva.Affinity';                   Desc = 'Photo, design and publishing apps' }
+        # -- Other
+        @{ Id = 31; Name = 'Reolink';             Group = 'OTHR'; On = $true;  Method = 'winget';  Ref = 'Reolink.Reolink';                  Desc = 'Security camera client' }
+        @{ Id = 32; Name = 'Quick Share';         Group = 'OTHR'; On = $true;  Method = 'winget';  Ref = 'Google.QuickShare';                Desc = 'Google Quick Share (Android to PC)' }
+        @{ Id = 33; Name = 'Samsung Quick Share'; Group = 'OTHR'; On = $true;  Method = 'msstore'; Ref = '9PCTGDFXVZLJ';                     Desc = 'Samsung Quick Share (Microsoft Store)' }
+        # -- Dev tools (off by default)
+        @{ Id = 34; Name = 'Windows Terminal';    Group = 'DEV';  On = $false; Method = 'winget';  Ref = 'Microsoft.WindowsTerminal';        Desc = 'Modern terminal' }
+        @{ Id = 35; Name = 'PowerShell 7';        Group = 'DEV';  On = $false; Method = 'winget';  Ref = 'Microsoft.PowerShell';             Desc = 'PowerShell 7 (the modern menu runs on it)' }
+        @{ Id = 36; Name = 'VS Code';             Group = 'DEV';  On = $false; Method = 'winget';  Ref = 'Microsoft.VisualStudioCode';       Desc = 'Code editor' }
+        @{ Id = 37; Name = 'Git';                 Group = 'DEV';  On = $false; Method = 'winget';  Ref = 'Git.Git';                          Desc = 'Version control' }
+        @{ Id = 38; Name = 'GitHub Desktop';      Group = 'DEV';  On = $false; Method = 'winget';  Ref = 'GitHub.GitHubDesktop';             Desc = 'Git GUI' }
+        @{ Id = 39; Name = 'GitHub CLI';          Group = 'DEV';  On = $false; Method = 'winget';  Ref = 'GitHub.cli';                       Desc = 'gh command line' }
+        @{ Id = 40; Name = 'Node.js LTS';         Group = 'DEV';  On = $false; Method = 'winget';  Ref = 'OpenJS.NodeJS.LTS';                Desc = 'JavaScript runtime + npm' }
+        @{ Id = 41; Name = 'Python 3.13';         Group = 'DEV';  On = $false; Method = 'winget';  Ref = 'Python.Python.3.13';               Desc = 'Python runtime' }
+        @{ Id = 42; Name = 'uv (Python pkgs)';    Group = 'DEV';  On = $false; Method = 'winget';  Ref = 'astral-sh.uv';                     Desc = 'Fast Python package manager' }
+        @{ Id = 43; Name = 'Oh My Posh';          Group = 'DEV';  On = $false; Method = 'winget';  Ref = 'JanDeDobbeleer.OhMyPosh';          Desc = 'Prompt theme engine' }
+        @{ Id = 44; Name = 'PostgreSQL 18';       Group = 'DEV';  On = $false; Method = 'winget';  Ref = 'PostgreSQL.PostgreSQL.18';         Desc = 'Database server' }
+        @{ Id = 45; Name = 'DBeaver';             Group = 'DEV';  On = $false; Method = 'winget';  Ref = 'DBeaver.DBeaver.Community';        Desc = 'Database GUI' }
+        @{ Id = 46; Name = 'Claude Code CLI';     Group = 'DEV';  On = $false; Method = 'script';  Ref = 'https://claude.ai/install.ps1';    Desc = 'Anthropic Claude Code (official installer, always latest)'; AI = $true; Exe = '%USERPROFILE%\.local\bin\claude.exe'; Version = 'claude --version'; Update = 'claude update' }
+        @{ Id = 47; Name = 'KiloCode CLI';        Group = 'DEV';  On = $false; Method = 'npm';     Ref = '@kilocode/cli';                    Desc = 'KiloCode agent CLI (npm, needs Node.js)'; Requires = 'npm' }
+        @{ Id = 53; Name = 'Cursor';              Group = 'DEV';  On = $false; Method = 'winget';  Ref = 'Anysphere.Cursor';                 Desc = 'AI code editor' }
+        @{ Id = 54; Name = 'Codex CLI';           Group = 'DEV';  On = $false; Method = 'winget';  Ref = 'OpenAI.Codex';                     Desc = 'OpenAI Codex CLI' }
+        @{ Id = 55; Name = 'Antigravity IDE';     Group = 'DEV';  On = $false; Method = 'direct';  Ref = 'antigravity-ide';                  Desc = 'Google Antigravity IDE (official download, always latest)'; AI = $true; Uninstall = '^Antigravity IDE'; Fallback = 'Google.AntigravityIDE' }
+        @{ Id = 58; Name = 'Antigravity';         Group = 'DEV';  On = $false; Method = 'direct';  Ref = 'antigravity-hub';                  Desc = 'Google Antigravity agent app (official download, always latest)'; AI = $true; Uninstall = '^Antigravity [0-9]'; Fallback = 'Google.Antigravity' }
+        @{ Id = 57; Name = 'Antigravity CLI';     Group = 'DEV';  On = $false; Method = 'script';  Ref = 'https://antigravity.google/cli/install.ps1'; Desc = 'Google agy CLI (official installer, always latest)'; AI = $true; Exe = '%LOCALAPPDATA%\agy\bin\agy.exe'; Version = 'agy --version'; Update = 'agy update' }
+        @{ Id = 56; Name = 'Hermes Agent';        Group = 'DEV';  On = $false; Method = 'script';  Ref = 'https://hermes-agent.nousresearch.com/install.ps1'; Desc = 'Nous Research agent (official installer, needs Git)'; Requires = 'git' }
+        # -- Post-install (off by default, always last, never armed by select-all)
+        @{ Id = 48; Name = 'MS Activation (MAS)'; Group = 'POST'; On = $false; Method = 'script';  Ref = 'https://get.activated.win';        Desc = 'Opens the MAS menu';           Interactive = $true }
+        @{ Id = 49; Name = 'Chris Titus WinUtil'; Group = 'POST'; On = $false; Method = 'script';  Ref = 'https://christitus.com/win';       Desc = 'Opens the WinUtil window';     Interactive = $true }
+        @{ Id = 51; Name = 'Enable RDP Host';     Group = 'POST'; On = $false; Method = 'builtin'; Ref = 'enable-rdp';                       Desc = 'Allow Remote Desktop with NLA (asks for admin)'; Interactive = $true }
+    )
+
+    # Direct downloads: resolved at run time from the vendor's official
+    # download page, so every install gets the vendor's current release.
+    # {arch} / {arch2} are replaced per CPU (see Arch). The installer must
+    # carry a valid Authenticode signature whose subject contains Signer.
+    Direct = @{
+        'antigravity-ide' = @{
+            Page    = 'https://antigravity.google/download'
+            Pattern = 'https://edgedl\.me\.gvt1\.com/edgedl/release2/[A-Za-z0-9_/-]+/stable/([0-9.]+)-[0-9]+/windows-{arch}/Antigravity%20IDE\.exe'
+            Arch    = @{ x64 = 'x64'; arm64 = 'arm64' }
+            Signer  = 'CN=Google LLC'
+            Args    = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-'
+        }
+        'antigravity-hub' = @{
+            Page    = 'https://antigravity.google/download'
+            Pattern = 'https://storage\.googleapis\.com/antigravity-public/antigravity-hub/([0-9.]+)-[0-9]+/windows-{arch}/Antigravity-{arch2}\.exe'
+            Arch    = @{ x64 = 'x64'; arm64 = 'arm' }
+            Arch2   = @{ x64 = 'x64'; arm64 = 'arm64' }
+            Signer  = 'CN=Google LLC'
+            Args    = '/S'
+        }
+    }
+}
