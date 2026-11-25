@@ -105,7 +105,25 @@ types directly (`SelectionPrompt`, `MultiSelectionPrompt`, `Table`, `Rule`, `Pan
 cmdlet wrappers can't preselect items. Prompts go through the module's async wrapper so Ctrl+C still works.
 Gruvbox palette.
 
-- **Main menu:** Install or update apps · Update AI tools · Windows tweaks · Settings · Quit.
+- **Look:** truecolor gruvbox (hex styles, never the 16 console colours). The main menu opens with a "MY WIN KIT"
+  Figlet banner (Spectre's built-in font, rendered once into a capture console, ~11 ms, then coloured column by
+  column along an orange → yellow → green → aqua gradient), a subtitle (kit version, PC, PowerShell, admin) and,
+  in dry run, a purple **DRY RUN** badge plus a full-width purple rule on every screen. Sub-screens use one
+  gradient title rule. Tables and panels are rounded with coloured borders; each catalogue group has its own
+  accent colour + icon (`$script:GroupStyle`). Quitting prints a gradient goodbye bar.
+- **Glyphs:** only characters present in **both Consolas and Cascadia Mono** (verified with WPF `GlyphTypeface`),
+  so classic conhost renders them without font fallback. Badges, used the same way in picker, review, progress
+  and results: `√` installed (green), `↑` update available / updated (yellow / green), `·` not installed (grey),
+  `×` failed (red), `↔` healed (aqua), `○` dry run (purple), `=` up to date (aqua). ✓ ✗ ↻ are missing from Consolas
+  (and ✗ ↻ from Cascadia Mono), so they are not used. The spinner is Spectre's `Point` (`∙●∙`); the default
+  `Dots` spinner uses Braille, which Consolas lacks.
+- **Key hints:** the multi-select prompts carry a persistent footer bar (`InstructionsText`: ↑↓ move · space
+  toggle · enter confirm). `SelectionPrompt` has no footer, so its hint line sits in the prompt title. Spectre
+  prompts have no Esc handling, so every screen has an explicit « Back item.
+- **Update badges:** `Get-KitUpdates` (one `winget upgrade`, ~2-3 s, plus the vendor page for direct apps) runs
+  with the installed scan when the install screen opens, so the picker can show `↑ old → new`.
+- **Main menu:** Install or update apps · Update AI tools · Windows tweaks · Settings · Quit, each with an icon
+  and a one-line description.
 - **Install flow:**
   1. scan installed apps (spinner);
   2. "Start from": recommended set / recommended but only what's missing / retry last failures / last selection
@@ -114,8 +132,12 @@ Gruvbox palette.
      installed version and non-winget method;
   4. review table (App · Group · How · On this PC · Will) with actions: install now / search to add or remove
      (type-to-filter `SelectionPrompt`) / change the full list / back;
-  5. run: one spinner line per app with live step text (`OnStatus`), interactive items without a spinner, then
-     a results table (result, version from → to, time, heal or failure note), log path, and removed shortcuts.
+  5. run: a Spectre `Progress` view (coloured `Point` spinner, description with live step text from `OnStatus`,
+     gruvbox progress bar, percentage, elapsed time): an overall task plus the current app (completed tasks
+     hide). Each finished app prints a badge line above the live view. Interactive items run after it, outside
+     the progress view. Then a rounded results table (badge, app, result, version from → to, time, note) and a
+     summary panel (`√ ok · ↔ healed · × failed · total time`, log path, removed shortcuts; purple in dry run,
+     red with failures, green otherwise).
 - **Update AI tools:** table of every `AI = $true` app (installed, latest, how it updates), then update all
   installed or pick (missing ones get installed). Runs with `-Mode update`.
 - **Windows tweaks:** describes the 4 fixes and runs `win11-tweaks.ps1` here or elevated in a new window.
@@ -125,8 +147,11 @@ Gruvbox palette.
 
 ## Classic menu: src/tui-classic.ps1
 
-Windows PowerShell 5.1, deliberately simple. Groups print with their letter, apps in 2–3 columns as
-`[x] 12 Name*` (`*` = installed). One prompt line takes tokens: numbers, ranges `a-b`, group letters, `*` (all
+Windows PowerShell 5.1, deliberately simple, fits 120 × 30. A 2-row block-letter banner (█ ▀ ▄) in the gradient,
+then one row block per group: `letter icon GROUP` and up to 4 cells `[x] 12 Name √` (badges as in the modern
+menu; updates come from `Get-KitUpdates`). Colour is 24-bit through VT escape codes when the host supports VT
+(`$Host.UI.SupportsVirtualTerminal` or Windows Terminal), otherwise the 16 console colours
+(`MYWINKIT_FORCE_VT=1` forces VT for captures). One prompt line takes tokens: numbers, ranges `a-b`, group letters, `*` (all
 except POST), `0` (none). Commands use letters that aren't group letters: `Z` recommended, `N` only missing,
 `I` install, `L` latest AI tools, `W` Windows tweaks, `Q` quit. Runs print one line per app using the same
 engine; failures stay selected for a retry. `-TestInput "a;b;c"` feeds answers (tests).
@@ -167,6 +192,7 @@ All tests run the kit in dry-run mode; nothing installs.
 | `tools/test-core.ps1` | 5.1 + pwsh | catalogue sanity (unique Ids/names, groups, methods, DEV/POST off, POST interactive), dry run of every package, version compare; `-Online` adds the installed scan and vendor-page resolution |
 | `tools/smoke-tui.ps1` | pwsh | the Spectre menu driven by scripted keys: install flow, search, AI table, settings + tweaks (+ "update all" when an AI tool is installed, local only) |
 | `tools/smoke-loader.ps1` | 5.1 | loader decisions (pwsh present / absent / forced classic), declining and dry-run accepting the PowerShell 7 install, a classic-menu run |
+| `tools/render-screens.ps1 -OutDir <dir>` | pwsh (+5.1 for classic) | not a test: captures every screen as `.txt` (layout) and truecolor `.ans` (view with `Get-Content x.ans -Raw` in Windows Terminal) at 120 × 30, and prints the main-menu height |
 
 `.github/workflows/lint.yml` runs two jobs on `windows-latest`: **ps51** (parse, test-core, smoke-loader) and
 **pwsh** (lint, test-core -Online, install PwshSpectreConsole, smoke-tui). `$KnownIssues` in `lint.ps1`

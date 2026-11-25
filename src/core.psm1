@@ -22,6 +22,7 @@
 
 Set-StrictMode -Version 2.0
 
+$script:KitVersion  = '2.1.0'   # bump with user-visible changes (shown in the menu banner)
 $script:KitRoot     = $null
 $script:Catalog     = @()
 $script:Groups      = @()
@@ -84,6 +85,7 @@ function Initialize-Kit {
     return $script:Catalog
 }
 
+function Get-KitVersion { return $script:KitVersion }
 function Get-KitGroups { return $script:Groups }
 function Get-KitCatalog { return $script:Catalog }
 function Get-KitLogPath { return $script:LogPath }
@@ -443,6 +445,52 @@ function Test-KitVersionCurrent {
     return $true
 }
 
+function Get-KitUpdates {
+    <#
+    .SYNOPSIS
+        Apps with a newer version available: hashtable Id -> latest version.
+    .DESCRIPTION
+        One `winget upgrade` (about 2 s; redirected output is not truncated) for
+        winget/Store apps, plus the vendor page for installed direct apps.
+        Script tools (claude, agy) update themselves and are never listed.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Installed, [object[]]$Packages = $script:Catalog)
+    $res = @{}
+    $avail = @{}
+    if (Test-KitWinget) {
+        $raw = Get-KitWingetRaw @('upgrade', '--accept-source-agreements', '--disable-interactivity')
+        $sep = -1
+        for ($j = 0; $j -lt $raw.Count; $j++) { if ($raw[$j] -match '^-{4,}') { $sep = $j; break } }
+        if ($sep -ge 1) {
+            $hdr = $raw[$sep - 1]
+            $iId = $hdr.IndexOf('Id'); $iVer = $hdr.IndexOf('Version'); $iAv = $hdr.IndexOf('Available'); $iSrc = $hdr.IndexOf('Source')
+            if ($iId -gt 0 -and $iAv -gt $iVer) {
+                if ($iSrc -lt 0) { $iSrc = 9999 }
+                for ($j = $sep + 1; $j -lt $raw.Count; $j++) {
+                    $ln = $raw[$j]
+                    if ($ln.Length -le $iAv) { continue }
+                    $id = $ln.Substring($iId, $iVer - $iId).Trim()
+                    $av = $ln.Substring($iAv, [Math]::Min($iSrc, $ln.Length) - $iAv).Trim()
+                    if ($id -and $av) { $avail[$id] = $av }
+                }
+            }
+        }
+    }
+    foreach ($p in $Packages) {
+        if (-not $Installed.ContainsKey($p.Id)) { continue }
+        if ($p.Method -eq 'direct') {
+            try {
+                $d = Resolve-KitDirect -Key $p.Ref
+                if (-not (Test-KitVersionCurrent -Installed $Installed[$p.Id] -Latest $d.Version)) { $res[$p.Id] = $d.Version }
+            } catch {}
+            continue
+        }
+        $wid = if ($p.Method -in 'winget', 'msstore') { $p.Ref } else { $null }
+        if ($wid -and $avail.ContainsKey($wid)) { $res[$p.Id] = $avail[$wid] }
+    }
+    return $res
+}
+
 function Get-KitLatestVersion {
     <#
     Newest version the kit's install path would get, or $null when unknown:
@@ -769,7 +817,7 @@ function Remove-KitNewShortcuts {
     return $removed
 }
 
-Export-ModuleMember -Function Initialize-Kit, Get-KitGroups, Get-KitCatalog, Get-KitLogPath, Get-KitOverrideCount,
+Export-ModuleMember -Function Initialize-Kit, Get-KitVersion, Get-KitUpdates, Get-KitGroups, Get-KitCatalog, Get-KitLogPath, Get-KitOverrideCount,
     Get-KitRunOrder, Test-KitAdmin, Test-KitWinget, Get-KitArch, Update-KitPath, Start-KitLog, Write-KitLog,
     Get-KitState, Save-KitState, Get-KitInstalled, Get-KitToolVersion, Get-KitVersionText, Resolve-KitDirect,
     Test-KitVersionCurrent, Get-KitLatestVersion, Invoke-KitPackage, Get-KitDesktopShortcuts, Remove-KitNewShortcuts

@@ -47,8 +47,16 @@ Front door: [README.md](README.md). Docs index and ownership map: [docs/architec
   what ships with Windows. They must run on a fresh PC before anything is installed.
 - `src/tui-spectre.ps1` needs PowerShell 7.4+ (PwshSpectreConsole 2.x requires it) but must still **parse**
   under 5.1, because CI parses every file under both editions. Avoid 7-only syntax there too.
-- **Kit sources are ASCII-only.** Glyphs (✓ ↑ ✗ ● …) come from `[char]0x2713` etc., so no BOM is needed and 5.1
-  never mis-decodes them. `win11-tweaks.ps1` is the exception: it contains box-drawing characters and must keep
+- **Kit sources are ASCII-only.** Glyphs (√ ↑ × ● …) come from `[char]0x221A` etc., so no BOM is needed and 5.1
+  never mis-decodes them.
+- **Only glyphs present in both Consolas and Cascadia Mono.** Check a new one with WPF `GlyphTypeface`
+  (`Add-Type -AssemblyName PresentationCore`, `.CharacterToGlyphMap.ContainsKey(0x....)` on
+  `C:\Windows\Fonts\consola.ttf` and Windows Terminal's bundled `CascadiaMono.ttf`). No Nerd Font glyphs, no emoji.
+  ✓ ✗ ↻ ★ ⚙ and Braille (Spectre's default `Dots` spinner) fail this check; use √ × ↔ and the `Point` spinner.
+- **Colours are truecolor gruvbox hex** from `$script:Hex` (Spectre) / `$Pal` (classic). Badges mean the same
+  thing everywhere (see architecture.md → Modern menu → Glyphs).
+- **PowerShell variable names ignore case:** `$G` and `$g`, `$P` and `$p` are one variable. Never name a
+  script-level table with a letter that a loop variable uses (this bit twice in the classic menu). `win11-tweaks.ps1` is the exception: it contains box-drawing characters and must keep
   its UTF-8 BOM. `install.ps1` carries a BOM from history; harmless, keep it. Check with `head -c3 file | xxd`.
 - **Line endings are LF** (pinned in `.gitattributes`): publish hash-compares with the OneDrive copies.
 - **No UI in `core.psm1`.** It returns result objects and reports progress through `-OnStatus`. Anything both
@@ -74,7 +82,10 @@ powershell -File tools/lint.ps1 -ParseOnly                       # parse under W
 powershell -File tools/test-core.ps1                             # catalogue + engine (add -Online for scan + vendor pages)
 pwsh -File tools/smoke-tui.ps1                                   # Spectre menu, scripted keys
 powershell -ExecutionPolicy Bypass -File tools/smoke-loader.ps1  # loader decisions + classic menu
+pwsh -File tools/render-screens.ps1 -OutDir <dir>                # capture every screen (.txt + truecolor .ans)
 ```
+
+After any visual change, run `render-screens.ps1` and check the main menu still fits 30 rows (it prints the height).
 
 CI (`.github/workflows/lint.yml`) runs all of them on `windows-latest`. Settings: `PSScriptAnalyzerSettings.psd1`
 (Error + Warning). The rules it excludes are style choices this kit makes on purpose:

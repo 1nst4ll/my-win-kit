@@ -2,6 +2,25 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-25: visual polish, kit v2.1.0 (branch `rebuild-tui`, not merged yet)
+
+- Daniel's dry-run feedback: "add some colors and more ascii art and modern ui".
+- **Modern menu:** gradient "MY WIN KIT" Figlet banner (orange → yellow → green → aqua) with a version / PC /
+  PowerShell / admin subtitle; truecolor gruvbox everywhere; rounded tables and panels with coloured borders;
+  per-group accent colour + icon; main menu items with icons and one-line descriptions; key-hint bar (footer
+  on multi-selects, title line on single selects); live `Progress` view during runs; results table with a badge
+  column + summary panel; AI table with badges; goodbye bar on quit.
+- **Badges everywhere:** √ installed, ↑ update available (new `Get-KitUpdates`: one `winget upgrade` + vendor
+  pages), · not installed, × failed, ↔ healed, ○ dry run. New start-from preset "Everything with an update".
+- **DRY RUN can't be missed:** purple badge in the subtitle/header plus a full-width purple rule on every screen,
+  and a dry-run line in the summary panel.
+- **Glyph audit:** ✓ ✗ ↻ (used until now) and Braille spinners are missing from Consolas, so they showed as boxes in
+  classic conhost. Every glyph now exists in both Consolas and Cascadia Mono; spinner is `Point`.
+- **Classic menu:** 2-row block-letter banner in the gradient, truecolor through VT with a 16-colour fallback,
+  compact 4-column layout that fits 120 × 30 (was taller), same badges.
+- New `tools/render-screens.ps1` captures every screen (.txt + .ans). Startup measured at ~750 ms from launch
+  to quit with the banner (Figlet render 11 ms).
+
 ## 2026-11-25 (branch `rebuild-tui`, not merged yet)
 
 - **Rebuilt the installer** into a loader + two menus + one engine. `install.ps1` is now a 5.1 loader: with

@@ -6,6 +6,8 @@
     Runs when PowerShell 7 is missing or declined, or the Spectre module
     cannot load, so a fresh PC is never stuck. Deliberately simple: numbered
     toggles, then the same install engine (src/core.psm1) as the modern menu.
+    Colour: 24-bit gruvbox through VT escape codes when the host supports
+    them, otherwise the 16 console colours. Fits 120 x 30.
 .PARAMETER KitRoot
     Folder that holds install.ps1.
 .PARAMETER DryRun
@@ -14,7 +16,9 @@
     Smoke test: answers separated by ";" fed to the prompts in order (then Q).
     Forces -DryRun. One string because `powershell -File` cannot pass arrays.
 .NOTES
-    Keep ASCII-only and Windows PowerShell 5.1 compatible.
+    Keep ASCII-only (glyphs come from [char] codes, all present in Consolas and
+    Cascadia Mono) and Windows PowerShell 5.1 compatible.
+    Env MYWINKIT_FORCE_VT=1 forces truecolor output (screen captures).
 #>
 [CmdletBinding()]
 param(
@@ -34,10 +38,66 @@ if ($script:Testing) { foreach ($t in ($TestInput -split ";")) { $script:Queue.E
 $cat    = @(Initialize-Kit -KitRoot $KitRoot)
 $groups = @(Get-KitGroups)
 $state  = Get-KitState
-$Host.UI.RawUI.WindowTitle = 'my-win-kit (classic)'
+try { $Host.UI.RawUI.WindowTitle = 'my-win-kit (classic)' } catch {}
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
+
+# ---------------------------------------------------------------- colour
+
+$script:ESC = [char]27
+$script:VT = $false
+if ($env:MYWINKIT_FORCE_VT -eq '1') { $script:VT = $true }
+elseif (-not [Console]::IsOutputRedirected) {
+    try { $script:VT = [bool]$Host.UI.SupportsVirtualTerminal -or [bool]$env:WT_SESSION } catch {}
+}
+# gruvbox hex + the 16-colour fallback for each role
+$Pal = @{
+    Orange = @('#fe8019', 'DarkYellow'); Yellow = @('#fabd2f', 'Yellow'); Green = @('#b8bb26', 'Green')
+    Red = @('#fb4934', 'Red'); Aqua = @('#8ec07c', 'Cyan'); Blue = @('#83a598', 'DarkCyan')
+    Purple = @('#d3869b', 'Magenta'); Gray = @('#928374', 'DarkGray'); Fg = @('#ebdbb2', 'Gray'); Line = @('#665c54', 'DarkGray')
+}
+function Write-C([string]$Text, $Role, [switch]$NoNewline) {
+    if ($script:VT) {
+        $h = $Role[0]
+        $rgb = '{0};{1};{2}' -f [Convert]::ToInt32($h.Substring(1, 2), 16), [Convert]::ToInt32($h.Substring(3, 2), 16), [Convert]::ToInt32($h.Substring(5, 2), 16)
+        Write-Host "$($script:ESC)[38;2;$($rgb)m$Text$($script:ESC)[0m" -NoNewline:$NoNewline
+    } else {
+        Write-Host $Text -ForegroundColor $Role[1] -NoNewline:$NoNewline
+    }
+}
+function Write-Gradient([string]$Text, [int]$Width) {
+    <# Left-to-right orange -> yellow -> green -> aqua; 16-colour hosts get 4 bands. #>
+    $stops = @($Pal.Orange, $Pal.Yellow, $Pal.Green, $Pal.Aqua)
+    if ($Width -lt 2) { $Width = [Math]::Max(2, $Text.Length) }
+    for ($c = 0; $c -lt $Text.Length; $c += 2) {
+        $chunk = $Text.Substring($c, [Math]::Min(2, $Text.Length - $c))
+        $t = $c / ($Width - 1)
+        if ($script:VT) {
+            $seg = [Math]::Min([int][Math]::Floor($t * 3), 2); $f = ($t * 3) - $seg
+            $a = $stops[$seg][0]; $b = $stops[$seg + 1][0]
+            $rgb = foreach ($o in 1, 3, 5) { $x = [Convert]::ToInt32($a.Substring($o, 2), 16); $y = [Convert]::ToInt32($b.Substring($o, 2), 16); [int]($x + ($y - $x) * $f) }
+            Write-Host "$($script:ESC)[38;2;$($rgb[0]);$($rgb[1]);$($rgb[2])m$chunk$($script:ESC)[0m" -NoNewline
+        } else {
+            Write-Host $chunk -ForegroundColor $stops[[Math]::Min([int][Math]::Floor($t * 4), 3)][1] -NoNewline
+        }
+    }
+    Write-Host ''
+}
+
+function C([int]$cp) { return [string][char]$cp }
+$Gl = @{ Ok = C 0x221A; Up = C 0x2191; Not = C 0x00B7; Fail = C 0x00D7; Heal = C 0x2194; Dry = C 0x25CB; Dot = C 0x00B7; Arrow = C 0x2192; Ell = C 0x2026; Line = C 0x2500 }
+$GroupIcon = @{ UTIL = 0x2261; OFCE = 0x00B6; BROW = 0x25BA; CLOU = 0x221E; PDF = 0x00A7; COMM = 0x263A; REMO = 0x2194; SECU = 0x2666; MEDI = 0x266B; MAIN = 0x2302; DSGN = 0x2660; OTHR = 0x2022; DEV = 0x00BB; POST = 0x25B2 }
+$GroupRole = @{ UTIL = 'Yellow'; OFCE = 'Blue'; BROW = 'Aqua'; CLOU = 'Blue'; PDF = 'Red'; COMM = 'Green'; REMO = 'Aqua'; SECU = 'Purple'; MEDI = 'Orange'; MAIN = 'Yellow'; DSGN = 'Purple'; OTHR = 'Fg'; DEV = 'Orange'; POST = 'Red' }
+
+# 2-row block-letter banner: '#' = full block, '^' = upper half, '_' = lower half
+$script:Banner = @(
+    '#^_^# #_#   # # # # #_ #   #_^ # ^#^',
+    '# ^ #  #    ^_^_^ # # ^#   # # #  # '
+) | ForEach-Object { $_.Replace('#', (C 0x2588)).Replace('^', (C 0x2580)).Replace('_', (C 0x2584)) }
+
+# ---------------------------------------------------------------- helpers
 
 function Read-Answer([string]$Prompt) {
-    Write-Host "  $Prompt " -ForegroundColor Cyan -NoNewline
+    Write-C "  $Prompt " $Pal.Orange -NoNewline
     if ($script:Testing) {
         $a = if ($script:Queue.Count) { [string]$script:Queue.Dequeue() } else { 'Q' }
         Write-Host $a
@@ -46,51 +106,57 @@ function Read-Answer([string]$Prompt) {
     return (Read-Host)
 }
 function Clear-Kit { if (-not $script:Testing) { Clear-Host } }
-function Write-Rule { Write-Host ('  ' + ('-' * 100)) -ForegroundColor DarkGray }
+function Write-Rule { Write-C ('  ' + ($Gl.Line * 112)) $Pal.Line }
+function Format-Cut([string]$s, [int]$n) { if ($s.Length -le $n) { return $s.PadRight($n) } return $s.Substring(0, $n - 1) + $Gl.Ell }
+
+function Write-Badge($p) {
+    if (-not $installed.ContainsKey($p.Id)) { Write-C $Gl.Not $Pal.Gray -NoNewline }
+    elseif ($updates.ContainsKey($p.Id)) { Write-C $Gl.Up $Pal.Yellow -NoNewline }
+    else { Write-C $Gl.Ok $Pal.Green -NoNewline }
+}
 
 if (-not (Test-KitWinget)) {
-    Write-Host '  winget (App Installer) is missing - most installs need it.' -ForegroundColor Red
-    Write-Host '  Opening its Microsoft Store page; install it, then run install.cmd again.' -ForegroundColor Gray
+    Write-C '  winget (App Installer) is missing - most installs need it.' $Pal.Red
+    Write-C '  Opening its Microsoft Store page; install it, then run install.cmd again.' $Pal.Fg
     if (-not $script:Testing) { try { Start-Process 'ms-windows-store://pdp/?ProductId=9NBLGGH4NNS1' } catch {} }
 }
 
-Write-Host '  Checking what is installed on this PC...' -ForegroundColor DarkGray
+Write-C '  Checking what is installed on this PC and looking for updates...' $Pal.Gray
 $installed = Get-KitInstalled
+$updates = Get-KitUpdates -Installed $installed
 
 function Show-Menu {
     Clear-Kit
     $on = @($cat | Where-Object On).Count
-    $dry = if ($DryRun) { '  |  DRY RUN' } else { '' }
-    Write-Host ''
-    Write-Host "  my-win-kit  |  classic menu (PowerShell $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor))  |  $on selected$dry" -ForegroundColor DarkYellow
+    foreach ($b in $script:Banner) { Write-Host '  ' -NoNewline; Write-Gradient $b $b.Length }
+    Write-C "  v$(Get-KitVersion) $($Gl.Dot) classic menu $($Gl.Dot) PowerShell $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor) $($Gl.Dot) " $Pal.Gray -NoNewline
+    Write-C "$on selected" $Pal.Orange -NoNewline
+    if ($DryRun) { Write-C "   $($Gl.Dry) DRY RUN - nothing will be installed" $Pal.Purple } else { Write-Host '' }
     Write-Rule
-    $colW = 33
-    $cols = 3
-    try { if ($Host.UI.RawUI.WindowSize.Width -lt 104) { $cols = 2 } } catch {}
+    # One row block per group: header column (22) + 4 cells of 22
     foreach ($g in $groups) {
         $items = @($cat | Where-Object Group -eq $g.Key | Sort-Object Id)
         if (-not $items) { continue }
-        $hdr = "  [$($g.Letter)] $($g.Label.ToUpper())"
-        if ($g.Key -eq 'POST') { $hdr += '  (runs last; never selected by *)' }
-        Write-Host $hdr -ForegroundColor Yellow
-        for ($i = 0; $i -lt $items.Count; $i += $cols) {
-            Write-Host '    ' -NoNewline
-            for ($c = 0; $c -lt $cols -and ($i + $c) -lt $items.Count; $c++) {
+        $role = $Pal[$GroupRole[$g.Key]]
+        for ($i = 0; $i -lt $items.Count; $i += 4) {
+            if ($i -eq 0) { Write-C ('  ' + (Format-Cut "$($g.Letter) $(C $GroupIcon[$g.Key]) $($g.Label.ToUpper())" 20)) $role -NoNewline }
+            else { Write-Host (' ' * 22) -NoNewline }
+            for ($c = 0; $c -lt 4 -and ($i + $c) -lt $items.Count; $c++) {
                 $p = $items[$i + $c]
-                $box = if ($p.On) { '[x]' } else { '[ ]' }
-                $mark = if ($installed.ContainsKey($p.Id)) { '*' } else { ' ' }
-                $txt = ('{0} {1,2} {2}{3}' -f $box, $p.Id, $p.Name, $mark)
-                if ($txt.Length -gt $colW - 1) { $txt = $txt.Substring(0, $colW - 1) }
-                $color = if ($p.On) { 'Green' } else { 'Gray' }
-                Write-Host $txt.PadRight($colW) -ForegroundColor $color -NoNewline
+                if ($p.On) { Write-C '[x]' $Pal.Green -NoNewline } else { Write-C '[ ]' $Pal.Line -NoNewline }
+                Write-C ('{0,2} ' -f $p.Id) $Pal.Gray -NoNewline
+                Write-C (Format-Cut $p.Name 14) $(if ($p.On) { $Pal.Fg } else { $Pal.Gray }) -NoNewline
+                Write-Badge $p
+                Write-Host ' ' -NoNewline
             }
             Write-Host ''
         }
     }
     Write-Rule
-    Write-Host '  Toggle: numbers  1 5 12  ranges 20-27  group letters  U D   * = all (not post)  0 = none' -ForegroundColor DarkGray
-    Write-Host '          Z = recommended set   N = recommended, only what is new here   (* after a name = installed)' -ForegroundColor DarkGray
-    Write-Host '  I = install selected   L = latest AI tools   W = Windows tweaks   Q = quit' -ForegroundColor Cyan
+    Write-C "  $($Gl.Ok) installed  " $Pal.Green -NoNewline; Write-C "$($Gl.Up) update  " $Pal.Yellow -NoNewline; Write-C "$($Gl.Not) not installed    " $Pal.Gray -NoNewline
+    Write-C 'toggle  1 5 12  20-27  letter  * all but X  0 none  Z recommended  N only new' $Pal.Gray
+    Write-C '  I' $Pal.Orange -NoNewline; Write-C ' install   ' $Pal.Fg -NoNewline; Write-C 'L' $Pal.Orange -NoNewline; Write-C ' latest AI tools   ' $Pal.Fg -NoNewline
+    Write-C 'W' $Pal.Orange -NoNewline; Write-C ' Windows tweaks   ' $Pal.Fg -NoNewline; Write-C 'Q' $Pal.Orange -NoNewline; Write-C ' quit' $Pal.Fg
 }
 
 function Invoke-ClassicRun([object[]]$Selection, [string]$Mode = 'install') {
@@ -101,34 +167,50 @@ function Invoke-ClassicRun([object[]]$Selection, [string]$Mode = 'install') {
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $results = @()
     Write-Host ''
+    if ($DryRun) { Write-C "  $($Gl.Dry) DRY RUN - simulation only, nothing will be installed or changed" $Pal.Purple }
     for ($i = 0; $i -lt $order.Count; $i++) {
         $p = $order[$i]
         $inst = $null; if ($installed.ContainsKey($p.Id)) { $inst = $installed[$p.Id] }
-        Write-Host ('  [{0}/{1}] {2,-24} {3,-8} ' -f ($i + 1), $order.Count, $p.Name, $p.Method) -NoNewline
-        if ($p.Interactive -and -not $DryRun) { Write-Host 'interactive - answer its prompts' -ForegroundColor Magenta }
+        Write-C ('  [{0}/{1}] ' -f ($i + 1), $order.Count) $Pal.Orange -NoNewline
+        Write-C ('{0,-24} ' -f $p.Name) $Pal.Fg -NoNewline
+        Write-C ('{0,-8} ' -f $p.Method) $Pal.Gray -NoNewline
+        if ($p.Interactive -and -not $DryRun) { Write-C 'interactive - answer its prompts' $Pal.Purple }
         $r = Invoke-KitPackage -Package $p -Installed $inst -Mode $Mode -DryRun:$DryRun
-        if ($p.Interactive -and -not $DryRun) { Write-Host '                                         ' -NoNewline }
-        $color = switch ($r.Status) { 'failed' { 'Red' } 'dryrun' { 'Magenta' } 'current' { 'DarkCyan' } default { 'Green' } }
-        $ver = if ($r.From -and $r.To -and $r.From -ne $r.To) { "$($r.From) -> $($r.To)" } elseif ($r.To) { $r.To } else { $r.From }
-        Write-Host ("{0,-10} {1} ({2}s)" -f $r.Status.ToUpper(), $ver, $r.Seconds) -ForegroundColor $color
-        if ($r.Healed) { Write-Host "         healed: $($r.Healed)" -ForegroundColor DarkCyan }
-        if ($r.Detail -and $r.Status -in 'failed', 'dryrun') { Write-Host "         $($r.Detail)" -ForegroundColor DarkGray }
+        if ($p.Interactive -and -not $DryRun) { Write-Host (' ' * 43) -NoNewline }
+        $badge, $role = switch ($r.Status) {
+            'failed'  { $Gl.Fail, $Pal.Red }
+            'dryrun'  { $Gl.Dry, $Pal.Purple }
+            'current' { '=', $Pal.Aqua }
+            'updated' { $Gl.Up, $Pal.Green }
+            default   { $Gl.Ok, $Pal.Green }
+        }
+        $ver = if ($r.From -and $r.To -and $r.From -ne $r.To) { "$($r.From) $($Gl.Arrow) $($r.To)" } elseif ($r.To) { $r.To } else { $r.From }
+        Write-C ("{0} {1,-9} {2} ({3}s)" -f $badge, $r.Status.ToUpper(), $ver, $r.Seconds) $role
+        if ($r.Healed) { Write-C "         $($Gl.Heal) healed: $($r.Healed)" $Pal.Aqua }
+        if ($r.Detail -and $r.Status -in 'failed', 'dryrun') { Write-C "         $($r.Detail)" $Pal.Gray }
         $results += $r
         if ($r.Status -ne 'failed') { $p.On = $false }
     }
     if ($state.RemoveShortcuts -and -not $DryRun) {
         $rm = @(Remove-KitNewShortcuts -Before $before)
-        if ($rm.Count) { Write-Host "  Removed $($rm.Count) new desktop shortcut(s): $($rm -join ', ')" -ForegroundColor DarkGray }
+        if ($rm.Count) { Write-C "  Removed $($rm.Count) new desktop shortcut(s): $($rm -join ', ')" $Pal.Gray }
     }
     $fl = @($results | Where-Object Status -eq 'failed').Count
+    $hl = @($results | Where-Object Healed).Count
     Write-Rule
-    Write-Host ("  Done: {0} ok, {1} failed, {2:0.0}s.  Log: {3}" -f ($results.Count - $fl), $fl, $sw.Elapsed.TotalSeconds, $log) -ForegroundColor $(if ($fl) { 'Yellow' } else { 'Green' })
-    if ($fl) { Write-Host '  Failed apps stay selected - press I to retry.' -ForegroundColor Yellow }
+    Write-C ('  Done: ') $Pal.Fg -NoNewline
+    Write-C "$($Gl.Ok) $($results.Count - $fl) ok   " $Pal.Green -NoNewline
+    Write-C "$($Gl.Heal) $hl healed   " $Pal.Aqua -NoNewline
+    Write-C "$($Gl.Fail) $fl failed   " $Pal.Red -NoNewline
+    Write-C ('{0:0.0}s' -f $sw.Elapsed.TotalSeconds) $Pal.Fg
+    Write-C "  Log: $log" $Pal.Gray
+    if ($fl) { Write-C '  Failed apps stay selected - press I to retry.' $Pal.Yellow }
     $state.LastSelection = @($Selection | ForEach-Object Id)
     $state.LastFailed = @($results | Where-Object Status -eq 'failed' | ForEach-Object Id)
     if (-not $DryRun) { Save-KitState $state }
     [void](Read-Answer 'Press Enter to continue')
     $script:installed = Get-KitInstalled
+    $script:updates = Get-KitUpdates -Installed $script:installed
 }
 
 $letters = @{}; foreach ($g in $groups) { $letters[$g.Letter] = $g.Key }
@@ -139,7 +221,12 @@ while ($true) {
     if ([string]::IsNullOrWhiteSpace($ans)) { continue }
     $u = $ans.Trim().ToUpper()
     # Commands use letters that are NOT group letters (U A B C P M R S E T G O D X)
-    if ($u -eq 'Q') { exit 0 }
+    if ($u -eq 'Q') {
+        Write-Host ''
+        $bye = ((C 0x2591) + (C 0x2592) + (C 0x2593)) + ((C 0x2550) * 20) + ' see you next time ' + ((C 0x2550) * 20) + ((C 0x2593) + (C 0x2592) + (C 0x2591))
+        Write-Host '  ' -NoNewline; Write-Gradient $bye $bye.Length
+        exit 0
+    }
     if ($u -eq 'I') {
         $sel = @($cat | Where-Object On)
         if ($sel.Count -gt 0) {
@@ -151,7 +238,7 @@ while ($true) {
     if ($u -eq 'L') {
         $ai = @($cat | Where-Object { $_.AI -and $installed.ContainsKey($_.Id) })
         if ($ai.Count -gt 0) {
-            Write-Host "  AI tools installed here: $(($ai | ForEach-Object { "$($_.Name) $($installed[$_.Id])" }) -join ', ')" -ForegroundColor Gray
+            Write-C "  AI tools installed here: $(($ai | ForEach-Object { "$($_.Name) $($installed[$_.Id])" }) -join ', ')" $Pal.Fg
             $ok = Read-Answer 'Update them to the latest versions? [Y/n]'
             if ($ok -notmatch '^[Nn]') { Invoke-ClassicRun $ai 'update' }
         }
@@ -159,7 +246,7 @@ while ($true) {
     }
     if ($u -eq 'W') {
         $tw = Join-Path $KitRoot 'win11-tweaks.ps1'
-        if ($DryRun) { Write-Host "  would run: powershell -File $tw" -ForegroundColor Magenta; [void](Read-Answer 'Press Enter') }
+        if ($DryRun) { Write-C "  $($Gl.Dry) would run: powershell -File $tw" $Pal.Purple; [void](Read-Answer 'Press Enter') }
         else { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $tw }
         continue
     }

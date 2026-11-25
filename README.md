@@ -29,6 +29,9 @@ Most installs need winget (App Installer). If it's missing, the menu opens its M
 
 ## The modern menu
 
+A gradient **MY WIN KIT** banner, gruvbox colours, and one set of badges everywhere: √ installed, ↑ update
+available, · not installed, × failed, ↔ healed. In dry run every screen carries a purple **DRY RUN** band.
+
 - **Install or update apps:** pick a starting point (recommended set, only what's missing on this PC, retry last
   failures, your last selection, or empty), adjust the grouped list (space ticks an app, ticking a group header
   ticks the whole group), check the review table, then install. Already-installed apps update if a newer version

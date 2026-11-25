@@ -39,7 +39,7 @@ Check 'decision: PowerShell 7 absent -> offer install' (Invoke-Loader @('-WhatIf
 Check 'decision: -Classic forced'                      (Invoke-Loader @('-WhatIfLoader', '-Classic')) @('decision: classic')
 Check 'declined PowerShell 7 -> classic menu'          (Invoke-Loader @('-NoPwsh', '-Answer', 'n', '-DryRun', '-ClassicTestInput', 'Q')) @('Install PowerShell 7 now?', 'classic menu', 'DRY RUN')
 Check 'accepted in dry run -> no install, classic'     (Invoke-Loader @('-NoPwsh', '-Answer', 'y', '-DryRun', '-ClassicTestInput', 'Q')) @('Dry run: would install PowerShell 7', 'classic menu')
-Check 'classic: toggles + POST + simulated run'        (Invoke-Loader @('-Classic', '-DryRun', '-ClassicTestInput', '0;2;46;X;I;y;;Q')) @('0 selected', '[1/5] Notepad++', '[5/5] Enable RDP Host', 'Done: 5 ok, 0 failed')
+Check 'classic: toggles + POST + simulated run'        (Invoke-Loader @('-Classic', '-DryRun', '-ClassicTestInput', '0;2;46;X;I;y;;Q')) @('0 selected', '[1/5] Notepad++', '[5/5] Enable RDP Host', '5 ok', '0 failed', 'see you next time')
 
 Remove-Item -LiteralPath $env:MYWINKIT_STATE_DIR -Recurse -Force -ErrorAction SilentlyContinue
 if ($script:fail -eq 0) { Write-Host 'smoke-loader: all passed' -ForegroundColor Green } else { Write-Host "smoke-loader: $($script:fail) failure(s)" -ForegroundColor Red }

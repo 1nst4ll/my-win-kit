@@ -11,7 +11,8 @@ _A new session can start from this line, no handover needed._
   installer with a loader + Spectre menu + classic fallback + shared engine, and adds always-latest AI tools.
   **Do not merge without Daniel's go:** merging publishes the new kit to every PC through OneDrive.
 - Before merging, Daniel tries it by hand (steps in the PR description): the modern menu, the classic menu
-  (`install.ps1 -Classic`), and one real install or update.
+  (`install.ps1 -Classic`), and one real install or update. His first dry-run feedback (more colour, ASCII art,
+  modern UI) is addressed in the v2.1.0 visual pass; next is his look at it in a real terminal.
 - After the merge: check the post-merge publish output (expect `src/` + 4 files copied), then open
   `OneDrive\[98] Shortcuts\install.cmd` on a second PC.
 - Watch-outs: `main` auto-publishes. This clone has `core.hooksPath=.githooks`; other clones need it too.
@@ -26,7 +27,9 @@ _A new session can start from this line, no handover needed._
 | Apps in `src/catalog.psd1` (branch) | 58 total: 35 in the recommended set, 20 DEV (off), 3 POST (off) |
 | By method (branch) | 45 winget, 4 Store, 5 script, 2 direct, 1 npm, 1 builtin. AI-flagged (Update AI tools): 5 |
 | Next free app Id | 59 |
+| Kit version (branch) | 2.1.0 (`$script:KitVersion` in src/core.psm1) |
 | Modern menu needs | PowerShell 7.4+, PwshSpectreConsole ≥ 2.3 (tested with 2.6.3 on pwsh 7.7.0) |
+| Startup (this PC) | ~750 ms launch → banner → quit; main menu 16 rows, classic menu 26 rows (budget 30) |
 | Latest direct versions seen | Antigravity IDE 2.8.0, Antigravity 2.35.1 (2026-11-25, from antigravity.google/download) |
 | CI | lint.yml: ps51 job (parse, test-core, smoke-loader) + pwsh job (lint, test-core -Online, smoke-tui) |
 
