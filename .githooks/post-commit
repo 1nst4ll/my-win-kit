@@ -1,0 +1,5 @@
+#!/bin/sh
+# Publish the kit to OneDrive after every commit on main.
+# Enable once per clone:  git config core.hooksPath .githooks
+# Never fails the commit: publish problems are printed, exit is always 0.
+exec "$(git rev-parse --show-toplevel)/.githooks/publish-on-main" post-commit

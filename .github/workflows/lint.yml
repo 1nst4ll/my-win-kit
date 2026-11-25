@@ -1,0 +1,30 @@
+name: lint
+
+# Quality gate only. Delivery to PCs is tools/publish.ps1 (OneDrive), not CI.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  parse-ps51:
+    name: Parse (Windows PowerShell 5.1)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Parser check under 5.1
+        shell: powershell
+        run: ./tools/lint.ps1 -ParseOnly
+
+  lint-pwsh:
+    name: Parse + PSScriptAnalyzer (pwsh)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Parser check + PSScriptAnalyzer
+        shell: pwsh
+        run: ./tools/lint.ps1
