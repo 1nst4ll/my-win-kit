@@ -2,6 +2,13 @@
 # package-ID logic. Lives in the OneDrive copy on purpose; never in git.
 winget-id-overrides.json
 
+# Daniel's package-list edits (Settings -> Manage packages). Lives in the OneDrive copy,
+# syncs to every PC; fold into src/catalog.psd1 with tools/import-overlay.ps1.
+my-packages.json
+my-packages.json.bak
+my-packages.json.tmp
+my-packages.imported-*.json
+
 # Logs / scratch
 *.log
 *.tmp

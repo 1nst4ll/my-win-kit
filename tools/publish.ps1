@@ -6,7 +6,8 @@
     One-way copy: repo -> target. The repo is the single source of truth.
     - Copies ONLY the kit files listed in $KitFiles. Never deletes anything in
       the target and never touches other files there (shortcuts, tools, and the
-      winget-id-overrides.json that installs write next to install.ps1).
+      per-PC/synced state next to install.ps1: winget-id-overrides.json and the
+      package-list overlay my-packages.json(.bak/.tmp) - see $Protected).
     - Skips files whose content is already identical (SHA-256 compare).
     - Skips kit files with uncommitted changes (only committed state ships).
     - Drift guard: if a target file differs from the repo copy AND is newer
@@ -40,6 +41,16 @@ $srcFiles = @(Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'src') -File |
     Where-Object { $_.Extension -in '.ps1', '.psm1', '.psd1' } | Sort-Object Name |
     ForEach-Object { 'src/' + $_.Name })
 $KitFiles = @($srcFiles) + @('win11-tweaks.ps1', 'install.cmd', 'install.ps1')
+
+# Files that live in the target but belong to the PCs, not the repo: never written,
+# never deleted. my-packages.json holds Daniel's package-list edits (Settings ->
+# Manage packages) and syncs between PCs through OneDrive.
+$Protected = @('my-packages.json', 'my-packages.json.bak', 'my-packages.json.tmp', 'winget-id-overrides.json')
+$clash = @($KitFiles | Where-Object { $Protected -contains (Split-Path -Leaf $_) })
+if ($clash.Count) {
+    Write-Host "publish: refusing - protected file(s) in the kit file set: $($clash -join ', ')" -ForegroundColor Red
+    exit 1
+}
 
 if (-not $Target) {
     if (-not $env:OneDrive) {

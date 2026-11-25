@@ -22,8 +22,10 @@
 
 Set-StrictMode -Version 2.0
 
-$script:KitVersion  = '2.1.0'   # bump with user-visible changes (shown in the menu banner)
+$script:KitVersion  = '2.2.0'   # bump with user-visible changes (shown in the menu banner)
 $script:KitRoot     = $null
+$script:BaseData    = $null
+$script:OverlayPath = $null
 $script:Catalog     = @()
 $script:Groups      = @()
 $script:Direct      = @{}
@@ -38,31 +40,33 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::S
 
 # ---------------------------------------------------------------- setup
 
+function ConvertTo-KitPackage($h, [hashtable]$Order, [string]$Origin) {
+    # Indexer access: optional keys are simply $null (StrictMode-safe)
+    return [pscustomobject]@{
+        Id = [int]$h['Id']; Name = [string]$h['Name']; Group = [string]$h['Group']; GroupOrder = $Order[[string]$h['Group']]
+        Default = [bool]$h['On']; On = [bool]$h['On']
+        Method = [string]$h['Method']; Ref = [string]$h['Ref']; Desc = [string]$h['Desc']
+        AI = [bool]$h['AI']; Interactive = [bool]$h['Interactive']
+        Update = $h['Update']; Version = $h['Version']; Exe = $h['Exe']; Appx = $h['Appx']
+        Uninstall = $h['Uninstall']; Fallback = $h['Fallback']; Requires = $h['Requires']
+        Origin = $Origin   # base = src/catalog.psd1, mine = my-packages.json
+    }
+}
+
 function Initialize-Kit {
-    <# Load the catalogue and apply learned winget-ID heals. Returns the package list. #>
+    <#
+    Load the base catalogue (src/catalog.psd1), merge Daniel's overlay
+    (my-packages.json next to install.ps1) and apply learned winget-ID heals.
+    Returns the package list. Overlay problems never stop the kit: they fall
+    back to the base catalogue and are reported by Get-KitWarnings.
+    #>
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$KitRoot)
 
     $script:KitRoot = $KitRoot
-    $data = Import-PowerShellDataFile -LiteralPath (Join-Path $KitRoot 'src\catalog.psd1')
-    $script:Groups = @($data.Groups | ForEach-Object { [pscustomobject]$_ })
-    $script:Direct = $data.Direct
-
-    $order = @{}
-    for ($i = 0; $i -lt $script:Groups.Count; $i++) { $order[$script:Groups[$i].Key] = $i }
-
-    $script:Catalog = @(foreach ($h in $data.Packages) {
-        # Indexer access: optional keys are simply $null (StrictMode-safe)
-        $p = [pscustomobject]@{
-            Id = [int]$h['Id']; Name = $h['Name']; Group = $h['Group']; GroupOrder = $order[$h['Group']]
-            Default = [bool]$h['On']; On = [bool]$h['On']
-            Method = $h['Method']; Ref = $h['Ref']; Desc = $h['Desc']
-            AI = [bool]$h['AI']; Interactive = [bool]$h['Interactive']
-            Update = $h['Update']; Version = $h['Version']; Exe = $h['Exe']; Appx = $h['Appx']
-            Uninstall = $h['Uninstall']; Fallback = $h['Fallback']; Requires = $h['Requires']
-        }
-        $p
-    })
+    $script:BaseData = Import-PowerShellDataFile -LiteralPath (Join-Path $KitRoot 'src\catalog.psd1')
+    $script:Direct = $script:BaseData.Direct
+    $script:Warnings = [System.Collections.Generic.List[string]]::new()
 
     # Learned heals (old -> new, "msstore:" prefix switches channel)
     $script:OvrPath = Join-Path $KitRoot 'winget-id-overrides.json'
@@ -73,7 +77,38 @@ function Initialize-Kit {
             foreach ($pr in $j.PSObject.Properties) { $script:Overrides[$pr.Name] = [string]$pr.Value }
         } catch {}
     }
-    foreach ($p in $script:Catalog) {
+
+    $script:OverlayPath = Join-Path $KitRoot 'my-packages.json'
+    $script:Overlay = Read-KitOverlay
+    Update-KitCatalog
+    return $script:Catalog
+}
+
+function Update-KitCatalog {
+    <# Rebuild groups + catalogue from base data + overlay. Called after every overlay change. #>
+    $groups = [System.Collections.Generic.List[object]]::new()
+    foreach ($g in $script:BaseData.Groups) { $groups.Add([pscustomobject]@{ Key = $g['Key']; Label = $g['Label']; Letter = $g['Letter']; Origin = 'base' }) }
+    foreach ($g in $script:Overlay.groups) {
+        if (@($groups | Where-Object Key -eq $g.Key).Count) { continue }
+        $groups.Add([pscustomobject]@{ Key = $g.Key; Label = $g.Label; Letter = $g.Letter; Origin = 'mine' })
+    }
+    # POST stays the last group, new groups go before it
+    $post = @($groups | Where-Object Key -eq 'POST')
+    $script:Groups = @(@($groups | Where-Object Key -ne 'POST') + $post)
+    $order = @{}
+    for ($i = 0; $i -lt $script:Groups.Count; $i++) { $order[$script:Groups[$i].Key] = $i }
+
+    $all = [System.Collections.Generic.List[object]]::new()
+    $ids = @{}
+    foreach ($h in $script:BaseData.Packages) { $p = ConvertTo-KitPackage $h $order 'base'; $all.Add($p); $ids[$p.Id] = $true }
+    foreach ($a in $script:Overlay.added) {
+        if ($ids.ContainsKey([int]$a['Id'])) { continue }   # base wins (e.g. after import-overlay)
+        if (-not $order.ContainsKey([string]$a['Group'])) { $a['Group'] = 'OTHR' }
+        $p = ConvertTo-KitPackage $a $order 'mine'; $all.Add($p); $ids[$p.Id] = $true
+    }
+    foreach ($p in $all) {
+        $k = [string]$p.Id
+        if ($script:Overlay.defaults.ContainsKey($k)) { $p.Default = [bool]$script:Overlay.defaults[$k]; $p.On = $p.Default }
         if ($p.Method -notin 'winget', 'msstore') { continue }
         $hops = 0
         while ($script:Overrides.ContainsKey($p.Ref) -and $hops -lt 5) {
@@ -82,15 +117,251 @@ function Initialize-Kit {
             $hops++
         }
     }
-    return $script:Catalog
+    $removed = @($script:Overlay.removed)
+    $script:Catalog = @($all | Where-Object { $removed -notcontains $_.Id })
+    $script:Removed = @($all | Where-Object { $removed -contains $_.Id })
 }
 
 function Get-KitVersion { return $script:KitVersion }
 function Get-KitGroups { return $script:Groups }
 function Get-KitCatalog { return $script:Catalog }
+function Get-KitRemovedPackages { return $script:Removed }
+function Get-KitWarnings { return @($script:Warnings) }
 function Get-KitLogPath { return $script:LogPath }
 function Get-KitOverrideCount { return $script:Overrides.Count }
 
+# ---------------------------------------------------------------- my-packages.json (overlay)
+# Daniel's live edits to the package list. Lives next to install.ps1, so it syncs
+# to every PC through OneDrive; gitignored; publish.ps1 never touches it.
+# Schema 1:
+#   { "schema": 1, "lastId": 61,
+#     "added":    [ { "Id": 59, "Name": "...", "Group": "UTIL", "On": true, "Method": "winget", "Ref": "Pub.App", "Desc": "..." } ],
+#     "removed":  [ 26, 59 ],                 # hidden, restorable
+#     "defaults": { "12": false, "34": true }, # default on/off overrides by Id
+#     "groups":   [ { "Key": "MY1", "Label": "My tools", "Letter": "F" } ] }
+
+$script:OverlayMethods = @('winget', 'msstore', 'script', 'direct', 'npm', 'builtin')
+$script:OverlayMemoryOnly = $false
+$script:Overlay = $null
+$script:Removed = @()
+$script:Warnings = [System.Collections.Generic.List[string]]::new()
+
+function New-KitOverlay {
+    return @{ schema = 1; lastId = 0; added = [System.Collections.Generic.List[hashtable]]::new(); removed = [System.Collections.Generic.List[int]]::new(); defaults = @{}; groups = [System.Collections.Generic.List[hashtable]]::new() }
+}
+
+function Read-KitOverlay {
+    <# Parse my-packages.json; a missing file = empty overlay; a corrupt one = warning + .bak copy + empty overlay. #>
+    $o = New-KitOverlay
+    $path = $script:OverlayPath
+    if (-not (Test-Path -LiteralPath $path)) { return $o }
+    try {
+        $j = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ($null -eq $j -or $null -eq $j.PSObject.Properties['schema']) { throw 'no "schema" field' }
+        if ([int]$j.schema -gt 1) {
+            # Written by a newer kit: use nothing, change nothing
+            $script:Warnings.Add("my-packages.json uses schema $($j.schema), newer than this kit understands - ignored and left untouched.")
+            $script:OverlayMemoryOnly = $true
+            return $o
+        }
+        if ($j.PSObject.Properties['lastId']) { $o.lastId = [int]$j.lastId }
+        foreach ($a in @($j.added)) {
+            if ($null -eq $a) { continue }
+            $h = @{}; foreach ($pr in $a.PSObject.Properties) { $h[$pr.Name] = $pr.Value }
+            if (-not ($h['Id'] -as [int]) -or -not $h['Name'] -or -not $h['Ref'] -or $script:OverlayMethods -notcontains $h['Method']) {
+                $script:Warnings.Add("my-packages.json: skipped an invalid added package ($($h['Name']))."); continue
+            }
+            $h['Id'] = [int]$h['Id']; if (-not $h['Group']) { $h['Group'] = 'OTHR' }; $h['On'] = [bool]$h['On']
+            $o.added.Add($h)
+        }
+        foreach ($r in @($j.removed)) { if ($r -as [int]) { $o.removed.Add([int]$r) } }
+        if ($j.PSObject.Properties['defaults'] -and $j.defaults) { foreach ($pr in $j.defaults.PSObject.Properties) { $o.defaults[[string]$pr.Name] = [bool]$pr.Value } }
+        foreach ($g in @($j.groups)) {
+            if ($null -eq $g -or -not $g.Key -or -not $g.Label) { continue }
+            $o.groups.Add(@{ Key = [string]$g.Key; Label = [string]$g.Label; Letter = [string]$g.Letter })
+        }
+        return $o
+    } catch {
+        $bak = "$path.bak"
+        try { Copy-Item -LiteralPath $path -Destination $bak -Force } catch {}
+        $script:Warnings.Add("my-packages.json could not be read ($($_.Exception.Message)). Using the base list; the file was copied to my-packages.json.bak.")
+        return (New-KitOverlay)
+    }
+}
+
+function Set-KitOverlayMemoryOnly {
+    <# Dry run: overlay edits stay in memory for this session only. #>
+    param([bool]$On = $true)
+    $script:OverlayMemoryOnly = $On
+}
+
+function Get-KitOverlayInfo {
+    return [pscustomobject]@{
+        Path = $script:OverlayPath; Exists = (Test-Path -LiteralPath $script:OverlayPath); MemoryOnly = $script:OverlayMemoryOnly
+        Added = $script:Overlay.added.Count; Removed = $script:Overlay.removed.Count; Defaults = $script:Overlay.defaults.Count
+        Groups = $script:Overlay.groups.Count; Changes = ($script:Overlay.added.Count + $script:Overlay.removed.Count + $script:Overlay.defaults.Count)
+        Warnings = @($script:Warnings)
+    }
+}
+
+function Save-KitOverlay {
+    <# Atomic write: temp file + replace (previous version kept as .bak). Returns 'saved' or 'memory'. #>
+    if ($script:OverlayMemoryOnly) { Update-KitCatalog; return 'memory' }
+    $o = $script:Overlay
+    $doc = [ordered]@{
+        schema = 1
+        lastId = $o.lastId
+        added = @($o.added | ForEach-Object { $h = $_; $x = [ordered]@{}; foreach ($k in 'Id', 'Name', 'Group', 'On', 'Method', 'Ref', 'Desc') { if ($h.ContainsKey($k)) { $x[$k] = $h[$k] } }; foreach ($k in ($h.Keys | Sort-Object)) { if (-not $x.Contains($k)) { $x[$k] = $h[$k] } }; $x })
+        removed = @($o.removed | Sort-Object -Unique)
+        defaults = $(if ($o.defaults.Count) { $d = [ordered]@{}; foreach ($k in ($o.defaults.Keys | Sort-Object { [int]$_ })) { $d[$k] = [bool]$o.defaults[$k] }; $d } else { [ordered]@{} })
+        groups = @($o.groups | ForEach-Object { [ordered]@{ Key = $_.Key; Label = $_.Label; Letter = $_.Letter } })
+    }
+    $json = ConvertTo-Json -InputObject $doc -Depth 6
+    $path = $script:OverlayPath
+    $tmp = "$path.tmp"
+    [IO.File]::WriteAllText($tmp, $json, [Text.UTF8Encoding]::new($false))
+    if (Test-Path -LiteralPath $path) {
+        try { [IO.File]::Replace($tmp, $path, "$path.bak") }
+        catch { Copy-Item -LiteralPath $path -Destination "$path.bak" -Force; Move-Item -LiteralPath $tmp -Destination $path -Force }
+    } else {
+        Move-Item -LiteralPath $tmp -Destination $path -Force
+    }
+    Update-KitCatalog
+    return 'saved'
+}
+
+function Get-KitNextId {
+    <# Above every Id ever used: base, retired, added, removed, and the overlay's high-water mark. #>
+    $max = [int]$script:Overlay.lastId
+    foreach ($h in $script:BaseData.Packages) { if ([int]$h['Id'] -gt $max) { $max = [int]$h['Id'] } }
+    foreach ($r in @($script:BaseData['RetiredIds'])) { if ($r -and [int]$r -gt $max) { $max = [int]$r } }
+    foreach ($a in $script:Overlay.added) { if ([int]$a['Id'] -gt $max) { $max = [int]$a['Id'] } }
+    foreach ($r in $script:Overlay.removed) { if ($r -gt $max) { $max = $r } }
+    return $max + 1
+}
+
+function Add-KitPackage {
+    <#
+    Add a package to the overlay. -Group = existing group key, or -NewGroupLabel
+    to create a group. Returns @{ Ok; Message; Package; Saved }.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Ref,
+        [ValidateSet('winget', 'msstore')][string]$Method = 'winget',
+        [string]$Group = 'OTHR', [string]$NewGroupLabel = '', [bool]$On = $false, [string]$Desc = ''
+    )
+    $dup = @($script:Catalog + $script:Removed | Where-Object { $_.Ref -eq $Ref -and $_.Method -eq $Method })
+    if ($dup.Count) {
+        $where = if ($script:Removed -contains $dup[0]) { ' (it is in the removed list - restore it instead)' } else { '' }
+        return @{ Ok = $false; Message = "$Ref is already in the list as '$($dup[0].Name)'$where."; Package = $null; Saved = '' }
+    }
+    if ($NewGroupLabel) {
+        $n = 1; while (@($script:Groups | Where-Object Key -eq "MY$n").Count) { $n++ }
+        $used = @($script:Groups | ForEach-Object Letter)
+        $letter = @('F', 'H', 'J', 'K', 'V', 'Y') | Where-Object { $used -notcontains $_ } | Select-Object -First 1
+        if (-not $letter) { $letter = '' }
+        $Group = "MY$n"
+        $script:Overlay.groups.Add(@{ Key = $Group; Label = $NewGroupLabel; Letter = $letter })
+    } elseif (-not @($script:Groups | Where-Object Key -eq $Group).Count) {
+        return @{ Ok = $false; Message = "Unknown group '$Group'."; Package = $null; Saved = '' }
+    }
+    $id = Get-KitNextId
+    if (-not $Desc) { $Desc = "Added from winget ($Ref)" }
+    $script:Overlay.added.Add(@{ Id = $id; Name = $Name; Group = $Group; On = $On; Method = $Method; Ref = $Ref; Desc = $Desc })
+    $script:Overlay.lastId = $id
+    $saved = Save-KitOverlay
+    return @{ Ok = $true; Message = "Added $Name (Id $id)."; Package = @($script:Catalog | Where-Object Id -eq $id)[0]; Saved = $saved }
+}
+
+function Set-KitPackageDefault {
+    <# Recommended-set membership (default on/off) for one package. Returns 'saved' or 'memory'. #>
+    param([Parameter(Mandatory)][int]$Id, [Parameter(Mandatory)][bool]$On)
+    $added = @($script:Overlay.added | Where-Object { [int]$_['Id'] -eq $Id })
+    if ($added.Count) { $added[0]['On'] = $On; [void]$script:Overlay.defaults.Remove([string]$Id) }
+    else {
+        $base = @($script:BaseData.Packages | Where-Object { [int]$_['Id'] -eq $Id })
+        if (-not $base.Count) { throw "no package with Id $Id" }
+        if ([bool]$base[0]['On'] -eq $On) { [void]$script:Overlay.defaults.Remove([string]$Id) } else { $script:Overlay.defaults[[string]$Id] = $On }
+    }
+    return Save-KitOverlay
+}
+
+function Remove-KitPackage {
+    <# Hide a package from both menus (restorable). Returns 'saved' or 'memory'. #>
+    param([Parameter(Mandatory)][int]$Id)
+    if (-not $script:Overlay.removed.Contains($Id)) { $script:Overlay.removed.Add($Id) }
+    $r = [int]$script:Overlay.lastId; if ($Id -gt $r) { $script:Overlay.lastId = $Id }
+    return Save-KitOverlay
+}
+
+function Restore-KitPackage {
+    param([Parameter(Mandatory)][int]$Id)
+    [void]$script:Overlay.removed.Remove($Id)
+    return Save-KitOverlay
+}
+
+function Reset-KitOverlay {
+    <#
+    Drop every change (a copy of the file stays as my-packages.json.bak). If Ids
+    above the base catalogue were ever handed out, a minimal file keeps only that
+    high-water mark ("lastId"), so a later add never reuses an old Id.
+    Returns 'saved' or 'memory'.
+    #>
+    $keep = [int]$script:Overlay.lastId
+    $script:Overlay = New-KitOverlay
+    if ($script:OverlayMemoryOnly) { Update-KitCatalog; return 'memory' }
+    if (Test-Path -LiteralPath $script:OverlayPath) {
+        Copy-Item -LiteralPath $script:OverlayPath -Destination "$($script:OverlayPath).bak" -Force
+        Remove-Item -LiteralPath $script:OverlayPath -Force
+    }
+    $baseMax = 0; foreach ($h in $script:BaseData.Packages) { if ([int]$h['Id'] -gt $baseMax) { $baseMax = [int]$h['Id'] } }
+    if ($keep -gt $baseMax) { $script:Overlay.lastId = $keep; [void](Save-KitOverlay) }
+    Update-KitCatalog
+    return 'saved'
+}
+function Find-KitWingetPackages {
+    <# winget search in the winget and msstore sources: Name, Id, Version, Source (read-only). #>
+    param([Parameter(Mandatory)][string]$Query, [int]$Max = 25)
+    $res = [System.Collections.Generic.List[object]]::new()
+    if (-not (Test-KitWinget)) { return @() }
+    foreach ($src in 'winget', 'msstore') {
+        $raw = @(Get-KitWingetRaw @('search', $Query, '--source', $src, '--accept-source-agreements', '--disable-interactivity'))
+        $sep = -1
+        for ($j = 0; $j -lt $raw.Count; $j++) { if ($raw[$j] -match '^-{4,}') { $sep = $j; break } }
+        if ($sep -lt 1) { continue }
+        $hdr = $raw[$sep - 1]
+        $iId = $hdr.IndexOf('Id'); $iVer = $hdr.IndexOf('Version')
+        $iNext = @($hdr.IndexOf('Match'), $hdr.IndexOf('Source'), $hdr.Length) | Where-Object { $_ -gt $iVer } | Sort-Object | Select-Object -First 1
+        if ($iId -lt 1 -or $iVer -le $iId) { continue }
+        $n = 0
+        for ($j = $sep + 1; $j -lt $raw.Count -and $n -lt $Max; $j++) {
+            $ln = $raw[$j]
+            if ($ln.Length -le $iId -or -not $ln.Trim()) { continue }
+            $id = $ln.Substring($iId, [Math]::Min($iVer - $iId, $ln.Length - $iId)).Trim()
+            if (-not $id) { continue }
+            $ver = if ($ln.Length -gt $iVer) { $ln.Substring($iVer, [Math]::Min($iNext - $iVer, $ln.Length - $iVer)).Trim() } else { '' }
+            $res.Add([pscustomobject]@{ Name = $ln.Substring(0, $iId).Trim(); Id = $id; Version = $ver; Source = $src })
+            $n++
+        }
+    }
+    return @($res)
+}
+
+function Test-KitWingetId {
+    <# Exact winget (then Store) Id lookup: @{ Name; Id; Version; Source } or $null. Read-only. #>
+    param([Parameter(Mandatory)][string]$Id)
+    if (-not (Test-KitWinget)) { return $null }
+    foreach ($src in 'winget', 'msstore') {
+        $raw = @(Get-KitWingetRaw @('show', '--id', $Id, '--exact', '--source', $src, '--accept-source-agreements', '--disable-interactivity'))
+        $found = $raw | Where-Object { $_ -match '^Found (.+) \[(.+)\]\s*$' } | Select-Object -First 1
+        if ($found -and $found -match '^Found (.+) \[(.+)\]\s*$') {
+            $name = $Matches[1]; $fid = $Matches[2]
+            $ver = ''; foreach ($l in $raw) { if ($l -match '^\s*Version:\s*(\S+)') { $ver = $Matches[1]; break } }
+            return [pscustomobject]@{ Name = $name; Id = $fid; Version = $ver; Source = $src }
+        }
+    }
+    return $null
+}
 function Get-KitRunOrder {
     <# Selected packages in install order: catalogue group order, POST always last. #>
     param([object[]]$Packages)
@@ -323,7 +594,7 @@ function Get-KitPkgVersion {
     if (-not $WId) { return $null }
     $la = @('list', '--id', $WId, '--exact', '--disable-interactivity', '--accept-source-agreements')
     if ($Method -eq 'msstore') { $la += @('--source', 'msstore') }
-    $raw = Get-KitWingetRaw $la
+    $raw = @(Get-KitWingetRaw $la)
     $sep = -1
     for ($j = 0; $j -lt $raw.Count; $j++) { if ($raw[$j] -match '^-{4,}') { $sep = $j; break } }
     if ($sep -lt 1 -or ($sep + 1) -ge $raw.Count) { return $null }
@@ -398,7 +669,7 @@ function Get-KitPkgVersions {
     param([string]$WId, [string]$Method)
     $va = @('show', '--id', $WId, '--exact', '--versions', '--disable-interactivity', '--accept-source-agreements')
     if ($Method -eq 'msstore') { $va += @('--source', 'msstore') }
-    $raw = Get-KitWingetRaw $va
+    $raw = @(Get-KitWingetRaw $va)
     $sep = -1
     for ($j = 0; $j -lt $raw.Count; $j++) { if ($raw[$j] -match '^-{4,}') { $sep = $j; break } }
     if ($sep -lt 0 -or ($sep + 1) -ge $raw.Count) { return @() }
@@ -476,7 +747,7 @@ function Get-KitUpdates {
     $res = @{}
     $avail = @{}
     if (Test-KitWinget) {
-        $raw = Get-KitWingetRaw @('upgrade', '--accept-source-agreements', '--disable-interactivity')
+        $raw = @(Get-KitWingetRaw @('upgrade', '--accept-source-agreements', '--disable-interactivity'))
         $sep = -1
         for ($j = 0; $j -lt $raw.Count; $j++) { if ($raw[$j] -match '^-{4,}') { $sep = $j; break } }
         if ($sep -ge 1) {
@@ -835,7 +1106,9 @@ function Remove-KitNewShortcuts {
     return $removed
 }
 
-Export-ModuleMember -Function Initialize-Kit, Get-KitVersion, Get-KitUpdates, Get-KitGroups, Get-KitCatalog, Get-KitLogPath, Get-KitOverrideCount,
+Export-ModuleMember -Function Initialize-Kit, Get-KitVersion, Get-KitUpdates, Get-KitGroups, Get-KitRemovedPackages, Get-KitWarnings,
+    Set-KitOverlayMemoryOnly, Get-KitOverlayInfo, Add-KitPackage, Set-KitPackageDefault, Remove-KitPackage, Restore-KitPackage,
+    Reset-KitOverlay, Get-KitNextId, Find-KitWingetPackages, Test-KitWingetId, Get-KitCatalog, Get-KitLogPath, Get-KitOverrideCount,
     Get-KitRunOrder, Test-KitAdmin, Test-KitWinget, Get-KitArch, Update-KitPath, Start-KitLog, Write-KitLog, Write-KitRunLog,
     Get-KitState, Save-KitState, Get-KitInstalled, Get-KitToolVersion, Get-KitVersionText, Resolve-KitDirect,
     Test-KitVersionCurrent, Get-KitLatestVersion, Invoke-KitPackage, Get-KitDesktopShortcuts, Remove-KitNewShortcuts

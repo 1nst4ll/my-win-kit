@@ -12,7 +12,8 @@
 | [STATUS.md](STATUS.md) | Every volatile fact: counts, last publish, open bugs, next step. | How it works. |
 | [CHANGELOG.md](CHANGELOG.md) | Dated history, append-only. | Current state. |
 | architecture.md (this) | How the loader, menus, engine, publish and CI work. | Counts, history. |
-| [src/catalog.psd1](../src/catalog.psd1) | The app catalogue (names, methods, IDs/URLs, groups, defaults, detection) and the direct-download rules. | Never copy it into docs. |
+| [src/catalog.psd1](../src/catalog.psd1) | The **base** app catalogue (names, methods, IDs/URLs, groups, defaults, detection), `RetiredIds`, and the direct-download rules. Changed only in the repo. | Never copy it into docs. Daniel's live edits (next row). |
+| `my-packages.json` next to install.ps1 (the OneDrive copy; gitignored) | Daniel's **live edits** to the package list from Settings → Manage packages: added packages, removed Ids, default on/off overrides, new groups. Syncs to every PC through OneDrive; core.psm1 merges it over the base, so both menus see the same list. Never written by publish or git. See [Package list = base + overlay](#package-list--base--overlay-my-packagesjson). | The base list. Fold it into the repo with `tools/import-overlay.ps1`. |
 | `$script:Fixes` in [win11-tweaks.ps1](../win11-tweaks.ps1#L87) | The tweak catalogue (registry keys, apply/check/revert). | |
 
 ## Repo layout and delivery
@@ -165,6 +166,42 @@ picker, `Show-Picker`, built on `[Console]::ReadKey`.
   the keys to the picker; it forces dry run and locks it on, and prints `SCREEN-HEIGHTS: name=rows; ...` on exit
   so tests can prove every screen fits 30 rows.
 
+## Package list = base + overlay (my-packages.json)
+
+**Decision (2026-11-25):** the kit runs from `OneDrive\[98] Shortcuts` on every PC and publish is one-way
+repo → OneDrive with a drift guard, so the menu must never edit `src/catalog.psd1`. Daniel's changes go to a user
+overlay, `my-packages.json` next to `install.ps1` (same pattern as `winget-id-overrides.json`): it syncs to every PC
+through OneDrive, is gitignored, and `publish.ps1` never touches it (`$Protected`, tested). Base = the curated
+catalogue in the repo; overlay = Daniel's live changes.
+
+- **Schema 1:** `{ "schema": 1, "lastId": N, "added": [ {Id, Name, Group, On, Method, Ref, Desc} ], "removed": [Ids],
+  "defaults": { "<Id>": true|false }, "groups": [ {Key, Label, Letter} ] }`.
+- **Merge (`Update-KitCatalog`, run at load and after every change):** base groups + overlay groups (new groups go
+  before POST); base packages + added packages (an added Id that exists in the base is ignored: base wins, e.g.
+  after an import); default overrides applied; removed Ids are hidden from the catalogue and listed by
+  `Get-KitRemovedPackages` for restore; winget-ID heals applied last.
+- **Ids are never reused:** a new package gets max(base Ids, `RetiredIds`, added, removed, `lastId`) + 1.
+  "Reset my changes" keeps only `lastId` when Ids above the base were handed out.
+- **Writes are atomic:** temp file + `[IO.File]::Replace` (previous version → `my-packages.json.bak`).
+- **Robust reads:** missing file = no changes. Unreadable file = warning on screen and in the run log, base list,
+  the file copied to `.bak` (the next save replaces it). A newer schema = ignored and never overwritten
+  (read-only for the session). Invalid entries are skipped with a warning.
+- **Dry run:** `Set-KitOverlayMemoryOnly` - edits stay in memory for the session and every Manage screen says so.
+- **API (core.psm1):** `Add-KitPackage`, `Set-KitPackageDefault`, `Remove-KitPackage`, `Restore-KitPackage`,
+  `Reset-KitOverlay`, `Get-KitOverlayInfo`, `Find-KitWingetPackages` (`winget search` in the winget and msstore
+  sources), `Test-KitWingetId` (exact Id, winget then Store).
+- **UI (modern menu only):** Settings → Manage packages. A header line shows where changes are saved (or the dry-run
+  notice). Package list (by group, default `● on` / `○ off`, installed badge, method, "added by you"):
+  Space/Enter toggles the default, `d`/Del removes after a confirm, `/` filters. Add a package: search box →
+  `winget search` results (name · Id · version · source, "√ in the list" marked) → group (existing or new) →
+  default on/off → saved. Add by exact winget ID. Removed packages (Enter restores). Reset my changes (confirm).
+  Esc goes back one level everywhere. The classic menu just uses the merged list (new groups get a neutral icon).
+- **Making changes permanent:** `tools/import-overlay.ps1` folds the overlay into `src/catalog.psd1` with text
+  edits that keep comments: default overrides → `On =`, removed → line deleted + Id into `RetiredIds`, new groups
+  before POST, added packages above the Post-install section (ASCII-only names). It validates the result before
+  replacing the file. Safe order: import → `test-core.ps1` → commit on `main` (publishes) → `-ClearOverlay`
+  (renames the overlay to `my-packages.imported-<date>.json`).
+
 ## Run log (which front-end ran)
 
 One file per run in `%LOCALAPPDATA%\my-win-kit\logs\run-<date>-<pid>.log` (newest 30 kept; `MYWINKIT_STATE_DIR`
@@ -222,8 +259,9 @@ All tests run the kit in dry-run mode; nothing installs.
 | `tools/test-core.ps1` | 5.1 + pwsh | catalogue sanity (unique Ids/names, groups, methods, DEV/POST off, POST interactive), dry run of every package, version compare; `-Online` adds the installed scan and vendor-page resolution |
 | `tools/smoke-tui.ps1` | pwsh | the Spectre menu driven by scripted keys: install flow, search, AI table, settings + tweaks (+ "update all" when an AI tool is installed, local only) |
 | `tools/smoke-loader.ps1` | 5.1 | loader decisions (pwsh present / absent / forced classic), declining and dry-run accepting the PowerShell 7 install, a classic-menu run |
+| `tools/test-overlay.ps1` | 5.1 + pwsh | overlay on a scratch kit copy: add (Id, atomic write), defaults, remove/restore, Ids never reused, memory-only, corrupt + newer-schema files, reset, classic menu with an overlay, publish leaving it alone, import-overlay; `-Online` adds a real winget search + Id lookup |
 | `tools/render-screens.ps1 -OutDir <dir>` | pwsh (+5.1 for classic) | not a test: captures every screen as `.txt` (layout) and truecolor `.ans` (view with `Get-Content x.ans -Raw` in Windows Terminal) at 120 × 30, and prints the main-menu height |
 
-`.github/workflows/lint.yml` runs two jobs on `windows-latest`: **ps51** (parse, test-core, smoke-loader) and
-**pwsh** (lint, test-core -Online, install PwshSpectreConsole, smoke-tui). `$KnownIssues` in `lint.ps1`
+`.github/workflows/lint.yml` runs two jobs on `windows-latest`: **ps51** (parse, test-core, smoke-loader, test-overlay) and
+**pwsh** (lint, test-core -Online, test-overlay -Online, install PwshSpectreConsole, smoke-tui). `$KnownIssues` in `lint.ps1`
 downgrades listed findings to warnings; it is empty.

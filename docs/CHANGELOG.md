@@ -2,6 +2,25 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-25: Manage packages, kit v2.2.0 (branch `rebuild-tui`, not merged yet)
+
+- Daniel's request: "add setting section where we can manage lists of packages (remove or search for and add
+  packages) and mark defaults as on/off".
+- **Decision (coordinator):** the menu never edits `src/catalog.psd1` (the kit runs from OneDrive and publish is
+  one-way). Edits go to a user overlay, `my-packages.json` next to install.ps1: synced to every PC by OneDrive,
+  gitignored, protected in publish.ps1. core.psm1 merges base + overlay, so both menus see the same list.
+- **Settings → Manage packages:** package list with default on/off (Space), remove with confirm (`d`/Del),
+  `/` filter; add by `winget search` (winget + Store) or by exact winget ID, into an existing or new group, on/off;
+  removed packages (restore); reset my changes. Header shows where changes are saved; dry run keeps them in
+  memory and says so. Esc back everywhere; every screen fits 120 x 30.
+- **Overlay:** schema 1, atomic writes (`.bak` kept), corrupt file -> warning + base list + `.bak`, newer schema ->
+  ignored and untouched, Ids never reused (`lastId`, `RetiredIds`).
+- **tools/import-overlay.ps1** folds the overlay into the catalogue (defaults, removals -> `RetiredIds`, new
+  groups, added packages), validates, optional `-ClearOverlay`.
+- **Fixed (latent):** `Get-KitWingetRaw` results are now always arrays; a one-line winget reply threw under
+  StrictMode (`.Count` on a string).
+- Tests: `tools/test-overlay.ps1` (29 checks + 3 online winget checks; 5.1 and pwsh, scratch kit), 3 new smoke scenarios
+  incl. a real winget search/add saved into a scratch kit, CI runs both.
 ## 2026-11-25: universal back + visible modern mode (branch `rebuild-tui`, not merged yet)
 
 - Daniel's test feedback: "There's no way how to go back. When you get to updates, you can't go back to main

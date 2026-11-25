@@ -83,6 +83,11 @@ Front door: [README.md](README.md). Docs index and ownership map: [docs/architec
   After changing the picker or console set-up, check a real 120 × 30 conhost window too (launch
   `conhost.exe powershell.exe -File install.ps1 -DryRun`, drive it, screenshot). Any key-sending helper must find
   the kit window by title and abort if it can't; never send keys blind.
+- **The menu never edits `src/catalog.psd1`.** Daniel's package-list edits go to `my-packages.json` (overlay next
+  to install.ps1, synced by OneDrive, gitignored, protected in publish.ps1). Only `tools/import-overlay.ps1` moves
+  them into the repo. App Ids are never reused: removed ones go to `RetiredIds`; the overlay keeps `lastId`.
+- **Tests that save the overlay use a scratch copy of the kit** (`test-overlay.ps1`, the real-save smoke
+  scenario with `MYWINKIT_TEST_ALLOW_SAVE=1`), never the repo root or OneDrive.
 - **Prove which front-end ran from the run log** (`%LOCALAPPDATA%\my-win-kit\logs`), not from how the screen looks.
 - `win11-tweaks.ps1` uses StrictMode + `Stop`. `core.psm1` uses `Set-StrictMode -Version 2.0`: read optional
   catalogue keys with the indexer (`$h['Key']`), not `$h.Key`, or StrictMode throws.
@@ -95,6 +100,7 @@ powershell -File tools/lint.ps1 -ParseOnly                       # parse under W
 powershell -File tools/test-core.ps1                             # catalogue + engine (add -Online for scan + vendor pages)
 pwsh -File tools/smoke-tui.ps1                                   # Spectre menu, scripted keys
 powershell -ExecutionPolicy Bypass -File tools/smoke-loader.ps1  # loader decisions + classic menu
+powershell -ExecutionPolicy Bypass -File tools/test-overlay.ps1 -Online   # package-list overlay on a scratch kit
 pwsh -File tools/render-screens.ps1 -OutDir <dir>                # capture every screen (.txt + truecolor .ans)
 ```
 

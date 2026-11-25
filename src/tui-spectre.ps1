@@ -262,6 +262,7 @@ function Show-Banner {
     if ($script:DryRunOn) { $s += "  [#282828 on $($Hex.Purple) bold] $($Glyph.Dry) DRY RUN [/]" }
     Say $s
     Show-DryRunBand
+    foreach ($w in (Get-KitWarnings)) { Say " [$($Hex.Red)]$($Glyph.Warn) $(E $w)[/]" }
     Say ''
 }
 
@@ -321,19 +322,23 @@ function Show-Picker {
         [switch]$Search,
         [switch]$StartSearch,
         [string]$QuitKey = '',
-        [switch]$NoBack
+        [switch]$NoBack,
+        [string[]]$ReturnKeys = @(),   # extra keys (ConsoleKey names or characters) returned as Action = key
+        [int]$Cursor = -1,             # start position (screens that loop keep their place)
+        [string]$Filter = '',
+        [string[]]$Hints = @()         # replaces the default key hints
     )
     $sel = @{}
     foreach ($it in $Items) { if ($it.On) { $sel[$it.Key] = $true } }
     $searching = [bool]$StartSearch
-    $filter = ''
+    $filter = $Filter
     $width = (Get-WindowWidth) - 1
     $fixed = $Title.Count + $Pinned.Count + 3        # + "more" line + 2 footer lines
     $room = (Get-WindowHeight) - (Get-LinesUsed) - 1
     $rows = [Math]::Max(3, [Math]::Min($Items.Count, $room - $fixed))
     $reserve = $fixed + $rows
     $start = -1
-    $cursor = if ($Items.Count) { $Pinned.Count } else { 0 }   # first real item
+    $cursor = if ($Cursor -ge 0) { $Cursor } elseif ($Items.Count) { $Pinned.Count } else { 0 }   # first real item
     $offset = 0
     $first = $true
 
@@ -380,7 +385,8 @@ function Show-Picker {
             $lines.Add("[$($Hex.Orange) bold]  / [/][$($Hex.Fg)]$(E $filter)[/][$($Hex.Orange)]$($Glyph.Full)[/]  $(Get-KeyHint @('type|filter', 'enter|done', 'esc|clear'))")
         } else {
             $hint = @("$($Glyph.Up)$($Glyph.Down)|move")
-            if ($Multi) { $hint += @('space|toggle', 'a/n|group all/none', '/|search', 'enter|continue') }
+            if ($Hints.Count) { $hint += $Hints }
+            elseif ($Multi) { $hint += @('space|toggle', 'a/n|group all/none', '/|search', 'enter|continue') }
             else { $hint += 'enter|select'; if ($Search) { $hint += '/|search' } }
             if (-not $NoBack) { $hint += 'esc|back' }
             if ($QuitKey) { $hint += "$QuitKey|quit" }
@@ -434,11 +440,15 @@ function Show-Picker {
             continue
         }
         if ($QuitKey -and "$kc" -eq $QuitKey) { return @{ Action = 'quit'; Key = $null; Selected = @() } }
+        if ($ReturnKeys.Count -and $curItem -and ($ReturnKeys -contains [string]$k.Key -or ($kc -and [int]$kc -ge 32 -and $ReturnKeys -contains "$kc"))) {
+            $name = if ($ReturnKeys -contains [string]$k.Key) { [string]$k.Key } else { "$kc" }
+            return @{ Action = 'key'; KeyName = $name; Key = $curItem.Key; Selected = @(); Cursor = $cursor; Filter = $filter }
+        }
         if ("$kc" -eq '/' -and ($Multi -or $Search)) { $searching = $true; continue }
         if ($k.Key -eq 'Enter' -or ($k.Key -eq 'Spacebar' -and $cursor -lt $Pinned.Count)) {
             if ($cursor -lt $Pinned.Count) { return @{ Action = 'pinned'; Key = $Pinned[$cursor].Key; Selected = @($sel.Keys) } }
             if ($Multi) { return @{ Action = 'ok'; Key = $null; Selected = @($sel.Keys) } }
-            if ($curItem) { return @{ Action = 'select'; Key = $curItem.Key; Selected = @() } }
+            if ($curItem) { return @{ Action = 'select'; Key = $curItem.Key; Selected = @(); Cursor = $cursor; Filter = $filter } }
             continue
         }
         if ($Multi -and $curItem) {
@@ -457,6 +467,33 @@ function Show-Picker {
                 continue
             }
         }
+    }
+}
+
+function Read-KitText {
+    <# One-line text input with the same key rules: Enter = done, Esc = back ($null). #>
+    param([string]$Prompt, [string]$Hint = '', [string]$Default = '')
+    $text = $Default
+    $start = -1; $first = $true
+    while ($true) {
+        $lines = @(
+            "[$($Hex.Fg) bold]$(E $Prompt)[/]"
+            "[$($Hex.Orange) bold]  > [/][$($Hex.Fg)]$(E $text)[/][$($Hex.Orange)]$($Glyph.Full)[/]"
+            $(if ($Hint) { "[$($Hex.Gray)]  $(E $Hint)[/]" } else { '' })
+            '  ' + (Get-KeyHint @('type|text', 'enter|done', 'esc|back'))
+        )
+        if ($script:Test) { if ($first) { $script:Heights.Add("$($script:ScreenName)=$((Get-LinesUsed) + $lines.Count)") } }
+        else {
+            if ($start -lt 0) { [Console]::Write("`n" * ($lines.Count + 1)); $start = [Math]::Max(0, [Console]::CursorTop - $lines.Count - 1) }
+            [Console]::SetCursorPosition(0, $start); [Console]::Write("$([char]27)[J")
+        }
+        foreach ($l in $lines) { Say (Limit-Markup $l ((Get-WindowWidth) - 1)) }
+        $first = $false
+        $k = Read-KitKey
+        if ($k.Key -eq 'Enter') { return $text.Trim() }
+        if ($k.Key -eq 'Escape') { return $null }
+        if ($k.Key -eq 'Backspace') { if ($text) { $text = $text.Substring(0, $text.Length - 1) } else { return $null }; continue }
+        if ($k.KeyChar -and [int]$k.KeyChar -ge 32) { $text += $k.KeyChar }
     }
 }
 
@@ -512,8 +549,14 @@ function Get-MethodLabel($p) {
     }
 }
 
+function Get-GroupStyle([string]$Key) {
+    <# Groups added in my-packages.json have no style of their own: neutral fallback. #>
+    if ($script:GroupStyle.ContainsKey($Key)) { return $script:GroupStyle[$Key] }
+    return @{ Icon = $script:Glyph.Bullet; Color = '#a89984' }
+}
+
 function Get-GroupLabel($g) {
-    $s = $script:GroupStyle[$g.Key]
+    $s = Get-GroupStyle $g.Key
     return "[$($s.Color) bold]$($s.Icon) $(E $g.Label.ToUpper())[/]"
 }
 
@@ -560,7 +603,7 @@ function Get-LegendMarkup {
     return "[$($Hex.Green)]$($Glyph.Ok) installed[/]  [$($Hex.Yellow)]$($Glyph.Up) update[/]  [$($Hex.Gray)]$($Glyph.Not) not installed[/]  [$($Hex.Red)]$($Glyph.Fail) failed[/]  [$($Hex.Aqua)]$($Glyph.Heal) healed[/]"
 }
 
-function Invoke-Scan([switch]$Updates) {
+function Invoke-Scan([switch]$Updates, [switch]$KeepScanFlag) {
     $script:Installed = @{}; $script:Updates = @{}
     $st = [Spectre.Console.AnsiConsole]::Status()
     $st.Spinner = [Spectre.Console.Spinner+Known]::Point
@@ -573,7 +616,7 @@ function Invoke-Scan([switch]$Updates) {
             $script:Updates = Get-KitUpdates -Installed $script:Installed
         }
     })
-    $script:ScanDone = $true
+    if (-not $KeepScanFlag) { $script:ScanDone = $true }   # the install screen still wants its update scan
 }
 
 function Get-TrimmedRows([object[]]$Rows, [int]$Max, [scriptblock]$Priority) {
@@ -593,6 +636,9 @@ $script:DryRunOn  = [bool]$DryRun
 $script:Installed = @{}
 $script:Updates   = @{}
 $script:ScanDone  = $false
+# Dry run: package-list edits stay in memory (tests may opt in to real saves into a scratch kit copy)
+if ($script:DryRunOn -and -not ($script:Test -and $env:MYWINKIT_TEST_ALLOW_SAVE -eq '1')) { Set-KitOverlayMemoryOnly $true }
+foreach ($w in (Get-KitWarnings)) { Write-KitRunLog "packages: WARNING $w" }
 
 if (-not (Test-KitWinget) -and -not $script:Test) {
     Show-Header 'winget missing'
@@ -649,7 +695,7 @@ function Show-Review {
                 elseif ($script:Updates.ContainsKey($p.Id)) { "[$($Hex.Yellow)]update[/]" }
                 elseif ($isInst) { "[$($Hex.Aqua)]check for update[/]" }
                 else { "[$($Hex.Green)]install[/]" }
-        $gs = $script:GroupStyle[$p.Group]
+        $gs = (Get-GroupStyle $p.Group)
         Add-KitRow $t @((Get-StateBadge $p), "[$($Hex.Fg)]$(E $p.Name)[/]", "[$($gs.Color)]$($gs.Icon) $(E $gmap[$p.Group].Label)[/]", (Get-MethodLabel $p), (Get-StateText $p), $will)
     }
     $n = $Selection.Count
@@ -707,7 +753,7 @@ function Invoke-Run {
             $overall.MaxValue = $live.Count
             for ($i = 0; $i -lt $live.Count; $i++) {
                 $p = $live[$i]
-                $gs = $script:GroupStyle[$p.Group]
+                $gs = (Get-GroupStyle $p.Group)
                 $name = "[$($gs.Color)]$($gs.Icon)[/] [$($Hex.Fg)]$(E $p.Name)[/]"
                 $task = $ctx.AddTask("$name [$($Hex.Gray)]$(Get-MethodLabel $p)[/]")
                 $task.IsIndeterminate = $true
@@ -932,19 +978,243 @@ function Show-Tweaks {
     }
 }
 
+# ---------------------------------------------------------------- manage packages (Settings)
+# Edits go to my-packages.json next to install.ps1 (synced to every PC by OneDrive),
+# never to src/catalog.psd1. In dry run they stay in memory for this session.
+
+function Update-CatalogView {
+    $script:Catalog = @(Get-KitCatalog)
+    $script:Groups = @(Get-KitGroups)
+}
+
+function Get-OverlayLine {
+    $i = Get-KitOverlayInfo
+    if ($i.MemoryOnly) {
+        $why = if ($script:DryRunOn) { 'DRY RUN' } else { 'read-only' }
+        return "[#282828 on $($Hex.Purple) bold] $why [/] [$($Hex.Purple)]changes stay in memory for this session only - nothing is saved[/]"
+    }
+    return "[$($Hex.Gray)]Saved to[/] [$($Hex.Aqua)]$(E $i.Path)[/] [$($Hex.Gray)]$($Glyph.Dot) syncs to every PC through OneDrive $($Glyph.Dot) $($i.Changes) change(s)[/]"
+}
+
+function Show-ManageHeader([string]$Screen) {
+    Show-Header $Screen
+    Say (Get-OverlayLine)
+    foreach ($w in (Get-KitWarnings)) { Say "[$($Hex.Red)]$($Glyph.Warn) $(E $w)[/]" }
+    Say ''
+}
+
+function Show-Message([string]$Screen, [string]$Markup, [string]$Back = 'Back to Manage packages') {
+    Show-ManageHeader $Screen
+    Say $Markup
+    Say ''
+    Wait-Back $Back
+}
+
+function Get-SavedNote([string]$Saved) {
+    if ($Saved -eq 'memory') { return "[$($Hex.Purple)](dry run: kept in memory only)[/]" }
+    return "[$($Hex.Gray)](saved to my-packages.json)[/]"
+}
+
+function Select-GroupForAdd {
+    <# Existing group (POST excluded) or a new one. Returns @{ Group; NewLabel } or $null. #>
+    $items = foreach ($g in ($script:Groups | Where-Object Key -ne 'POST')) {
+        $n = @($script:Catalog | Where-Object Group -eq $g.Key).Count
+        @{ Key = $g.Key; Label = "$(Get-GroupLabel $g) [$($Hex.Gray)]($n)[/]" }
+    }
+    $items = @($items) + @(@{ Key = '__new'; Label = "[$($Hex.Orange)]+ New group...[/]" })
+    $k = Select-One -Title "[$($Hex.Fg) bold]Which group?[/]" -Items $items
+    if ($k -eq 'back') { return $null }
+    if ($k -eq '__new') {
+        Show-ManageHeader "Add a package $($script:Glyph.Dot) new group"
+        $label = Read-KitText -Prompt 'Name of the new group' -Hint 'for example: My tools'
+        if (-not $label) { return $null }
+        return @{ Group = ''; NewLabel = $label }
+    }
+    return @{ Group = $k; NewLabel = '' }
+}
+
+function Add-FoundPackage($Hit) {
+    <# Group -> default on/off -> save. $Hit = @{ Name; Id; Version; Source }. #>
+    $method = if ($Hit.Source -eq 'msstore') { 'msstore' } else { 'winget' }
+    Show-ManageHeader 'Add a package'
+    Say "  [$($Hex.Fg) bold]$(E $Hit.Name)[/] [$($Hex.Gray)]$(E $Hit.Id) $($Glyph.Dot) $(E $Hit.Version) $($Glyph.Dot) $method[/]"
+    Say ''
+    $g = Select-GroupForAdd
+    if (-not $g) { return }
+    Show-ManageHeader 'Add a package'
+    Say "  [$($Hex.Fg) bold]$(E $Hit.Name)[/] [$($Hex.Gray)]$(E $Hit.Id)[/]"
+    Say ''
+    $d = Select-One -Title "[$($Hex.Fg) bold]In the recommended set?[/]" -Items @(
+        @{ Key = 'off'; Label = "[$($Hex.Gray)]$($Glyph.Off) Off[/] [$($Hex.Gray)]- tick it by hand when needed[/]" }
+        @{ Key = 'on';  Label = "[$($Hex.Green)]$($Glyph.On) On[/] [$($Hex.Gray)]- pre-selected in the recommended set[/]" }
+    )
+    if ($d -eq 'back') { return }
+    $r = Add-KitPackage -Name $Hit.Name -Ref $Hit.Id -Method $method -Group $g.Group -NewGroupLabel $g.NewLabel -On ($d -eq 'on') -Desc "$($Hit.Name) ($method $($Hit.Id))"
+    Write-KitRunLog "packages: add $($Hit.Id) [$method] -> $($r.Message) $($r.Saved)"
+    Update-CatalogView
+    if ($r.Ok) { Show-Message 'Add a package' "  [$($Hex.Green) bold]$($Glyph.Ok) $(E $r.Message)[/] $(Get-SavedNote $r.Saved)" }
+    else { Show-Message 'Add a package' "  [$($Hex.Red)]$($Glyph.Fail) $(E $r.Message)[/]" }
+}
+
+function Show-AddBySearch {
+    Show-ManageHeader 'Add a package'
+    $q = Read-KitText -Prompt 'Search winget and the Microsoft Store for' -Hint 'a name or part of an Id, e.g. "7zip" or "telegram"'
+    if (-not $q) { return }
+    $script:hits = @()
+    $st = [Spectre.Console.AnsiConsole]::Status()
+    $st.Spinner = [Spectre.Console.Spinner+Known]::Point
+    $st.SpinnerStyle = St $Hex.Orange
+    $st.Start("[$($Hex.Fg)]Searching winget and the Store for '$(E $q)'...[/]", [Action[Spectre.Console.StatusContext]] {
+        param($ctx)
+        [void]$ctx   # Spectre passes the StatusContext; not every caller needs it
+        $script:hits = @(Find-KitWingetPackages -Query $q)
+    })
+    Write-KitRunLog "packages: search '$q' -> $($script:hits.Count) hit(s)"
+    if (-not $script:hits.Count) { Show-Message 'Add a package' "  [$($Hex.Yellow)]No results for '$(E $q)'.[/]"; return }
+    $known = @{}; foreach ($p in @($script:Catalog) + @(Get-KitRemovedPackages)) { $known["$($p.Method)|$($p.Ref)"] = $p.Name }
+    $i = 0
+    $items = foreach ($h in $script:hits) {
+        $m = if ($h.Source -eq 'msstore') { 'msstore' } else { 'winget' }
+        $tag = if ($known.ContainsKey("$m|$($h.Id)")) { "  [$($Hex.Green)]$($Glyph.Ok) in the list[/]" } else { '' }
+        New-PickItem "$i" "[$($Hex.Fg)]$(E $h.Name)[/] [$($Hex.Gray)]$($Glyph.Dot)[/] [$($Hex.Aqua)]$(E $h.Id)[/] [$($Hex.Gray)]$($Glyph.Dot) $(E $h.Version) $($Glyph.Dot) $(E $h.Source)[/]$tag" -Text "$($h.Name) $($h.Id)"
+        $i++
+    }
+    Show-ManageHeader "Add a package $($Glyph.Dot) results for '$q'"
+    $r = Show-Picker -Title @("[$($Hex.Fg) bold]$($script:hits.Count) result(s)[/] [$($Hex.Gray)]- pick one to add[/]") -Items @($items) -Pinned @(New-PickItem 'back' "[$($Hex.Gray)]$($Glyph.Left) Back[/]") -Search
+    if ($r.Action -ne 'select') { return }
+    Add-FoundPackage $script:hits[[int]$r.Key]
+}
+
+function Show-AddById {
+    Show-ManageHeader 'Add by exact winget ID'
+    $id = Read-KitText -Prompt 'Exact winget ID' -Hint 'for example: 7zip.7zip (Store product IDs work too, e.g. 9NKSQGP7F2NH)'
+    if (-not $id) { return }
+    $script:found = $null
+    $st = [Spectre.Console.AnsiConsole]::Status()
+    $st.Spinner = [Spectre.Console.Spinner+Known]::Point
+    $st.SpinnerStyle = St $Hex.Orange
+    $st.Start("[$($Hex.Fg)]Looking up '$(E $id)'...[/]", [Action[Spectre.Console.StatusContext]] {
+        param($ctx)
+        [void]$ctx   # Spectre passes the StatusContext; not every caller needs it
+        $script:found = Test-KitWingetId -Id $id
+    })
+    Write-KitRunLog "packages: lookup '$id' -> $(if ($script:found) { $script:found.Name } else { 'not found' })"
+    if (-not $script:found) { Show-Message 'Add by exact winget ID' "  [$($Hex.Yellow)]No package with the exact ID '$(E $id)' in winget or the Store.[/]"; return }
+    Add-FoundPackage $script:found
+}
+
+function Show-PackageList {
+    <# All packages by group: space/enter = default on/off, d/Del = remove (confirm), / = filter. #>
+    $cursor = -1; $filter = ''
+    while ($true) {
+        Show-ManageHeader 'Package list'
+        $items = foreach ($g in $script:Groups) {
+            $members = @($script:Catalog | Where-Object Group -eq $g.Key | Sort-Object Id)
+            if (-not $members) { continue }
+            New-PickItem "g:$($g.Key)" (Get-GroupLabel $g) -Group $g.Key -Header
+            foreach ($p in $members) {
+                $def = if ($p.Default) { "[$($Hex.Green) bold]$($Glyph.On) on [/]" } else { "[$($Hex.Gray)]$($Glyph.Off) off[/]" }
+                $mine = if ($p.Origin -eq 'mine') { "  [$($Hex.Purple)]added by you[/]" } else { '' }
+                New-PickItem "$($p.Id)" "  $def $(Get-StateBadge $p) [$($Hex.Fg)]$(E $p.Name)[/] [$($Hex.Gray)]$(Get-MethodLabel $p)[/]$mine" -Text "$($p.Name) $($p.Ref)" -Group $g.Key
+            }
+        }
+        $on = @($script:Catalog | Where-Object Default).Count
+        $title = @("[$($Hex.Fg) bold]$($script:Catalog.Count) packages[/] [$($Hex.Gray)]$($Glyph.Dot) $on on by default (the recommended set) $($Glyph.Dot) $($Glyph.On) on / $($Glyph.Off) off = default[/]")
+        $r = Show-Picker -Title $title -Items @($items) -Pinned @(New-PickItem 'back' "[$($Hex.Gray)]$($Glyph.Left) Back to Manage packages[/]") `
+            -ReturnKeys @('Spacebar', 'Enter', 'd', 'Delete') -Cursor $cursor -Filter $filter -Search `
+            -Hints @('space|default on/off', 'd|remove', '/|filter')
+        if ($r.Action -ne 'key' -and $r.Action -ne 'select') { return }
+        $cursor = $r.Cursor; $filter = $r.Filter
+        if ("$($r.Key)" -like 'g:*') { continue }
+        $p = @($script:Catalog | Where-Object Id -eq ([int]$r.Key))[0]
+        if (-not $p) { continue }
+        if ($r.Action -eq 'select' -or $r.KeyName -in 'Spacebar', 'Enter') {
+            $saved = Set-KitPackageDefault -Id $p.Id -On (-not $p.Default)
+            Write-KitRunLog "packages: default $($p.Name) -> $(-not $p.Default) ($saved)"
+            Update-CatalogView
+            continue
+        }
+        # d / Delete: confirm
+        Show-ManageHeader 'Remove a package'
+        Say "  [$($Hex.Fg) bold]$(E $p.Name)[/] [$($Hex.Gray)]$(E $p.Ref) $($Glyph.Dot) $(Get-MethodLabel $p)[/]"
+        Say "  [$($Hex.Gray)]It disappears from both menus on every PC. Restore it any time under Removed packages.[/]"
+        Say ''
+        $c = Select-One -Title "[$($Hex.Fg) bold]Remove it?[/]" -Items @(@{ Key = 'yes'; Label = "[$($Hex.Red)]$($Glyph.Fail) Remove $(E $p.Name)[/]" }) -BackLabel 'Keep it'
+        if ($c -eq 'yes') {
+            $saved = Remove-KitPackage -Id $p.Id
+            Write-KitRunLog "packages: remove $($p.Name) ($saved)"
+            Update-CatalogView
+        }
+    }
+}
+
+function Show-RemovedPackages {
+    while ($true) {
+        Show-ManageHeader 'Removed packages'
+        $rem = @(Get-KitRemovedPackages | Sort-Object Name)
+        if (-not $rem.Count) { Say "  [$($Hex.Gray)]Nothing removed.[/]"; Say ''; Wait-Back 'Back to Manage packages'; return }
+        $items = foreach ($p in $rem) {
+            $gs = Get-GroupStyle $p.Group
+            New-PickItem "$($p.Id)" "[$($Hex.Fg)]$(E $p.Name)[/] [$($gs.Color)]$($gs.Icon)[/] [$($Hex.Gray)]$(E $p.Ref) $($Glyph.Dot) $(Get-MethodLabel $p)[/]"
+        }
+        $r = Show-Picker -Title @("[$($Hex.Fg) bold]$($rem.Count) removed[/] [$($Hex.Gray)]- enter restores[/]") -Items @($items) -Pinned @(New-PickItem 'back' "[$($Hex.Gray)]$($Glyph.Left) Back to Manage packages[/]") -Hints @('enter|restore')
+        if ($r.Action -ne 'select') { return }
+        $saved = Restore-KitPackage -Id ([int]$r.Key)
+        Write-KitRunLog "packages: restore Id $($r.Key) ($saved)"
+        Update-CatalogView
+    }
+}
+
+function Show-ManagePackages {
+    if (-not $script:Installed.Count) { Show-Header 'Manage packages'; Invoke-Scan -KeepScanFlag }   # installed badges in the list
+    while ($true) {
+        Show-ManageHeader 'Manage packages'
+        $i = Get-KitOverlayInfo
+        $rem = @(Get-KitRemovedPackages).Count
+        $items = @(
+            @{ Key = 'list';    Label = "[$($Hex.Fg)]Package list[/] [$($Hex.Gray)]- default on/off, remove ($($script:Catalog.Count) packages)[/]" }
+            @{ Key = 'search';  Label = "[$($Hex.Fg)]Add a package[/] [$($Hex.Gray)]- search winget and the Store[/]" }
+            @{ Key = 'id';      Label = "[$($Hex.Fg)]Add by exact winget ID[/]" }
+            @{ Key = 'removed'; Label = "[$($Hex.Fg)]Removed packages[/] [$($Hex.Gray)]- restore ($rem)[/]" }
+        )
+        if ($i.Changes -gt 0) { $items += @{ Key = 'reset'; Label = "[$($Hex.Red)]Reset my changes[/] [$($Hex.Gray)]($($i.Added) added $($Glyph.Dot) $($i.Removed) removed $($Glyph.Dot) $($i.Defaults) default changes)[/]" } }
+        switch (Select-One -Title "[$($Hex.Fg) bold]Manage packages[/] [$($Hex.Gray)]- the base list is in the repo; your changes go to my-packages.json[/]" -Items $items -BackLabel 'Back to Settings') {
+            'list'    { Show-PackageList }
+            'search'  { Show-AddBySearch }
+            'id'      { Show-AddById }
+            'removed' { Show-RemovedPackages }
+            'reset' {
+                Show-ManageHeader 'Reset my changes'
+                Say "  [$($Hex.Fg)]Removes every package you added, restores every removed one and every default.[/]"
+                Say "  [$($Hex.Gray)]A copy of the file stays as my-packages.json.bak.[/]"
+                Say ''
+                if ((Select-One -Title "[$($Hex.Fg) bold]Reset?[/]" -Items @(@{ Key = 'yes'; Label = "[$($Hex.Red)]Reset all my changes[/]" }) -BackLabel 'Cancel') -eq 'yes') {
+                    $saved = Reset-KitOverlay
+                    Write-KitRunLog "packages: reset ($saved)"
+                    Update-CatalogView
+                }
+            }
+            default { return }
+        }
+    }
+}
+
 function Show-Settings {
     while ($true) {
         Show-Header 'Settings'
         $on = "[$($Hex.Green) bold]on[/]"; $off = "[$($Hex.Gray)]off[/]"
         $sc = if ($script:State.RemoveShortcuts) { $on } else { $off }
         $dr = if ($script:DryRunOn) { "[$($Hex.Purple) bold]on[/]" } else { $off }
+        $ch = (Get-KitOverlayInfo).Changes
         $items = @(
+            @{ Key = 'pkgs'; Label = "[$($Hex.Fg)]Manage packages[/] [$($Hex.Gray)]- add, remove, default on/off ($ch change(s) in my-packages.json)[/]" }
             @{ Key = 'sc';  Label = "[$($Hex.Fg)]Remove desktop shortcuts that installers create:[/] $sc" }
             @{ Key = 'dr';  Label = "[$($Hex.Fg)]Dry run (show what would run, install nothing):[/] $dr" }
             @{ Key = 'log'; Label = "[$($Hex.Fg)]Open the log folder[/]" }
         )
         $runlog = if ($env:MYWINKIT_RUNLOG) { "[$($Hex.Gray)]run log: $(E $env:MYWINKIT_RUNLOG)[/]" } else { '' }
         switch (Select-One -Title @("[$($Hex.Fg) bold]Settings[/] [$($Hex.Gray)]($((Get-KitOverrideCount)) learned package-ID fixes in use)[/]", $runlog) -Items $items -BackLabel 'Back to main menu') {
+            'pkgs' { Show-ManagePackages }
             'sc'  { $script:State.RemoveShortcuts = -not $script:State.RemoveShortcuts; if (-not $script:Test) { Save-KitState $script:State } }
             'dr'  { if (-not $script:Test) { $script:DryRunOn = -not $script:DryRunOn } }   # smoke tests stay dry
             'log' {

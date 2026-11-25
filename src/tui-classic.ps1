@@ -139,9 +139,12 @@ function Show-Menu {
     foreach ($g in $groups) {
         $items = @($cat | Where-Object Group -eq $g.Key | Sort-Object Id)
         if (-not $items) { continue }
-        $role = $Pal[$GroupRole[$g.Key]]
+        # groups added in my-packages.json have no icon/colour here: neutral fallback
+        $role = if ($GroupRole.ContainsKey($g.Key)) { $Pal[$GroupRole[$g.Key]] } else { $Pal.Fg }
+        $icon = if ($GroupIcon.ContainsKey($g.Key)) { $GroupIcon[$g.Key] } else { 0x2022 }
+        $letter = if ($g.Letter) { $g.Letter } else { '-' }
         for ($i = 0; $i -lt $items.Count; $i += 4) {
-            if ($i -eq 0) { Write-C ('  ' + (Format-Cut "$($g.Letter) $(C $GroupIcon[$g.Key]) $($g.Label.ToUpper())" 20)) $role -NoNewline }
+            if ($i -eq 0) { Write-C ('  ' + (Format-Cut "$letter $(C $icon) $($g.Label.ToUpper())" 20)) $role -NoNewline }
             else { Write-Host (' ' * 22) -NoNewline }
             for ($c = 0; $c -lt 4 -and ($i + $c) -lt $items.Count; $c++) {
                 $p = $items[$i + $c]

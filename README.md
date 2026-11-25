@@ -75,7 +75,19 @@ Opened from either menu, or on its own:
 for all on, `R` for all off, `Q` to quit (it offers a reboot if needed). Tweak 4 (auto-lock) writes to HKLM, so
 run it as administrator for that one.
 
-## Adding or changing an app
+## Managing the package list from the menu
+
+**Settings → Manage packages** (modern menu): tick packages in or out of the recommended set (Space), remove one
+(`d`, restorable), add one by searching winget and the Microsoft Store or by its exact winget ID (pick a group, new
+or existing, and on/off), and reset. Your changes are saved to `my-packages.json` next to `install.ps1`, which
+OneDrive syncs to every PC, so every PC (and both menus) sees the same list. The repo's base list is not changed.
+In dry run the changes stay in memory for that session only.
+
+To make your changes the repo default: `powershell -File tools\import-overlay.ps1` (folds the OneDrive
+`my-packages.json` into `src/catalog.psd1`), run `tools\test-core.ps1`, commit on `main`, then
+`tools\import-overlay.ps1 -ClearOverlay`.
+
+## Adding or changing an app in the repo
 
 1. Edit [src/catalog.psd1](src/catalog.psd1). One line per app: `Id` (permanent, next free one is in STATUS),
    `Name`, `Group`, `On` (in the recommended set), `Method`, `Ref`, `Desc`. The header of that file explains

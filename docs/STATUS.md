@@ -12,7 +12,7 @@ _A new session can start from this line, no handover needed._
   **Do not merge without Daniel's go:** merging publishes the new kit to every PC through OneDrive.
 - Before merging, Daniel tries it by hand (steps in the PR description): the modern menu, the classic menu
   (`install.ps1 -Classic`), and one real install or update. Feedback so far: colour/ASCII art (v2.1.0 visual pass) and no way back + "looks like plain
-  PowerShell" (universal back picker, UTF-8/truecolor console fix, run log). Next: his look in a real terminal.
+  PowerShell" (universal back picker, UTF-8/truecolor console fix, run log). Then Manage packages was added (his request). Next: his look in a real terminal.
   If it still looks plain, read the newest `%LOCALAPPDATA%\my-win-kit\logs\run-*.log` first.
 - After the merge: check the post-merge publish output (expect `src/` + 4 files copied), then open
   `OneDrive\[98] Shortcuts\install.cmd` on a second PC.
@@ -27,8 +27,9 @@ _A new session can start from this line, no handover needed._
 | Last publish | 2026-11-24: nothing changed (old 3-file kit). The rebuild is not published yet |
 | Apps in `src/catalog.psd1` (branch) | 58 total: 35 in the recommended set, 20 DEV (off), 3 POST (off) |
 | By method (branch) | 45 winget, 4 Store, 5 script, 2 direct, 1 npm, 1 builtin. AI-flagged (Update AI tools): 5 |
-| Next free app Id | 59 |
-| Kit version (branch) | 2.1.0 (`$script:KitVersion` in src/core.psm1) |
+| Next free app Id | 59 in the base catalogue; the menu takes max(all Ids ever used) + 1 automatically (overlay `lastId`, `RetiredIds`) |
+| Package-list overlay | `my-packages.json` next to install.ps1 (OneDrive). None exists yet on this PC; fold changes into the repo with `tools/import-overlay.ps1` |
+| Kit version (branch) | 2.2.0 (`$script:KitVersion` in src/core.psm1) |
 | Modern menu needs | PowerShell 7.4+, PwshSpectreConsole ≥ 2.3 (tested with 2.6.3 on pwsh 7.7.0) |
 | Startup (this PC) | ~750 ms launch → banner → quit |
 | Screen heights (120 × 30) | main 17, start 14, app picker 29, review ≤ 29, results ≤ 28, AI 22, tweaks ≤ 27, settings 12, classic 26 |
