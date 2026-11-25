@@ -13,9 +13,12 @@ _A new session can start from this line, no handover needed._
   publishes to every PC through OneDrive.
 - **Repo is public since 2026-11-25** (Daniel's go). History was rewritten to the GitHub noreply address and
   scrubbed of the personal email and Windows user path; the repo was recreated so no old commits stay reachable.
-  The pre-rewrite repo is renamed **`1nst4ll/my-win-kit-old` (private)**: Daniel deletes it with
-  `gh auth refresh -h github.com -s delete_repo` then `gh repo delete 1nst4ll/my-win-kit-old --yes`.
+  The pre-rewrite repo (`my-win-kit-old`) was deleted on 2026-11-25. GitHub account: "Keep my email private"
+  and "Block command line pushes that expose my email" are both on.
   Raw-URL config reads, self-update and `irm | iex` read from `main`, so they go live at the merge.
+- **Next session (Daniel paused 2026-11-25):** Daniel tests v2.3.0 by hand, then says "merge". Untested so far:
+  real keyboard on the search box, in-menu gh install + sign-in on another PC, real installs, PS7 install on a
+  PC without it.
 - Before merging, Daniel tries it by hand (steps in the PR). If anything looks wrong, read the newest
   `%LOCALAPPDATA%\my-win-kit\logs\run-*.log` first.
 - After the merge: the post-merge publish copies `src/`, `config/` and the kit files; check its output.

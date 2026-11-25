@@ -10,6 +10,9 @@
   (private), and a new **public** `1nst4ll/my-win-kit` was created with the clean `main` + `rebuild-tui`.
   PR #1 was reopened there with the same body. Repo-local `user.email` is now the noreply address.
 
+- Later the same day: `my-win-kit-old` deleted in the browser (Daniel approved, passkey by Daniel). GitHub
+  "Block command line pushes that expose my email" switched on. Session paused; PR #1 still open.
+
 ## 2026-11-25: config on GitHub + self-update, kit v2.3.0 (branch `rebuild-tui`, not merged yet)
 
 - Daniel: "system that will allow changing settings from any computer while you're outside the repo, just on an
