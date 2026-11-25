@@ -197,9 +197,10 @@ try {
                 Check ($r.Status -eq 'saved' -and $rl -match 'attempt 1 failed \(conflict\)' -and $rl -match "config/settings.json .*\(attempt 2\)") 'write: stale sha -> conflict -> re-fetch, re-apply, retry -> committed'
                 & (Get-Module core) { Save-KitOverride -Old 'Old.Test' -New 'New.Test' }
                 Check ((Get-KitConfigInfo).Pending -eq 0) 'write: heal pushed at once when signed in'
-                $msgs = (& $gh api "repos/$slug/commits?sha=$tb&per_page=10" --jq '.[].commit.message') -join "`n"
+                $msgs = (& $gh api "repos/$slug/commits?sha=$tb&per_page=6" --jq '.[].commit.message') -join "`n"   # only the 6 commits this test made
                 Check ($msgs -match 'config: add 7-Zip Test \(from' -and $msgs -match 'config: remove 7-Zip Test' -and $msgs -match 'config: setting dryRunByDefault = True' -and $msgs -match 'learned package-ID' -and $msgs -notmatch 'Co-Authored-By') 'write: commit messages on the branch (no co-author line)'
-                $final = ConvertFrom-KitJsonText ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(((& $gh api "repos/$slug/contents/config/catalog.json?ref=$tb" --jq .content) -join '') -replace '\s', '')))
+                $b64 = ((& $gh api "repos/$slug/contents/config/catalog.json?ref=$tb" --jq .content) -join '') -replace '\s', ''
+                $final = ConvertFrom-KitJsonText ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64)))
                 Check (@($final['Packages'] | Where-Object { $_['Ref'] -eq '7zip.7zip' -and $_['On'] -eq $true }).Count -eq 1) 'write: final catalog.json on GitHub has the package, default on'
             } finally {
                 & $gh api -X DELETE "repos/$slug/git/refs/heads/$tb" | Out-Null
