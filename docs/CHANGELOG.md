@@ -2,6 +2,14 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-25: repo public, history cleaned
+
+- Daniel chose "rewrite, then go public" and "delete + recreate". All 12 commits rewritten to the GitHub noreply
+  address; the personal email and Windows user path removed from doc history (`git filter-branch`).
+- Deleting needs the `delete_repo` scope the CLI login lacks, so the old repo was renamed `my-win-kit-old`
+  (private), and a new **public** `1nst4ll/my-win-kit` was created with the clean `main` + `rebuild-tui`.
+  PR #1 was reopened there with the same body. Repo-local `user.email` is now the noreply address.
+
 ## 2026-11-25: config on GitHub + self-update, kit v2.3.0 (branch `rebuild-tui`, not merged yet)
 
 - Daniel: "system that will allow changing settings from any computer while you're outside the repo, just on an

@@ -11,13 +11,11 @@ _A new session can start from this line, no handover needed._
   classic fallback + shared engine, always-latest AI tools, and since v2.3.0 **config on GitHub** (`config/*.json`,
   edited from the menu as commits) plus **self-update** from GitHub. **Do not merge without Daniel's go:** merging
   publishes to every PC through OneDrive.
-- **Repo is still private: making it public is blocked on Daniel's decision.** The history scan (2026-11-25) found
-  no secrets, but every commit carries the author/committer email a personal email, and two commits
-  contain the Windows user folder name (removed from current files). Options: (a) Daniel accepts that email being
-  public → `gh repo edit 1nst4ll/my-win-kit --visibility public --accept-visibility-change-consequences`; (b)
-  rewrite history to a GitHub noreply address (+ drop the user path), force-push both branches (destructive,
-  needs his go), then flip. Until public: no raw-URL config reads, no self-update, no `irm | iex`; config is
-  read through `gh api` on PCs where gh is signed in, else cache/bundled.
+- **Repo is public since 2026-11-25** (Daniel's go). History was rewritten to the GitHub noreply address and
+  scrubbed of the personal email and Windows user path; the repo was recreated so no old commits stay reachable.
+  The pre-rewrite repo is renamed **`1nst4ll/my-win-kit-old` (private)**: Daniel deletes it with
+  `gh auth refresh -h github.com -s delete_repo` then `gh repo delete 1nst4ll/my-win-kit-old --yes`.
+  Raw-URL config reads, self-update and `irm | iex` read from `main`, so they go live at the merge.
 - Before merging, Daniel tries it by hand (steps in the PR). If anything looks wrong, read the newest
   `%LOCALAPPDATA%\my-win-kit\logs\run-*.log` first.
 - After the merge: the post-merge publish copies `src/`, `config/` and the kit files; check its output.
@@ -27,7 +25,7 @@ _A new session can start from this line, no handover needed._
 
 | Fact | Value |
 |---|---|
-| Repo | github.com/1nst4ll/my-win-kit (**private**). `main` = old single-file installer; `rebuild-tui` = the rebuild |
+| Repo | github.com/1nst4ll/my-win-kit (**public**). `main` = old single-file installer; `rebuild-tui` = the rebuild |
 | Config home | `config/catalog.json`, `config/settings.json`, `config/winget-id-overrides.json` on GitHub `main` (not on `main` yet: arrives with the merge) |
 | Publish target | `$env:OneDrive\[98] Shortcuts` (the OneDrive folder every PC syncs) |
 | Last publish | 2026-11-24: nothing changed (old 3-file kit). The rebuild is not published yet |
