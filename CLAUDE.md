@@ -1,8 +1,9 @@
 # CLAUDE.md: my-win-kit
 
-Personal Windows workstation kit: `install.ps1` (winget installer menu), `install.cmd` (its launcher) and
-`win11-tweaks.ps1` (registry tweaks menu). Front door: [README.md](README.md). Docs index and ownership map:
-[docs/architecture.md](docs/architecture.md#ownership-map).
+Personal Windows workstation kit. `install.cmd` → `install.ps1` (loader) → the modern menu
+(`src/tui-spectre.ps1`, PowerShell 7.4+) or the classic menu (`src/tui-classic.ps1`, 5.1). Both call the engine
+`src/core.psm1`, and the app list lives in `src/catalog.psd1`. `win11-tweaks.ps1` is the registry tweaks menu.
+Front door: [README.md](README.md). Docs index and ownership map: [docs/architecture.md](docs/architecture.md#ownership-map).
 
 ## Session continuity: resume without a handover
 
@@ -19,18 +20,21 @@ Personal Windows workstation kit: `install.ps1` (winget installer menu), `instal
 ## Drift rules
 
 1. **One owner per fact.** See the ownership map. Link to the owner, never copy. In particular, never copy the
-   package list out of `$pk` in install.ps1. Link to it.
-2. **Volatile numbers live only in STATUS:** package counts, dates, the last publish, open bugs.
+   app list out of `src/catalog.psd1`. Link to it.
+2. **Volatile numbers live only in STATUS:** app counts, dates, the last publish, open bugs, the next free Id.
 3. **Reference docs use the present tense.** History goes in CHANGELOG (append-only, newest on top).
 4. **Change the system → update the owning doc + a CHANGELOG entry, in the same commit.**
 
 ## Delivery: repo → OneDrive (one way)
 
 - **Edit only in the repo, never the OneDrive copies** (`$env:OneDrive\[98] Shortcuts`). Every PC syncs that
-  folder, so an edit there skips git and the lint gate.
-- `tools/publish.ps1` runs automatically from `.githooks/post-commit` and `post-merge` on `main`. It copies only
-  the 3 kit scripts, skips unchanged and uncommitted files, and never deletes anything. It never touches the other
-  files in that folder, including `winget-id-overrides.json`.
+  folder, so an edit there skips git and the tests.
+- **Commits on `main` publish immediately** (`.githooks/post-commit` / `post-merge` → `tools/publish.ps1`).
+  Do multi-step work on a branch and merge only when it's done and tested; a half-built kit on `main` reaches
+  every PC.
+- `publish.ps1` copies only the kit file set (`src/*`, `win11-tweaks.ps1`, `install.cmd`, then `install.ps1`
+  last), skips unchanged and uncommitted files, and never deletes anything. It never touches the other files in
+  that folder, including `winget-id-overrides.json`.
 - **A fresh clone needs `git config core.hooksPath .githooks`.** Without it nothing publishes.
 - Drift guard: if a target file differs from the repo copy and is newer, publish refuses (exit 2) and names the
   file. Bring that edit into the repo, or re-run with `-Force` to overwrite it. Never pass `-Force` without
@@ -38,37 +42,55 @@ Personal Windows workstation kit: `install.ps1` (winget installer menu), `instal
 
 ## Constraints
 
-- **Windows PowerShell 5.1 compatible, stock fresh Windows.** No PS7-only syntax (`??`, `?.`, ternary, `&&`), and
-  no modules beyond what ships with Windows. The scripts must run before anything else is installed.
-- **Keep the bytes exact.** Files are LF (pinned in `.gitattributes`). `install.ps1` has a UTF-8 BOM, and 5.1
-  needs it for the box-drawing characters. Any `.ps1` with non-ASCII characters must have a BOM. New tooling
-  scripts stay ASCII-only. When editing, preserve the BOM. Check with `head -c3 file | xxd`.
-- **install.ps1 layout budget: 120 columns × 30 rows** (Windows Terminal default). Menu height = 10 chrome rows +
-  the tallest masonry column. The DEV column (sidebar) is the tallest. Adding a package to a full column
-  pushes the menu past 30 rows. Check the budget in STATUS before adding.
-- **POST-INSTALL is never armed by a bulk gesture.** `*` skips group `POST`. It always runs last and must
-  stay opt-in only.
-- **Package `Id`s are permanent:** never renumber or reuse one. The next free Id is in STATUS.
-- `install.ps1` sets `$ErrorActionPreference = 'SilentlyContinue'` on purpose (best-effort installer).
-  `win11-tweaks.ps1` uses StrictMode + `Stop`.
+- **The loader, engine and classic menu are Windows PowerShell 5.1 compatible** (`install.ps1`,
+  `src/core.psm1`, `src/tui-classic.ps1`, `src/catalog.psd1`): no `??`, `?.`, ternary, `&&`; no modules beyond
+  what ships with Windows. They must run on a fresh PC before anything is installed.
+- `src/tui-spectre.ps1` needs PowerShell 7.4+ (PwshSpectreConsole 2.x requires it) but must still **parse**
+  under 5.1, because CI parses every file under both editions. Avoid 7-only syntax there too.
+- **Kit sources are ASCII-only.** Glyphs (✓ ↑ ✗ ● …) come from `[char]0x2713` etc., so no BOM is needed and 5.1
+  never mis-decodes them. `win11-tweaks.ps1` is the exception: it contains box-drawing characters and must keep
+  its UTF-8 BOM. `install.ps1` carries a BOM from history; harmless, keep it. Check with `head -c3 file | xxd`.
+- **Line endings are LF** (pinned in `.gitattributes`): publish hash-compares with the OneDrive copies.
+- **No UI in `core.psm1`.** It returns result objects and reports progress through `-OnStatus`. Anything both
+  menus need goes into core, so behaviour stays identical.
+- **Remote scripts always run in a child process** (`Invoke-KitRemoteScript`). Never `iex` a vendor script
+  inside the menu process: a vendor `exit` would close the menu.
+- **Direct downloads must be signature-checked** (`Signer` in the catalogue's `Direct` entry) and resolved from
+  the vendor's official page. Never hard-code a versioned URL.
+- **Don't work around bot protection.** Claude Desktop's "latest" link returns 403 to scripts; it stays on winget.
+- **POST is never armed by a bulk gesture.** `*` skips group `POST`; the Spectre picker only ticks POST through
+  its own group header. POST runs last and is `Interactive`.
+- **App `Id`s are permanent:** never renumber or reuse one. The next free Id is in STATUS.
+- **Smoke tests must never install:** `-TestKeys` / `-TestInput` force dry run, and the dry-run toggle is locked
+  on in test mode. Keep it that way when adding screens.
+- `win11-tweaks.ps1` uses StrictMode + `Stop`. `core.psm1` uses `Set-StrictMode -Version 2.0`: read optional
+  catalogue keys with the indexer (`$h['Key']`), not `$h.Key`, or StrictMode throws.
 
-## Lint
+## Tests and lint (all dry run)
 
 ```powershell
-pwsh -File tools/lint.ps1                         # parse + PSScriptAnalyzer
-powershell -File tools/lint.ps1 -ParseOnly        # parse under Windows PowerShell 5.1
+pwsh -File tools/lint.ps1                                        # parse + PSScriptAnalyzer
+powershell -File tools/lint.ps1 -ParseOnly                       # parse under Windows PowerShell 5.1
+powershell -File tools/test-core.ps1                             # catalogue + engine (add -Online for scan + vendor pages)
+pwsh -File tools/smoke-tui.ps1                                   # Spectre menu, scripted keys
+powershell -ExecutionPolicy Bypass -File tools/smoke-loader.ps1  # loader decisions + classic menu
 ```
 
-CI (`.github/workflows/lint.yml`) runs both on `windows-latest`. Settings: `PSScriptAnalyzerSettings.psd1`
+CI (`.github/workflows/lint.yml`) runs all of them on `windows-latest`. Settings: `PSScriptAnalyzerSettings.psd1`
 (Error + Warning). The rules it excludes are style choices this kit makes on purpose:
 
 | Excluded rule | Why |
 |---|---|
 | PSAvoidUsingWriteHost | Interactive TUIs: coloured console output is the product. |
 | PSAvoidUsingEmptyCatchBlock | Best-effort console/host calls (cursor, resize, encoding) that some hosts lack. |
-| PSUseSingularNouns | Internal helpers (`Get-WingetRows`, `Get-PkgVersions`), never exported. |
-| PSUseApprovedVerbs | `Run-Install`: internal helper, never exported. |
-| PSAvoidUsingInvokeExpression | Custom installers run the vendors' official `irm … \| iex` one-liners. |
+| PSUseSingularNouns | Internal helpers, never exported to users. |
+| PSUseApprovedVerbs | Internal helpers, never exported to users. |
+| PSAvoidUsingInvokeExpression | Custom installers are the vendors' official `irm … \| iex` one-liners (run in a child process). |
+| PSUseShouldProcessForStateChangingFunctions | Internal helpers; the kit's what-if is `-DryRun`. |
 
 `$KnownIssues` in `tools/lint.ps1` turns specific known bugs into warnings. Remove an entry in the same commit
-that fixes its bug. The list must only shrink.
+that fixes its bug. The list must only shrink (it is empty now).
+
+Spectre gotchas found while building: `MultiSelectionPrompt` has no search (search lives in a separate
+`SelectionPrompt` screen); escaped brackets (`[[x]]`) in a searchable label crash Spectre's highlighter, so use
+glyphs; `-like` treats `[1/5]` as a wildcard class, so tests use `.Contains()`.
