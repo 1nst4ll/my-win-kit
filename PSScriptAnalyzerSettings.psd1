@@ -3,10 +3,11 @@
 @{
     Severity     = @('Error', 'Warning')
     ExcludeRules = @(
-        'PSAvoidUsingWriteHost'          # interactive TUIs: coloured console output is the product
-        'PSAvoidUsingEmptyCatchBlock'    # best-effort console/host calls that some hosts lack
-        'PSUseSingularNouns'             # Get-WingetRows, Get-PkgVersions: internal helpers
-        'PSUseApprovedVerbs'             # Run-Install: internal helper, never exported
-        'PSAvoidUsingInvokeExpression'   # custom installers use the vendors' official irm | iex
+        'PSAvoidUsingWriteHost'                        # interactive TUIs: coloured console output is the product
+        'PSAvoidUsingEmptyCatchBlock'                  # best-effort console/host calls that some hosts lack
+        'PSUseSingularNouns'                           # internal helpers, never exported to users
+        'PSUseApprovedVerbs'                           # internal helpers, never exported to users
+        'PSAvoidUsingInvokeExpression'                 # vendor installers are official irm | iex one-liners
+        'PSUseShouldProcessForStateChangingFunctions'  # internal helpers; the kit's what-if is -DryRun
     )
 }

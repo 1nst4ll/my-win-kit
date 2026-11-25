@@ -32,8 +32,14 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$KitFiles = @('install.cmd', 'install.ps1', 'win11-tweaks.ps1')
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+# Kit file set (repo-relative, forward slashes). src/ goes first and the
+# loader (install.ps1) last, so a PC that syncs mid-publish never gets a
+# loader whose src/ files are missing.
+$srcFiles = @(Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'src') -File |
+    Where-Object { $_.Extension -in '.ps1', '.psm1', '.psd1' } | Sort-Object Name |
+    ForEach-Object { 'src/' + $_.Name })
+$KitFiles = @($srcFiles) + @('win11-tweaks.ps1', 'install.cmd', 'install.ps1')
 
 if (-not $Target) {
     if (-not $env:OneDrive) {
@@ -72,8 +78,8 @@ function Get-Sha256([string]$Path) {
 $copied = @(); $unchanged = @(); $drifted = @(); $skipped = @()
 
 foreach ($name in $KitFiles) {
-    $src = Join-Path $RepoRoot $name
-    $dst = Join-Path $Target $name
+    $src = Join-Path $RepoRoot ($name -replace "/", "\")
+    $dst = Join-Path $Target ($name -replace "/", "\")
     if (-not (Test-Path -LiteralPath $src -PathType Leaf)) {
         Write-Host "publish: missing in repo: $name" -ForegroundColor Red
         exit 1
@@ -90,6 +96,8 @@ foreach ($name in $KitFiles) {
         if ($td -gt $ts -and -not $Force) { $drifted += $name; continue }
     }
 
+    $dstDir = Split-Path -Parent $dst
+    if (-not (Test-Path -LiteralPath $dstDir -PathType Container)) { New-Item -ItemType Directory -Path $dstDir -Force | Out-Null }
     Copy-Item -LiteralPath $src -Destination $dst -Force
     $copied += $name
 }
