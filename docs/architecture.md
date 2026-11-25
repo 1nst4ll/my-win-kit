@@ -100,10 +100,30 @@ No UI. Both menus call the same functions, so behaviour is identical in both.
 ## Modern menu: src/tui-spectre.ps1
 
 PowerShell 7.4+ with **PwshSpectreConsole** (installed on first run with `Install-PSResource -Scope CurrentUser
--TrustRepository`, falling back to `Install-Module`; exit 3 if neither works). It uses the Spectre.Console .NET
-types directly (`SelectionPrompt`, `MultiSelectionPrompt`, `Table`, `Rule`, `Panel`, `Status`), because the
-cmdlet wrappers can't preselect items. Prompts go through the module's async wrapper so Ctrl+C still works.
-Gruvbox palette.
+-TrustRepository`, falling back to `Install-Module`; exit 3 if neither works, and the reason goes to the screen
+and the run log). Spectre.Console .NET types draw everything (`Table`, `Rule`, `Panel`, `Status`, `Progress`,
+`FigletText`). **Input never uses Spectre prompts** (they have no Esc/back key): it comes from the kit's own
+picker, `Show-Picker`, built on `[Console]::ReadKey`.
+
+- **Console set-up (order matters):** the script switches the console to UTF-8 *before* importing the module,
+  because Spectre decides Unicode support once, when its console is created (a fresh console is code page 437:
+  too late = every glyph prints as `?`). It then creates Spectre's console explicitly with TrueColor + ANSI +
+  Unicode. Spectre's own detection turns colour off whenever `NO_COLOR` is set, and dev tools/agent shells export
+  `NO_COLOR=1` to every window they start, so the kit ignores `NO_COLOR` (logged) and only drops colour for its
+  own `MYWINKIT_NO_COLOR=1`. Window title: `my-win-kit · modern (PowerShell 7)`; the banner subtitle names the
+  engine (`modern · PowerShell 7.x · Spectre 2.x`).
+- **The picker (`Show-Picker`):** single- or multi-select. Keys: ↑↓ PgUp PgDn Home End move; Enter selects
+  (multi: continue); **Esc, Backspace or ← = back** on every screen (with a filter active, the first press clears
+  it); `/` = type-to-filter (multi-selects and search lists); multi: Space toggles (on a group header: the whole
+  group), `a`/`n` = whole group on/off; main menu: `q` quits (Esc does nothing there). **Pinned rows** (« Back,
+  and ► Continue on multi-selects) sit above the list and are never filtered or paged out. A footer always shows
+  the keys, including `esc back`. **Sizing:** the list height = window height − rows already used on the screen
+  − title/pinned/footer rows, so the whole picker always fits. In a real console it reserves its rows (printing
+  newlines scrolls the window if needed) and then redraws in place (`SetCursorPosition` + `ESC[J`). Each row is
+  cut to the window width with `Limit-Markup` (markup-aware, never wraps), because Spectre grids still wrap.
+- **Tall tables are trimmed** so the action list stays on screen: the review table keeps window − 20 rows (new
+  and updates first), the results table window − 21 rows (failures, heals and changes first), each with a
+  "N more not shown" caption; the full list is in the log. Results get their own screen after the progress view.
 
 - **Look:** truecolor gruvbox (hex styles, never the 16 console colours). The main menu opens with a "MY WIN KIT"
   Figlet banner (Spectre's built-in font, rendered once into a capture console, ~11 ms, then coloured column by
@@ -117,21 +137,20 @@ Gruvbox palette.
   `×` failed (red), `↔` healed (aqua), `○` dry run (purple), `=` up to date (aqua). ✓ ✗ ↻ are missing from Consolas
   (and ✗ ↻ from Cascadia Mono), so they are not used. The spinner is Spectre's `Point` (`∙●∙`); the default
   `Dots` spinner uses Braille, which Consolas lacks.
-- **Key hints:** the multi-select prompts carry a persistent footer bar (`InstructionsText`: ↑↓ move · space
-  toggle · enter confirm). `SelectionPrompt` has no footer, so its hint line sits in the prompt title. Spectre
-  prompts have no Esc handling, so every screen has an explicit « Back item.
+
 - **Update badges:** `Get-KitUpdates` (one `winget upgrade`, ~2-3 s, plus the vendor page for direct apps) runs
   with the installed scan when the install screen opens, so the picker can show `↑ old → new`.
 - **Main menu:** Install or update apps · Update AI tools · Windows tweaks · Settings · Quit, each with an icon
   and a one-line description.
 - **Install flow:**
   1. scan installed apps (spinner);
-  2. "Start from": recommended set / recommended but only what's missing / retry last failures / last selection
-     / empty;
-  3. grouped multi-select (Leaf mode: a group header toggles the whole group), preselected, with each app's
-     installed version and non-winget method;
+  2. "Start from": recommended set / recommended but only what's missing / everything with an update / retry
+     last failures / last selection / empty;
+  3. grouped multi-select (a group header toggles the whole group), preselected, with each app's badge,
+     installed version (→ available) and non-winget method;
   4. review table (App · Group · How · On this PC · Will) with actions: install now / search to add or remove
-     (type-to-filter `SelectionPrompt`) / change the full list / back;
+     (the picker opened in filter mode) / change the full list / main menu. Esc goes back one level each time:
+     review → app list → start from → main menu;
   5. run: a Spectre `Progress` view (coloured `Point` spinner, description with live step text from `OnStatus`,
      gruvbox progress bar, percentage, elapsed time): an overall task plus the current app (completed tasks
      hide). Each finished app prints a badge line above the live view. Interactive items run after it, outside
@@ -142,8 +161,19 @@ Gruvbox palette.
   installed or pick (missing ones get installed). Runs with `-Mode update`.
 - **Windows tweaks:** describes the 4 fixes and runs `win11-tweaks.ps1` here or elevated in a new window.
 - **Settings:** desktop-shortcut cleanup, session dry-run toggle, open the log folder.
-- **Smoke-test hook:** `-TestKeys` swaps `AnsiConsole.Console` for Spectre's `TestConsole` and feeds scripted
-  keys; it forces dry run and locks it on.
+- **Smoke-test hook:** `-TestKeys` swaps `AnsiConsole.Console` for Spectre's `TestConsole` (120 × 30) and feeds
+  the keys to the picker; it forces dry run and locks it on, and prints `SCREEN-HEIGHTS: name=rows; ...` on exit
+  so tests can prove every screen fits 30 rows.
+
+## Run log (which front-end ran)
+
+One file per run in `%LOCALAPPDATA%\my-win-kit\logs\run-<date>-<pid>.log` (newest 30 kept; `MYWINKIT_STATE_DIR`
+moves it). The loader creates it and passes the path in `MYWINKIT_RUNLOG`; both menus append through
+`Write-KitRunLog`. It records the loader's PowerShell, the pwsh it found (path, version), the decision
+(modern / offer install / classic + reason), the front-end that actually started (with PwshSpectreConsole
+version, console colour system, Unicode, encoding, `NO_COLOR`), each main-menu choice, run summaries, the exit
+code, and any fallback reason. The loader also prints "Starting modern menu · PowerShell 7.x · Spectre" (or
+"Starting classic menu · …") before it hands off.
 
 ## Classic menu: src/tui-classic.ps1
 

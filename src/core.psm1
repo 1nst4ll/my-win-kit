@@ -132,6 +132,24 @@ function Write-KitLog {
     try { Add-Content -LiteralPath $script:LogPath -Value ('{0:HH:mm:ss} {1}' -f (Get-Date), $Text) -Encoding UTF8 } catch {}
 }
 
+function Write-KitRunLog {
+    <#
+    Debug log of WHICH front-end ran and why: one file per run in
+    <state dir>\logs\ (default %LOCALAPPDATA%\my-win-kit\logs). The loader
+    creates the file and passes it in MYWINKIT_RUNLOG; a menu started
+    directly creates its own.
+    #>
+    param([string]$Text)
+    try {
+        if (-not $env:MYWINKIT_RUNLOG) {
+            $dir = Join-Path $script:StateDir 'logs'
+            if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+            $env:MYWINKIT_RUNLOG = Join-Path $dir ('run-{0:yyyyMMdd-HHmmss}-{1}.log' -f (Get-Date), $PID)
+        }
+        Add-Content -LiteralPath $env:MYWINKIT_RUNLOG -Value ('{0:yyyy-MM-dd HH:mm:ss} [{1}] {2}' -f (Get-Date), $PID, $Text) -Encoding UTF8
+    } catch {}
+}
+
 function Get-KitState {
     <# Per-PC preferences: last selection, settings. Never synced. #>
     $f = Join-Path $script:StateDir 'state.json'
@@ -818,6 +836,6 @@ function Remove-KitNewShortcuts {
 }
 
 Export-ModuleMember -Function Initialize-Kit, Get-KitVersion, Get-KitUpdates, Get-KitGroups, Get-KitCatalog, Get-KitLogPath, Get-KitOverrideCount,
-    Get-KitRunOrder, Test-KitAdmin, Test-KitWinget, Get-KitArch, Update-KitPath, Start-KitLog, Write-KitLog,
+    Get-KitRunOrder, Test-KitAdmin, Test-KitWinget, Get-KitArch, Update-KitPath, Start-KitLog, Write-KitLog, Write-KitRunLog,
     Get-KitState, Save-KitState, Get-KitInstalled, Get-KitToolVersion, Get-KitVersionText, Resolve-KitDirect,
     Test-KitVersionCurrent, Get-KitLatestVersion, Invoke-KitPackage, Get-KitDesktopShortcuts, Remove-KitNewShortcuts

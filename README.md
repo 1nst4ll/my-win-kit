@@ -14,7 +14,8 @@ The kit is already in **`OneDrive\[98] Shortcuts`** on every PC signed in to Dan
 
 What happens next depends on the PC:
 
-- **PowerShell 7.4+ installed** → the modern menu opens (arrow keys, space to tick, Enter to continue).
+- **PowerShell 7.4+ installed** → it prints *"Starting modern menu · PowerShell 7.x · Spectre"* and the modern
+  menu opens (window title `my-win-kit · modern (PowerShell 7)`).
 - **Not installed** (a fresh PC) → it asks *"Install PowerShell 7 now? [Y/n]"*. Press Enter: it installs
   PowerShell 7, then opens the modern menu. The first run also installs the PwshSpectreConsole module for the
   current user (a few seconds).
@@ -28,6 +29,12 @@ Most installs need winget (App Installer). If it's missing, the menu opens its M
 **Without OneDrive:** download the repo zip from GitHub (private: sign in first), unzip, double-click `install.cmd`.
 
 ## The modern menu
+
+**Keys, on every screen:** ↑↓ move · Enter select · **Esc, Backspace or ← = back** · `/` search (lists of apps) ·
+Space tick an app (a group header ticks the whole group) · `a`/`n` whole group on/off · `q` quit (main menu).
+The « Back row is always at the top of the list, and the key hints are always at the bottom.
+
+Which menu ran is logged: `%LOCALAPPDATA%\my-win-kit\logs\run-*.log` (Settings shows the current file).
 
 A gradient **MY WIN KIT** banner, gruvbox colours, and one set of badges everywhere: √ installed, ↑ update
 available, · not installed, × failed, ↔ healed. In dry run every screen carries a purple **DRY RUN** band.

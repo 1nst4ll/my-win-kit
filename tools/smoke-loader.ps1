@@ -41,6 +41,11 @@ Check 'declined PowerShell 7 -> classic menu'          (Invoke-Loader @('-NoPwsh
 Check 'accepted in dry run -> no install, classic'     (Invoke-Loader @('-NoPwsh', '-Answer', 'y', '-DryRun', '-ClassicTestInput', 'Q')) @('Dry run: would install PowerShell 7', 'classic menu')
 Check 'classic: toggles + POST + simulated run'        (Invoke-Loader @('-Classic', '-DryRun', '-ClassicTestInput', '0;2;46;X;I;y;;Q')) @('0 selected', '[1/5] Notepad++', '[5/5] Enable RDP Host', '5 ok', '0 failed', 'see you next time')
 
+# The run log must prove which front-end started (newest log = the classic run above)
+$log = Get-ChildItem -LiteralPath (Join-Path $env:MYWINKIT_STATE_DIR 'logs') -Filter 'run-*.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$logText = if ($log) { Get-Content -LiteralPath $log.FullName -Raw } else { '' }
+Check 'run log records loader decision + front-end' @{ Out = $logText; Ec = 0 } @('loader: decision = classic', 'loader: starting CLASSIC menu', 'frontend: CLASSIC started')
+
 Remove-Item -LiteralPath $env:MYWINKIT_STATE_DIR -Recurse -Force -ErrorAction SilentlyContinue
 if ($script:fail -eq 0) { Write-Host 'smoke-loader: all passed' -ForegroundColor Green } else { Write-Host "smoke-loader: $($script:fail) failure(s)" -ForegroundColor Red }
 exit $script:fail

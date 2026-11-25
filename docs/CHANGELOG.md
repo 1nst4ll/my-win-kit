@@ -2,6 +2,31 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-25: universal back + visible modern mode (branch `rebuild-tui`, not merged yet)
+
+- Daniel's test feedback: "There's no way how to go back. When you get to updates, you can't go back to main
+  menu. Also, it looks like it starts only the regular clean PowerShell version, not the Spectre one."
+- **Cause of "no way back":** Spectre prompts ignore Esc/Backspace/←; the two multi-selects ("Choose apps",
+  "Pick tools") had no back path at all, and the only exit after a run was one menu item. (Reproduced at
+  120 × 30: the Update screen's « Back item itself was visible.)
+- **Cause of "looks like plain PowerShell":** confirmed in a real console: no colour and every glyph printed as
+  `?`. (1) UTF-8 was switched on after Spectre had already created its console on code page 437 → no Unicode.
+  (2) Spectre disables all colour when `NO_COLOR` is set, and agent/dev shells export `NO_COLOR=1` to the
+  windows they start. The run log proved the modern front-end did run.
+- **Fix:** all Spectre prompts replaced by the kit's own picker (`Show-Picker`, `[Console]::ReadKey` + Spectre
+  rendering): Esc/Backspace/← = back on every screen, pinned « Back row, persistent key footer with `esc back`,
+  `/` type-to-filter, Space/`a`/`n` toggles, `q` quits from the main menu. Pickers size themselves to the window;
+  review and results tables are trimmed; results get their own screen.
+- **Fix:** UTF-8 before Spectre loads + an explicit TrueColor console (`NO_COLOR` logged and ignored;
+  `MYWINKIT_NO_COLOR=1` is the kit's off switch).
+- **Visible mode:** loader prints "Starting modern menu · PowerShell 7.x · Spectre" / "Starting classic menu ·
+  …"; window titles `my-win-kit · modern (PowerShell 7)` / `… · classic (PowerShell 5.1)`; banner subtitle and
+  every header name the engine.
+- **Run log** per run in `%LOCALAPPDATA%\my-win-kit\logs\`: loader decision, pwsh path/version, module version,
+  console colour/Unicode, front-end started, menu choices, fallback reasons, exit code.
+- **Tests:** smoke-tui drives Esc/Backspace/← from every level, search, group toggles, and fails any screen
+  taller than 30 rows (the menu reports `SCREEN-HEIGHTS`); smoke-loader checks the run log. Checked by hand in a
+  real 120 × 30 conhost window launched through the loader (screenshots).
 ## 2026-11-25: visual polish, kit v2.1.0 (branch `rebuild-tui`, not merged yet)
 
 - Daniel's dry-run feedback: "add some colors and more ascii art and modern ui".

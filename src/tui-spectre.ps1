@@ -5,22 +5,24 @@
 .DESCRIPTION
     Started by install.ps1 when PowerShell 7.4+ is present. Renders screens
     and collects choices; all install work happens in src/core.psm1.
-    Exit codes: 0 = normal quit, 3 = Spectre unavailable (the loader then
-    falls back to the classic menu).
+    Spectre.Console draws everything; input comes from the kit's own picker
+    (Show-Picker, built on [Console]::ReadKey) because Spectre's prompts have
+    no Esc/back key. Exit codes: 0 = normal quit, 3 = Spectre unavailable
+    (the loader then falls back to the classic menu).
 .PARAMETER KitRoot
     Folder that holds install.ps1 (and the synced winget-id-overrides.json).
 .PARAMETER DryRun
     Simulate: show what would run, install nothing.
 .PARAMETER TestKeys
-    Smoke test: comma-separated keys (DownArrow, Enter, Spacebar, text:abc)
-    fed to a Spectre TestConsole. Forces -DryRun. Used by tools/smoke-tui.ps1.
-    Env MYWINKIT_TEST_ANSI=1 makes the TestConsole emit truecolor ANSI
-    (tools/render-screens.ps1 uses it to capture screens).
+    Smoke test: comma-separated keys (DownArrow, Enter, Escape, Spacebar,
+    Backspace, LeftArrow, text:abc) fed to the picker, with a Spectre
+    TestConsole (120 x 30) as the screen. Forces -DryRun. Prints
+    "SCREEN-HEIGHTS: ..." (rows used per screen) on exit for the tests.
+    Env MYWINKIT_TEST_ANSI=1 makes the TestConsole emit truecolor ANSI.
 .NOTES
     Keep ASCII-only (glyphs come from [char] codes) and parseable by 5.1
     (CI parses every file under both editions). Every glyph used here exists
-    in BOTH Consolas and Cascadia Mono (checked with GlyphTypeface), so it
-    renders in classic conhost and in Windows Terminal without fallback fonts.
+    in BOTH Consolas and Cascadia Mono (checked with GlyphTypeface).
 #>
 [CmdletBinding()]
 param(
@@ -30,6 +32,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# UTF-8 BEFORE Spectre loads: a fresh console is code page 437, and Spectre
+# decides Unicode support once, when its console is created. Too late = every
+# glyph prints as "?" and borders fall back to ASCII.
+try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); [Console]::InputEncoding = [Text.UTF8Encoding]::new($false) } catch {}
+Import-Module (Join-Path $KitRoot 'src\core.psm1') -Force
+function C([int]$cp) { return [string][char]$cp }
+try { $Host.UI.RawUI.WindowTitle = "my-win-kit $(C 0x00B7) modern (PowerShell 7)" } catch {}
 
 # ---------------------------------------------------------------- Spectre module
 
@@ -38,20 +47,51 @@ function Initialize-SpectreModule {
     $have = Get-Module -ListAvailable PwshSpectreConsole | Where-Object { $_.Version -ge $min } | Select-Object -First 1
     if (-not $have) {
         Write-Host '  First run on this PC: installing the PwshSpectreConsole module (current user)...' -ForegroundColor DarkYellow
+        Write-KitRunLog 'modern: PwshSpectreConsole missing - installing (CurrentUser)'
         try {
             Install-PSResource -Name PwshSpectreConsole -Scope CurrentUser -TrustRepository -Quiet -ErrorAction Stop
         } catch {
             try { Install-Module PwshSpectreConsole -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop }
-            catch { Write-Host "  Could not install PwshSpectreConsole: $($_.Exception.Message)" -ForegroundColor Red; return $false }
+            catch {
+                Write-Host "  Could not install PwshSpectreConsole: $($_.Exception.Message)" -ForegroundColor Red
+                Write-KitRunLog "modern: FALLBACK - module install failed: $($_.Exception.Message)"
+                return $false
+            }
         }
     }
     try { Import-Module PwshSpectreConsole -MinimumVersion $min -ErrorAction Stop; return $true }
-    catch { Write-Host "  Could not load PwshSpectreConsole: $($_.Exception.Message)" -ForegroundColor Red; return $false }
+    catch {
+        Write-Host "  Could not load PwshSpectreConsole: $($_.Exception.Message)" -ForegroundColor Red
+        Write-KitRunLog "modern: FALLBACK - module import failed: $($_.Exception.Message)"
+        return $false
+    }
 }
 
 if (-not (Initialize-SpectreModule)) { exit 3 }
-Import-Module (Join-Path $KitRoot 'src\core.psm1') -Force
-try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
+$script:SpectreVersion = (Get-Module PwshSpectreConsole).Version
+
+# Explicit console: truecolor + ANSI + Unicode. Spectre's own detection turns all
+# colour off when NO_COLOR is set, and dev tools / agent shells export NO_COLOR=1
+# to every child window, which made the menu look like plain PowerShell. The kit
+# only drops colour for its own switch, MYWINKIT_NO_COLOR=1.
+if ($env:MYWINKIT_NO_COLOR -ne '1') {
+    try {
+        $cs = [Spectre.Console.AnsiConsoleSettings]::new()
+        $cs.Ansi = [Spectre.Console.AnsiSupport]::Yes
+        $cs.ColorSystem = [Spectre.Console.ColorSystemSupport]::TrueColor
+        $cs.Interactive = [Spectre.Console.InteractionSupport]::Yes
+        $cs.Out = [Spectre.Console.AnsiConsoleOutput]::new([Console]::Out)
+        [Spectre.Console.AnsiConsole]::Console = [Spectre.Console.AnsiConsole]::Create($cs)
+        [Spectre.Console.AnsiConsole]::Console.Profile.Capabilities.Unicode = $true
+    } catch { Write-KitRunLog "modern: could not create the truecolor console: $($_.Exception.Message)" }
+}
+$cap0 = [Spectre.Console.AnsiConsole]::Console.Profile.Capabilities
+Write-KitRunLog ("modern: console ColorSystem={0} Ansi={1} Unicode={2} OutputEncoding={3} NO_COLOR=[{4}] (ignored) MYWINKIT_NO_COLOR=[{5}]" -f `
+    $cap0.ColorSystem, $cap0.Ansi, $cap0.Unicode, [Console]::OutputEncoding.WebName, $env:NO_COLOR, $env:MYWINKIT_NO_COLOR)
+$script:EngineLabel = "modern $(C 0x00B7) PowerShell $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor) $(C 0x00B7) Spectre $($script:SpectreVersion)"
+$wsz = ''; try { $wsz = "$([Console]::WindowWidth)x$([Console]::WindowHeight)" } catch {}
+Write-KitRunLog ("frontend: MODERN started (src\tui-spectre.ps1) - PowerShell {0} at {1}, PwshSpectreConsole {2}, host window {3}, Windows Terminal={4}, dryrun={5}, test={6}" -f `
+    $PSVersionTable.PSVersion, (Get-Process -Id $PID).Path, $script:SpectreVersion, $wsz, [bool]$env:WT_SESSION, [bool]$DryRun, [bool]$TestKeys)
 
 # ---------------------------------------------------------------- look
 
@@ -61,36 +101,40 @@ $script:Hex = @{
     Aqua = '#8ec07c'; Blue = '#83a598'; Purple = '#d3869b'; Gray = '#928374'
     Fg = '#ebdbb2'; Line = '#665c54'; Dim = '#504945'; Bg1 = '#3c3836'
 }
-function C([int]$cp) { return [string][char]$cp }
 # Glyphs present in both Consolas and Cascadia Mono (no Nerd Font, no emoji)
 $script:Glyph = @{
     Ok = C 0x221A; Up = C 0x2191; Down = C 0x2193; Not = C 0x00B7; Fail = C 0x00D7; Heal = C 0x2194; Dry = C 0x25CB
     Same = '='; Dot = C 0x00B7; Arrow = C 0x2192; Pointer = C 0x25BA; Tri = C 0x25B8; Bullet = C 0x2022
     Full = C 0x2588; Shade3 = C 0x2593; Shade2 = C 0x2592; Shade1 = C 0x2591; HalfL = C 0x258C; Warn = C 0x25B2
     LineH = C 0x2500; DLineH = C 0x2550; Left = C 0x00AB; Sun = C 0x263C; Menu = C 0x2261
+    On = C 0x25CF; Off = C 0x25CB; Ell = C 0x2026
 }
 # One accent colour + icon per catalogue group (presentation only; groups live in catalog.psd1)
 $script:GroupStyle = @{
-    UTIL = @{ Icon = C 0x2261; Color = '#fabd2f' }   # triple bar
-    OFCE = @{ Icon = C 0x00B6; Color = '#83a598' }   # pilcrow
-    BROW = @{ Icon = C 0x25BA; Color = '#8ec07c' }   # pointer
-    CLOU = @{ Icon = C 0x221E; Color = '#83a598' }   # infinity
-    PDF  = @{ Icon = C 0x00A7; Color = '#fb4934' }   # section
-    COMM = @{ Icon = C 0x263A; Color = '#b8bb26' }   # smiley
-    REMO = @{ Icon = C 0x2194; Color = '#8ec07c' }   # left-right arrow
-    SECU = @{ Icon = C 0x2666; Color = '#d3869b' }   # diamond
-    MEDI = @{ Icon = C 0x266B; Color = '#fe8019' }   # notes
-    MAIN = @{ Icon = C 0x2302; Color = '#fabd2f' }   # house
-    DSGN = @{ Icon = C 0x2660; Color = '#d3869b' }   # spade
-    OTHR = @{ Icon = C 0x2022; Color = '#a89984' }   # bullet
-    DEV  = @{ Icon = C 0x00BB; Color = '#fe8019' }   # guillemet
-    POST = @{ Icon = C 0x25B2; Color = '#fb4934' }   # triangle
+    UTIL = @{ Icon = C 0x2261; Color = '#fabd2f' }
+    OFCE = @{ Icon = C 0x00B6; Color = '#83a598' }
+    BROW = @{ Icon = C 0x25BA; Color = '#8ec07c' }
+    CLOU = @{ Icon = C 0x221E; Color = '#83a598' }
+    PDF  = @{ Icon = C 0x00A7; Color = '#fb4934' }
+    COMM = @{ Icon = C 0x263A; Color = '#b8bb26' }
+    REMO = @{ Icon = C 0x2194; Color = '#8ec07c' }
+    SECU = @{ Icon = C 0x2666; Color = '#d3869b' }
+    MEDI = @{ Icon = C 0x266B; Color = '#fe8019' }
+    MAIN = @{ Icon = C 0x2302; Color = '#fabd2f' }
+    DSGN = @{ Icon = C 0x2660; Color = '#d3869b' }
+    OTHR = @{ Icon = C 0x2022; Color = '#a89984' }
+    DEV  = @{ Icon = C 0x00BB; Color = '#fe8019' }
+    POST = @{ Icon = C 0x25B2; Color = '#fb4934' }
 }
 Set-SpectreColors -AccentColor $Hex.Orange -DefaultValueColor $Hex.Gray
 
 # ---------------------------------------------------------------- test console (smoke test)
 
 $script:Test = $null
+$script:KeyQueue = [System.Collections.Generic.Queue[ConsoleKeyInfo]]::new()
+$script:Heights = [System.Collections.Generic.List[string]]::new()
+$script:ScreenName = ''
+$script:ScreenStart = 0
 if ($TestKeys) {
     $DryRun = $true
     $tc = [Spectre.Console.Testing.TestConsole]::new()
@@ -103,9 +147,19 @@ if ($TestKeys) {
         $tc.Profile.Capabilities.Ansi = $true
         $tc.Profile.Capabilities.ColorSystem = [Spectre.Console.ColorSystem]::TrueColor
     }
+    $named = @{ Enter = "`r"; Escape = [string][char]27; Spacebar = ' '; Backspace = [string][char]8; Tab = "`t" }
     foreach ($k in ($TestKeys -split ',')) {
         $k = $k.Trim(); if (-not $k) { continue }
-        if ($k -like 'text:*') { $tc.Input.PushText($k.Substring(5)) } else { $tc.Input.PushKey([ConsoleKey]$k) }
+        if ($k -like 'text:*') {
+            foreach ($ch in $k.Substring(5).ToCharArray()) {
+                $ck = [ConsoleKey]0
+                if ("$ch" -match '^[a-zA-Z]$') { $ck = [ConsoleKey]("$ch".ToUpper()) } elseif ($ch -eq ' ') { $ck = [ConsoleKey]::Spacebar }
+                $script:KeyQueue.Enqueue([ConsoleKeyInfo]::new($ch, $ck, $false, $false, $false))
+            }
+        } else {
+            $chr = if ($named.ContainsKey($k)) { [char]$named[$k] } else { [char]0 }
+            $script:KeyQueue.Enqueue([ConsoleKeyInfo]::new($chr, [ConsoleKey]$k, $false, $false, $false))
+        }
     }
     [Spectre.Console.AnsiConsole]::Console = $tc
     $script:Test = $tc
@@ -118,19 +172,40 @@ function Get-Plural([int]$n, [string]$word) { if ($n -eq 1) { return "1 $word" }
 function Say([string]$markup = '') { [Spectre.Console.AnsiConsole]::MarkupLine($markup) }
 function Out-Render($r) { [Spectre.Console.AnsiConsole]::Write($r) }
 function St([string]$s) { return [Spectre.Console.Style]::Parse($s) }
-function Clear-Screen {
-    if ($script:Test) { Say ''; return }
+function Get-WindowHeight { if ($script:Test) { return 30 }; try { return [Console]::WindowHeight } catch { return 30 } }
+function Get-WindowWidth { if ($script:Test) { return 120 }; try { return [Console]::WindowWidth } catch { return 120 } }
+function Get-LinesUsed {
+    <# Rows already used on the current screen (from the top of the window). #>
+    if ($script:Test) { return ([regex]::Matches($script:Test.Output.Substring($script:ScreenStart), "`n")).Count }
+    try { return [Console]::CursorTop - [Console]::WindowTop } catch { return 8 }
+}
+function Clear-Screen([string]$Name = '') {
+    $script:ScreenName = $Name
+    if ($script:Test) { Say ''; $script:ScreenStart = $script:Test.Output.Length; return }
     try { [Spectre.Console.AnsiConsole]::Clear() } catch { Say '' }   # no console handle (redirected output)
 }
-function Get-WindowHeight {
-    $h = 30
-    try { if (-not $script:Test) { $h = [Console]::WindowHeight } } catch {}
-    return $h
-}
-function Get-PageSize([int]$Reserved = 9) { return [Math]::Max(5, (Get-WindowHeight) - $Reserved) }
 function Format-Duration([TimeSpan]$t) {
     if ($t.TotalMinutes -ge 1) { return '{0}m {1:00}s' -f [int][Math]::Floor($t.TotalMinutes), $t.Seconds }
     return '{0:0.0}s' -f $t.TotalSeconds
+}
+function Limit-Markup([string]$s, [int]$max) {
+    <# Cut a markup line to $max visible columns (never wrap), keeping tags balanced. #>
+    if ([Spectre.Console.Markup]::Remove($s).Length -le $max) { return $s }
+    $sb = [Text.StringBuilder]::new(); $vis = 0; $open = 0; $i = 0
+    while ($i -lt $s.Length -and $vis -lt ($max - 1)) {
+        $ch = $s[$i]
+        if (($ch -eq '[' -or $ch -eq ']') -and ($i + 1) -lt $s.Length -and $s[$i + 1] -eq $ch) { [void]$sb.Append("$ch$ch"); $vis++; $i += 2; continue }
+        if ($ch -eq '[') {
+            $j = $s.IndexOf(']', $i); if ($j -lt 0) { break }
+            $tag = $s.Substring($i, $j - $i + 1)
+            if ($tag -eq '[/]') { $open-- } else { $open++ }
+            [void]$sb.Append($tag); $i = $j + 1; continue
+        }
+        [void]$sb.Append($ch); $vis++; $i++
+    }
+    [void]$sb.Append($script:Glyph.Ell)
+    for ($k = 0; $k -lt $open; $k++) { [void]$sb.Append('[/]') }
+    return $sb.ToString()
 }
 
 # Gruvbox gradient orange -> yellow -> green -> aqua
@@ -148,7 +223,6 @@ function Get-GradientHex([double]$t) {
     return '#{0:x2}{1:x2}{2:x2}' -f $rgb[0], $rgb[1], $rgb[2]
 }
 function ConvertTo-Gradient([string]$Text, [int]$Width = 0, [int]$Band = 3) {
-    <# Colour a line left-to-right along the gradient, in bands of $Band columns. #>
     if ($Width -le 1) { $Width = [Math]::Max(2, $Text.Length) }
     $sb = [Text.StringBuilder]::new()
     for ($c = 0; $c -lt $Text.Length; $c += $Band) {
@@ -161,7 +235,7 @@ function ConvertTo-Gradient([string]$Text, [int]$Width = 0, [int]$Band = 3) {
 
 $script:BannerLines = $null
 function Get-BannerLines {
-    <# "MY WIN KIT" in Spectre's built-in Figlet font, rendered once (~40 ms) and cached. #>
+    <# "MY WIN KIT" in Spectre's built-in Figlet font, rendered once (~11 ms) and cached. #>
     if ($script:BannerLines) { return $script:BannerLines }
     $cap = [Spectre.Console.Testing.TestConsole]::new()
     $cap.Profile.Width = 200
@@ -172,13 +246,6 @@ function Get-BannerLines {
     return $script:BannerLines
 }
 
-function Get-SubtitleMarkup {
-    $admin = if (Test-KitAdmin) { "[$($Hex.Green)]yes[/]" } else { "[$($Hex.Gray)]no[/]" }
-    $s = "[$($Hex.Gray)]v$(Get-KitVersion) $($Glyph.Dot) $(E $env:COMPUTERNAME) $($Glyph.Dot) PowerShell $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor) $($Glyph.Dot) admin[/] $admin"
-    if ($script:DryRunOn) { $s += "  [#282828 on $($Hex.Purple) bold] $($Glyph.Dry) DRY RUN [/]" }
-    return $s
-}
-
 function Show-DryRunBand {
     if (-not $script:DryRunOn) { return }
     $r = [Spectre.Console.Rule]::new("[$($Hex.Purple) bold]$($Glyph.Dry) DRY RUN $($Glyph.Dot) simulation only, nothing will be installed or changed $($Glyph.Dry)[/]")
@@ -187,18 +254,21 @@ function Show-DryRunBand {
 }
 
 function Show-Banner {
-    <# Main menu: gradient Figlet banner + subtitle (+ dry-run band). 7-8 rows. #>
-    Clear-Screen
+    <# Main menu: gradient Figlet banner + subtitle naming the engine (+ dry-run band). #>
+    Clear-Screen 'main menu'
     foreach ($l in (Get-BannerLines)) { Say " $l" }
-    Say " $(Get-SubtitleMarkup)"
+    $admin = if (Test-KitAdmin) { "[$($Hex.Green)]yes[/]" } else { "[$($Hex.Gray)]no[/]" }
+    $s = " [$($Hex.Gray)]v$(Get-KitVersion) $($Glyph.Dot)[/] [$($Hex.Aqua) bold]$(E $script:EngineLabel)[/] [$($Hex.Gray)]$($Glyph.Dot) $(E $env:COMPUTERNAME) $($Glyph.Dot) admin[/] $admin"
+    if ($script:DryRunOn) { $s += "  [#282828 on $($Hex.Purple) bold] $($Glyph.Dry) DRY RUN [/]" }
+    Say $s
     Show-DryRunBand
     Say ''
 }
 
 function Show-Header([string]$Screen = '') {
     <# Sub-screens: one gradient title rule (+ dry-run band). #>
-    Clear-Screen
-    $t = "$(ConvertTo-Gradient 'my-win-kit' 10 1) [$($Hex.Line)]$($Glyph.Tri)[/] [$($Hex.Fg) bold]$(E $Screen)[/]"
+    Clear-Screen $Screen
+    $t = "$(ConvertTo-Gradient 'my-win-kit' 10 1) [$($Hex.Line)]$($Glyph.Tri)[/] [$($Hex.Fg) bold]$(E $Screen)[/]  [$($Hex.Gray)]$(E $script:EngineLabel)[/]"
     if ($script:DryRunOn) { $t += "  [#282828 on $($Hex.Purple) bold] DRY RUN [/]" }
     $r = [Spectre.Console.Rule]::new($t)
     $r.Justification = [Spectre.Console.Justify]::Left
@@ -210,46 +280,206 @@ function Show-Header([string]$Screen = '') {
 
 function Get-KeyHint([string[]]$Pairs) {
     <# "key|action" pairs -> one dim hint line with orange keys. #>
-    $parts = foreach ($p in $Pairs) { $k, $a = $p -split '\|', 2; "[$($Hex.Orange)]$(E $k)[/] [$($Hex.Gray)]$(E $a)[/]" }
+    $parts = foreach ($p in $Pairs) { $k, $a = $p -split '\|', 2; "[$($Hex.Orange) bold]$(E $k)[/] [$($Hex.Gray)]$(E $a)[/]" }
     return ($parts -join "  [$($Hex.Dim)]$($Glyph.Dot)[/]  ")
 }
 
-function Show-Prompt($Prompt) {
-    # Module's async wrapper keeps Ctrl+C working; plain Show() as fallback.
-    $mod = Get-Module PwshSpectreConsole
-    try { return & $mod { param($p) Invoke-SpectrePromptAsync -Prompt $p } $Prompt }
-    catch [System.Management.Automation.CommandNotFoundException] { return $Prompt.Show([Spectre.Console.AnsiConsole]::Console) }
+# ---------------------------------------------------------------- the picker (ReadKey + Spectre rendering)
+
+function Read-KitKey {
+    if ($script:Test) {
+        if ($script:KeyQueue.Count -eq 0) { throw 'Smoke test ran out of keys (screen still waiting for input).' }
+        return $script:KeyQueue.Dequeue()
+    }
+    return [Console]::ReadKey($true)
+}
+
+function New-PickItem([string]$Key, [string]$Label, [string]$Text = '', [string]$Group = '', [switch]$Header, [switch]$On) {
+    if (-not $Text) { $Text = [Spectre.Console.Markup]::Remove($Label) }
+    return [pscustomobject]@{ Key = $Key; Label = $Label; Text = $Text; Group = $Group; IsHeader = [bool]$Header; On = [bool]$On }
+}
+
+function Show-Picker {
+    <#
+    .SYNOPSIS
+        Single- or multi-select list with a universal back key. Returns
+        @{ Action = select|back|quit|ok|pinned; Key; Selected = keys }.
+    .DESCRIPTION
+        Keys: up/down/pgup/pgdn/home/end move; enter selects (multi: continues);
+        esc, backspace, left = back (with a filter active: clear it first);
+        "/" starts type-to-filter (multi and -Search lists); multi: space
+        toggles (on a group header: the whole group), a / n = whole group on/off.
+        -QuitKey makes that letter return Action = quit (main menu: q).
+        Pinned rows (e.g. "Back") stay on top and are never filtered or paged.
+        The list is sized to what is left of the window, so it always fits.
+    #>
+    param(
+        [string[]]$Title = @(),
+        [object[]]$Items,
+        [object[]]$Pinned = @(),
+        [switch]$Multi,
+        [switch]$Search,
+        [switch]$StartSearch,
+        [string]$QuitKey = '',
+        [switch]$NoBack
+    )
+    $sel = @{}
+    foreach ($it in $Items) { if ($it.On) { $sel[$it.Key] = $true } }
+    $searching = [bool]$StartSearch
+    $filter = ''
+    $width = (Get-WindowWidth) - 1
+    $fixed = $Title.Count + $Pinned.Count + 3        # + "more" line + 2 footer lines
+    $room = (Get-WindowHeight) - (Get-LinesUsed) - 1
+    $rows = [Math]::Max(3, [Math]::Min($Items.Count, $room - $fixed))
+    $reserve = $fixed + $rows
+    $start = -1
+    $cursor = if ($Items.Count) { $Pinned.Count } else { 0 }   # first real item
+    $offset = 0
+    $first = $true
+
+    while ($true) {
+        # ---- visible rows
+        $vis = if ($filter) { @($Items | Where-Object { -not $_.IsHeader -and $_.Text -like "*$filter*" }) } else { @($Items) }
+        $nav = $Pinned.Count + $vis.Count
+        if ($nav -eq 0) { $cursor = 0 } else { if ($cursor -ge $nav) { $cursor = $nav - 1 }; if ($cursor -lt 0) { $cursor = 0 } }
+        $ci = $cursor - $Pinned.Count
+        if ($ci -ge 0) { if ($ci -lt $offset) { $offset = $ci }; if ($ci -ge $offset + $rows) { $offset = $ci - $rows + 1 } }
+        if ($offset -gt [Math]::Max(0, $vis.Count - $rows)) { $offset = [Math]::Max(0, $vis.Count - $rows) }
+
+        # ---- build the frame
+        $lines = [System.Collections.Generic.List[string]]::new()
+        foreach ($t in $Title) { $lines.Add($t) }
+        for ($i = 0; $i -lt $Pinned.Count; $i++) {
+            $mark = if ($cursor -eq $i) { "[$($Hex.Orange) bold]$($Glyph.Tri)[/] " } else { '  ' }
+            $lines.Add("$mark$($Pinned[$i].Label)")
+        }
+        for ($r = 0; $r -lt $rows; $r++) {
+            $idx = $offset + $r
+            if ($idx -ge $vis.Count) { $lines.Add(''); continue }
+            $it = $vis[$idx]
+            $isCur = ($cursor -eq $Pinned.Count + $idx)
+            $mark = if ($isCur) { "[$($Hex.Orange) bold]$($Glyph.Tri)[/] " } else { '  ' }
+            $box = ''
+            if ($Multi) {
+                if ($it.IsHeader) {
+                    $g = @($Items | Where-Object { -not $_.IsHeader -and $_.Group -eq $it.Group })
+                    $n = @($g | Where-Object { $sel.ContainsKey($_.Key) }).Count
+                    $box = if ($n -eq $g.Count -and $n) { "[$($Hex.Green)]$($Glyph.On)[/] " } elseif ($n) { "[$($Hex.Yellow)]$($Glyph.On)[/] " } else { "[$($Hex.Gray)]$($Glyph.Off)[/] " }
+                    $lines.Add("$mark$box$($it.Label) [$($Hex.Gray)]$n/$($g.Count)[/]"); continue
+                }
+                $box = if ($sel.ContainsKey($it.Key)) { "[$($Hex.Green)]$($Glyph.On)[/] " } else { "[$($Hex.Gray)]$($Glyph.Off)[/] " }
+                $box = '  ' + $box
+            }
+            $label = if ($isCur) { "[on $($Hex.Bg1)]$($it.Label)[/]" } else { $it.Label }
+            $lines.Add("$mark$box$label")
+        }
+        $below = $vis.Count - $offset - $rows
+        $more = if ($below -gt 0) { "[$($Hex.Gray)]  $($Glyph.Down) $below more[/]" } elseif ($vis.Count -eq 0) { "[$($Hex.Gray)]  (no match)[/]" } else { '' }
+        $lines.Add($more)
+        if ($searching) {
+            $lines.Add("[$($Hex.Orange) bold]  / [/][$($Hex.Fg)]$(E $filter)[/][$($Hex.Orange)]$($Glyph.Full)[/]  $(Get-KeyHint @('type|filter', 'enter|done', 'esc|clear'))")
+        } else {
+            $hint = @("$($Glyph.Up)$($Glyph.Down)|move")
+            if ($Multi) { $hint += @('space|toggle', 'a/n|group all/none', '/|search', 'enter|continue') }
+            else { $hint += 'enter|select'; if ($Search) { $hint += '/|search' } }
+            if (-not $NoBack) { $hint += 'esc|back' }
+            if ($QuitKey) { $hint += "$QuitKey|quit" }
+            $lines.Add('  ' + (Get-KeyHint $hint))
+        }
+        $sc = if ($Multi) { "  [$($Hex.Green)]$($sel.Count) selected[/]" } else { '' }
+        $lines.Add("[$($Hex.Line)]$($Glyph.LineH * 3)[/]$sc" + $(if ($filter -and -not $searching) { "  [$($Hex.Gray)]filter:[/] [$($Hex.Fg)]$(E $filter)[/] [$($Hex.Gray)](esc clears)[/]" } else { '' }))
+
+        # ---- draw (real console: redraw in place; test console: append frames)
+        if ($script:Test) {
+            if ($first) { $script:Heights.Add("$($script:ScreenName)=$((Get-LinesUsed) + $lines.Count)") }
+        } else {
+            if ($start -lt 0) {
+                [Console]::Write("`n" * $reserve)                    # make room (scrolls the window if needed)
+                $start = [Math]::Max(0, [Console]::CursorTop - $reserve)
+            }
+            [Console]::SetCursorPosition(0, $start)
+            [Console]::Write("$([char]27)[J")
+        }
+        foreach ($l in $lines) { Say (Limit-Markup $l $width) }
+        $first = $false
+
+        # ---- keys
+        $k = Read-KitKey
+        $kc = $k.KeyChar
+        $curItem = if ($ci -ge 0 -and $ci -lt $vis.Count) { $vis[$ci] } else { $null }
+        switch ($k.Key) {
+            'UpArrow'   { $cursor = if ($cursor -le 0) { $nav - 1 } else { $cursor - 1 }; continue }
+            'DownArrow' { $cursor = if ($cursor -ge $nav - 1) { 0 } else { $cursor + 1 }; continue }
+            'PageUp'    { $cursor = [Math]::Max(0, $cursor - $rows); continue }
+            'PageDown'  { $cursor = [Math]::Min($nav - 1, $cursor + $rows); continue }
+            'Home'      { $cursor = 0; continue }
+            'End'       { $cursor = $nav - 1; continue }
+        }
+        # (continue inside a switch only leaves the switch)
+        if ($k.Key -in 'UpArrow', 'DownArrow', 'PageUp', 'PageDown', 'Home', 'End') { continue }
+        if ($searching) {
+            if ($k.Key -eq 'Escape') { $filter = ''; $searching = $false; $cursor = $Pinned.Count; continue }
+            if ($k.Key -eq 'Backspace') { if ($filter) { $filter = $filter.Substring(0, $filter.Length - 1) } else { $searching = $false }; continue }
+            if ($k.Key -eq 'Enter') {
+                $searching = $false
+                if (-not $Multi -and $curItem) { return @{ Action = 'select'; Key = $curItem.Key; Selected = @() } }
+                continue
+            }
+            if ([int]$kc -ge 32) { $filter += $kc; $cursor = $Pinned.Count; $offset = 0; continue }
+            continue
+        }
+        if ($k.Key -in 'Escape', 'Backspace', 'LeftArrow') {
+            if ($filter) { $filter = ''; $cursor = $Pinned.Count; continue }
+            if (-not $NoBack) { return @{ Action = 'back'; Key = $null; Selected = @($sel.Keys) } }
+            continue
+        }
+        if ($QuitKey -and "$kc" -eq $QuitKey) { return @{ Action = 'quit'; Key = $null; Selected = @() } }
+        if ("$kc" -eq '/' -and ($Multi -or $Search)) { $searching = $true; continue }
+        if ($k.Key -eq 'Enter' -or ($k.Key -eq 'Spacebar' -and $cursor -lt $Pinned.Count)) {
+            if ($cursor -lt $Pinned.Count) { return @{ Action = 'pinned'; Key = $Pinned[$cursor].Key; Selected = @($sel.Keys) } }
+            if ($Multi) { return @{ Action = 'ok'; Key = $null; Selected = @($sel.Keys) } }
+            if ($curItem) { return @{ Action = 'select'; Key = $curItem.Key; Selected = @() } }
+            continue
+        }
+        if ($Multi -and $curItem) {
+            if ($k.Key -eq 'Spacebar') {
+                if ($curItem.IsHeader) {
+                    $g = @($Items | Where-Object { -not $_.IsHeader -and $_.Group -eq $curItem.Group })
+                    $allOn = @($g | Where-Object { $sel.ContainsKey($_.Key) }).Count -eq $g.Count
+                    foreach ($x in $g) { if ($allOn) { $sel.Remove($x.Key) } else { $sel[$x.Key] = $true } }
+                } elseif ($sel.ContainsKey($curItem.Key)) { $sel.Remove($curItem.Key) } else { $sel[$curItem.Key] = $true }
+                continue
+            }
+            if ("$kc" -in 'a', 'n') {
+                foreach ($x in @($Items | Where-Object { -not $_.IsHeader -and $_.Group -eq $curItem.Group })) {
+                    if ("$kc" -eq 'a') { $sel[$x.Key] = $true } else { $sel.Remove($x.Key) }
+                }
+                continue
+            }
+        }
+    }
 }
 
 function Select-One {
-    <#
-    One choice from an ordered list of @{ Key; Label } (Label = markup). Returns Key.
-    SelectionPrompt has no footer, so the key hints go into its title line.
-    #>
-    param([string]$Title, [object[]]$Items, [switch]$Search, [string]$Hint)
-    $p = [Spectre.Console.SelectionPrompt[string]]::new()
-    if (-not $Hint) { $Hint = if ($Search) { Get-KeyHint @('type|search', "$($Glyph.Up)$($Glyph.Down)|move", 'enter|toggle') } else { Get-KeyHint @("$($Glyph.Up)$($Glyph.Down)|move", 'enter|select') } }
-    $p.Title = if ($Title) { "$Title`n$Hint" } else { $Hint }
-    $p.PageSize = [Math]::Max(3, [Math]::Min((Get-PageSize), $Items.Count))
-    $p.WrapAround = $true
-    $p.HighlightStyle = St "$($Hex.Orange) bold"
-    $p.MoreChoicesText = "[$($Hex.Gray)]($($Glyph.Down) more)[/]"
-    if ($Search) {
-        $p.SearchEnabled = $true
-        $p.SearchHighlightStyle = St "$($Hex.Yellow) underline"
-        $p.SearchPlaceholderText = "[$($Hex.Gray)](type to search)[/]"
-        $p.PageSize = Get-PageSize 10
+    <# Single choice; a pinned Back row on every screen except the main menu. Returns Key, or 'back' / 'quit'. #>
+    param([string[]]$Title, [object[]]$Items, [string]$BackLabel = 'Back', [string]$QuitKey = '', [switch]$NoBack)
+    $pinned = @()
+    if (-not $NoBack) { $pinned = @(New-PickItem 'back' "[$($Hex.Gray)]$($Glyph.Left) $(E $BackLabel)[/]") }
+    $list = @($Items | ForEach-Object { if ($_ -is [hashtable]) { New-PickItem $_.Key $_.Label } else { $_ } })
+    $r = Show-Picker -Title $Title -Items $list -Pinned $pinned -QuitKey $QuitKey -NoBack:$NoBack
+    switch ($r.Action) {
+        'select' { return $r.Key }
+        'pinned' { return $r.Key }
+        'quit'   { return 'quit' }
+        default  { return 'back' }
     }
-    $map = @{}
-    foreach ($it in $Items) { $map[$it.Label] = $it.Key; [void]$p.AddChoice($it.Label) }
-    return $map[(Show-Prompt $p)]
 }
 
-function Confirm-Kit([string]$Question, [bool]$Default = $true) {
-    $p = [Spectre.Console.ConfirmationPrompt]::new($Question)
-    $p.DefaultValue = $Default
-    return [bool](Show-Prompt $p)
+function Wait-Back([string]$Label = 'Back to main menu') {
+    [void](Select-One -Title @() -Items @(@{ Key = 'ok'; Label = "[$($Hex.Orange) bold]$($Glyph.Left) $(E $Label)[/]" }) -BackLabel $Label)
 }
+
+# ---------------------------------------------------------------- tables, panels, labels
 
 function New-KitTable([string[]]$Columns, [string]$BorderHex = '') {
     if (-not $BorderHex) { $BorderHex = $Hex.Line }
@@ -282,17 +512,14 @@ function Get-MethodLabel($p) {
     }
 }
 
-function Get-GroupLabel($g, [int]$Count = -1) {
+function Get-GroupLabel($g) {
     $s = $script:GroupStyle[$g.Key]
-    $l = "[$($s.Color) bold]$($s.Icon) $(E $g.Label.ToUpper())[/]"
-    if ($Count -ge 0) { $l += " [$($Hex.Gray)]($Count)[/]" }
-    return $l
+    return "[$($s.Color) bold]$($s.Icon) $(E $g.Label.ToUpper())[/]"
 }
 
 # ---------------------------------------------------------------- badges (one vocabulary everywhere)
 
 function Get-StateBadge($p) {
-    <# Picker / review / AI table: installed, update available, not installed. #>
     if (-not $script:Installed.ContainsKey($p.Id)) { return "[$($Hex.Gray)]$($Glyph.Not)[/]" }
     if ($script:Updates.ContainsKey($p.Id)) { return "[$($Hex.Yellow) bold]$($Glyph.Up)[/]" }
     return "[$($Hex.Green)]$($Glyph.Ok)[/]"
@@ -330,11 +557,10 @@ function Get-VersionMarkup($r) {
     return "[$($Hex.Gray)]-[/]"
 }
 function Get-LegendMarkup {
-    return "[$($Hex.Green)]$($Glyph.Ok) installed[/]  [$($Hex.Yellow)]$($Glyph.Up) update available[/]  [$($Hex.Gray)]$($Glyph.Not) not installed[/]  [$($Hex.Red)]$($Glyph.Fail) failed[/]  [$($Hex.Aqua)]$($Glyph.Heal) healed[/]"
+    return "[$($Hex.Green)]$($Glyph.Ok) installed[/]  [$($Hex.Yellow)]$($Glyph.Up) update[/]  [$($Hex.Gray)]$($Glyph.Not) not installed[/]  [$($Hex.Red)]$($Glyph.Fail) failed[/]  [$($Hex.Aqua)]$($Glyph.Heal) healed[/]"
 }
 
 function Invoke-Scan([switch]$Updates) {
-    <# Installed versions (+ available updates). Spinner while it runs. #>
     $script:Installed = @{}; $script:Updates = @{}
     $st = [Spectre.Console.AnsiConsole]::Status()
     $st.Spinner = [Spectre.Console.Spinner+Known]::Point
@@ -348,6 +574,14 @@ function Invoke-Scan([switch]$Updates) {
         }
     })
     $script:ScanDone = $true
+}
+
+function Get-TrimmedRows([object[]]$Rows, [int]$Max, [scriptblock]$Priority) {
+    <# Keep tables short enough that the action list below them stays on screen. #>
+    if ($Rows.Count -le $Max) { return @{ Rows = $Rows; Hidden = 0 } }
+    $keep = @($Rows | Sort-Object $Priority | Select-Object -First $Max)
+    $ordered = @($Rows | Where-Object { $keep -contains $_ })
+    return @{ Rows = $ordered; Hidden = $Rows.Count - $Max }
 }
 
 # ---------------------------------------------------------------- state
@@ -364,7 +598,8 @@ if (-not (Test-KitWinget) -and -not $script:Test) {
     Show-Header 'winget missing'
     Out-Render (New-KitPanel "[$($Hex.Fg)]winget (App Installer) is missing - most installs need it.`nOpening its Microsoft Store page: install it, then run install.cmd again.[/]" " [$($Hex.Red)]$($Glyph.Warn) heads up[/] " $Hex.Red)
     try { Start-Process 'ms-windows-store://pdp/?ProductId=9NBLGGH4NNS1' } catch { Say 'Manual link: https://aka.ms/getwinget' }
-    [void](Confirm-Kit 'Continue anyway (script and direct installs still work)?' $false)
+    Say ''
+    if ((Select-One -Title "[$($Hex.Fg) bold]Continue anyway?[/] [$($Hex.Gray)](script and direct installs still work)[/]" -Items @(@{ Key = 'yes'; Label = 'Continue' }) -BackLabel 'Quit') -ne 'yes') { exit 0 }
 }
 
 # ---------------------------------------------------------------- app picker
@@ -377,64 +612,38 @@ function Get-AppLabel($it) {
 }
 
 function Select-Apps {
-    <# Grouped multi-select, preselected with $Preselect Ids. Returns package objects. #>
-    param([int[]]$Preselect)
-    $p = [Spectre.Console.MultiSelectionPrompt[string]]::new()
-    $p.Title = "[$($Hex.Fg) bold]Choose apps[/]   $(Get-LegendMarkup)"
-    $p.Mode = [Spectre.Console.SelectionMode]::Leaf
-    $p.PageSize = Get-PageSize 10
-    $p.WrapAround = $true
-    $p.Required = $false
-    $p.HighlightStyle = St "$($Hex.Orange) bold"
-    # MultiSelectionPrompt has a footer: the persistent key-hint bar lives here
-    $p.InstructionsText = Get-KeyHint @("$($Glyph.Up)$($Glyph.Down)|move", 'space|toggle (a group header toggles the group)', 'enter|confirm')
-    $p.MoreChoicesText = "[$($Hex.Gray)]($($Glyph.Down) more apps)[/]"
-
-    $map = @{}
-    foreach ($g in $script:Groups) {
-        $items = @($script:Catalog | Where-Object Group -eq $g.Key | Sort-Object Id)
-        if (-not $items) { continue }
-        $gLabel = Get-GroupLabel $g $items.Count
-        if ($g.Key -eq 'POST') { $gLabel += " [$($Hex.Red)]runs last, opens its own windows[/]" }
-        $node = $p.AddChoice($gLabel)
-        foreach ($it in $items) {
-            $label = Get-AppLabel $it
-            $child = $node.AddChild($label)
-            if ($Preselect -contains $it.Id) { [void]$child.Select() }
-            $map[$label] = $it
+    <# Grouped multi-select. Returns @{ Action = ok|back; Packages }. #>
+    param([int[]]$Preselect, [switch]$StartSearch, [string]$Heading = 'Choose apps')
+    $items = foreach ($g in $script:Groups) {
+        $members = @($script:Catalog | Where-Object Group -eq $g.Key | Sort-Object Id)
+        if (-not $members) { continue }
+        $gl = Get-GroupLabel $g
+        if ($g.Key -eq 'POST') { $gl += " [$($Hex.Red)]runs last, opens its own windows[/]" }
+        New-PickItem "g:$($g.Key)" $gl -Group $g.Key -Header
+        foreach ($it in $members) {
+            New-PickItem "$($it.Id)" (Get-AppLabel $it) -Text "$($it.Name) $($it.Desc)" -Group $g.Key -On:($Preselect -contains $it.Id)
         }
-        # Leaf mode: a fully preselected group shows its header ticked too
-        if (@($items | Where-Object { $Preselect -notcontains $_.Id }).Count -eq 0) { [void]$node.Select() }
     }
-    $picked = @(Show-Prompt $p)
-    return @($picked | ForEach-Object { $map[$_] } | Where-Object { $_ })
-}
-
-function Edit-BySearch {
-    <# Type-to-search one app at a time; each pick toggles it. Returns the new selection. #>
-    param([object[]]$Selection)
-    $sel = @{}; foreach ($s in $Selection) { $sel[$s.Id] = $true }
-    while ($true) {
-        $items = @(@{ Key = 'done'; Label = "[$($Hex.Orange) bold]$($Glyph.Pointer) Done[/] [$($Hex.Gray)]($($sel.Count) selected)[/]" })
-        foreach ($it in ($script:Catalog | Sort-Object Name)) {
-            # Glyph boxes, not "[[x]]": escaped brackets break Spectre's search highlighting
-            $box = if ($sel.ContainsKey($it.Id)) { "[$($Hex.Green)]$(C 0x25CF)[/]" } else { "[$($Hex.Gray)]$(C 0x25CB)[/]" }
-            $gs = $script:GroupStyle[$it.Group]
-            $items += @{ Key = "$($it.Id)"; Label = "$box $(Get-StateBadge $it) [$($gs.Color)]$($gs.Icon)[/] $(E $it.Name)  [$($Hex.Gray)]$(E $it.Desc)[/]" }
-        }
-        $k = Select-One -Title "[$($Hex.Fg) bold]Search an app to add or remove it[/]" -Items $items -Search
-        if ($k -eq 'done' -or -not $k) { break }
-        $id = [int]$k
-        if ($sel.ContainsKey($id)) { $sel.Remove($id) } else { $sel[$id] = $true }
-    }
-    return @($script:Catalog | Where-Object { $sel.ContainsKey($_.Id) })
+    $pinned = @(
+        New-PickItem 'done' "[$($Hex.Orange) bold]$($Glyph.Pointer) Continue[/] [$($Hex.Gray)](enter)[/]"
+        New-PickItem 'back' "[$($Hex.Gray)]$($Glyph.Left) Back[/]"
+    )
+    $title = @("[$($Hex.Fg) bold]$(E $Heading)[/]   $(Get-LegendMarkup)")
+    $r = Show-Picker -Title $title -Items @($items) -Pinned $pinned -Multi -StartSearch:$StartSearch
+    if ($r.Action -eq 'back' -or ($r.Action -eq 'pinned' -and $r.Key -eq 'back')) { return @{ Action = 'back'; Packages = @() } }
+    $ids = @($r.Selected | Where-Object { $_ -notlike 'g:*' } | ForEach-Object { [int]$_ })
+    return @{ Action = 'ok'; Packages = @($script:Catalog | Where-Object { $ids -contains $_.Id }) }
 }
 
 function Show-Review {
     param([object[]]$Selection)
+    $order = @(Get-KitRunOrder $Selection)
+    # rows that fit: window - header(3) - title/borders/caption(5) - POST note(1) - action list(~9)
+    $max = [Math]::Max(4, (Get-WindowHeight) - 20)
+    $trim = Get-TrimmedRows $order $max { if ($script:Updates.ContainsKey($_.Id)) { 0 } elseif (-not $script:Installed.ContainsKey($_.Id)) { 1 } else { 2 } }
     $t = New-KitTable @(' ', 'App', 'Group', 'How', 'On this PC', 'Will') $Hex.Orange
     $gmap = @{}; foreach ($g in $script:Groups) { $gmap[$g.Key] = $g }
-    foreach ($p in (Get-KitRunOrder $Selection)) {
+    foreach ($p in $trim.Rows) {
         $isInst = $script:Installed.ContainsKey($p.Id)
         $will = if ($p.Interactive) { "[$($Hex.Purple)]run (interactive)[/]" }
                 elseif ($script:Updates.ContainsKey($p.Id)) { "[$($Hex.Yellow)]update[/]" }
@@ -446,8 +655,9 @@ function Show-Review {
     $n = $Selection.Count
     $have = @($Selection | Where-Object { $script:Installed.ContainsKey($_.Id) }).Count
     $upd = @($Selection | Where-Object { $script:Updates.ContainsKey($_.Id) }).Count
-    $t.Title = [Spectre.Console.TableTitle]::new("[$($Hex.Orange) bold]Review[/]")
-    $t.Caption = [Spectre.Console.TableTitle]::new("[$($Hex.Fg)]$(Get-Plural $n "app")[/] [$($Hex.Gray)]$($Glyph.Dot)[/] [$($Hex.Green)]$($n - $have) new[/] [$($Hex.Gray)]$($Glyph.Dot)[/] [$($Hex.Yellow)]$upd with updates[/] [$($Hex.Gray)]$($Glyph.Dot) $have already installed[/]")
+    $cap = "[$($Hex.Fg)]$(Get-Plural $n "app")[/] [$($Hex.Gray)]$($Glyph.Dot)[/] [$($Hex.Green)]$($n - $have) new[/] [$($Hex.Gray)]$($Glyph.Dot)[/] [$($Hex.Yellow)]$upd with updates[/] [$($Hex.Gray)]$($Glyph.Dot) $have already installed[/]"
+    if ($trim.Hidden) { $cap += " [$($Hex.Gray)]$($Glyph.Dot) $($trim.Hidden) more not shown (new and updates first)[/]" }
+    $t.Caption = [Spectre.Console.TableTitle]::new($cap)
     Out-Render $t
     if (@($Selection | Where-Object Group -eq 'POST').Count -gt 0) {
         Say "[$($Hex.Red)]$($Glyph.Warn)[/] [$($Hex.Fg)]Post-install items run last and open their own prompts or windows.[/]"
@@ -459,18 +669,19 @@ function Show-Review {
 function Write-ResultLine($res) {
     $line = "  $(Get-ResultBadge $res) [$($Hex.Fg)]$(E $res.Name)[/]  $(Get-ResultText $res)  $(Get-VersionMarkup $res)  [$($Hex.Gray)]$($res.Seconds)s[/]"
     if ($res.Healed) { $line += "  [$($Hex.Aqua)]$($Glyph.Heal) $(E $res.Healed)[/]" }
-    if ($res.Status -eq 'failed' -and $res.Detail) { $line += "`n      [$($Hex.Gray)]$(E $res.Detail)[/]" }
-    Say $line
+    if ($res.Status -eq 'failed' -and $res.Detail) { $line += "  [$($Hex.Gray)]$(E $res.Detail)[/]" }
+    Say (Limit-Markup $line ((Get-WindowWidth) - 1))
 }
 
 function Invoke-Run {
-    <# Install/update a selection with a live progress view, then results table + summary panel. #>
+    <# Install/update with a live progress view, then a results screen that fits the window. #>
     param([object[]]$Selection, [ValidateSet('install', 'update')][string]$Mode = 'install', [string]$Title = 'Installing')
     $order = @(Get-KitRunOrder $Selection)
     $live = @($order | Where-Object { -not $_.Interactive -or $script:DryRunOn })
     $inter = @($order | Where-Object { $_.Interactive -and -not $script:DryRunOn })
     Show-Header $Title
     $log = Start-KitLog
+    Write-KitRunLog "run: $Mode $($order.Count) app(s), dryrun=$($script:DryRunOn), log $log"
     $before = @(); if ($script:State.RemoveShortcuts) { $before = @(Get-KitDesktopShortcuts) }
     $total = [Diagnostics.Stopwatch]::StartNew()
     $script:runResults = [System.Collections.Generic.List[object]]::new()
@@ -522,34 +733,34 @@ function Invoke-Run {
         Write-ResultLine $res
     }
     $results = @($script:runResults)
-
     $removed = @()
     if ($script:State.RemoveShortcuts -and -not $script:DryRunOn) { $removed = @(Remove-KitNewShortcuts -Before $before) }
-
-    # Results table
-    Say ''
     $fl = @($results | Where-Object Status -eq 'failed').Count
+    $ok = @($results | Where-Object Status -in 'installed', 'updated', 'current', 'done', 'dryrun').Count
+    $hl = @($results | Where-Object Healed).Count
+    Write-KitRunLog "run: done - $ok ok, $hl healed, $fl failed in $(Format-Duration $total.Elapsed)"
+
+    # Results screen (fresh, so the summary and the back item are always on screen)
+    Show-Header "$Title $($Glyph.Dot) results"
+    $max = [Math]::Max(4, (Get-WindowHeight) - 21)
+    $trim = Get-TrimmedRows $results $max { switch ($_.Status) { 'failed' { 0 } default { if ($_.Healed) { 1 } elseif ($_.Status -in 'installed', 'updated') { 2 } else { 3 } } } }
     $t = New-KitTable @(' ', 'App', 'Result', 'Version', 'Time', 'Note') $(if ($fl) { $Hex.Red } else { $Hex.Green })
-    foreach ($r in $results) {
+    foreach ($r in $trim.Rows) {
         $note = ''
         if ($r.Healed) { $note = "[$($Hex.Aqua)]$($Glyph.Heal) $(E $r.Healed)[/]" }
         elseif ($r.Status -in 'failed', 'dryrun' -and $r.Detail) { $note = "[$($Hex.Gray)]$(E $r.Detail)[/]" }
-        Add-KitRow $t @((Get-ResultBadge $r), "[$($Hex.Fg)]$(E $r.Name)[/]", (Get-ResultText $r), (Get-VersionMarkup $r), "[$($Hex.Gray)]$($r.Seconds)s[/]", $note)
+        # one line per row, so the screen height stays predictable (details are in the log)
+        Add-KitRow $t @((Get-ResultBadge $r), "[$($Hex.Fg)]$(E $r.Name)[/]", (Get-ResultText $r), (Get-VersionMarkup $r), "[$($Hex.Gray)]$($r.Seconds)s[/]", (Limit-Markup $note 46))
     }
-    $t.Title = [Spectre.Console.TableTitle]::new("[$($Hex.Orange) bold]Results[/]")
+    if ($trim.Hidden) { $t.Caption = [Spectre.Console.TableTitle]::new("[$($Hex.Gray)]$($trim.Hidden) more not shown (failures and changes first) - full list in the log[/]") }
     Out-Render $t
-
-    # Summary panel
-    $ok = @($results | Where-Object Status -in 'installed', 'updated', 'current', 'done', 'dryrun').Count
-    $hl = @($results | Where-Object Healed).Count
     $sum = "[$($Hex.Green) bold]$($Glyph.Ok) $ok ok[/]   [$($Hex.Aqua) bold]$($Glyph.Heal) $hl healed[/]   [$($Hex.Red) bold]$($Glyph.Fail) $fl failed[/]   [$($Hex.Fg)]total $(Format-Duration $total.Elapsed)[/]"
-    if ($script:DryRunOn) { $sum += "`n[$($Hex.Purple) bold]$($Glyph.Dry) DRY RUN - nothing was installed or changed[/]" }
+    if ($script:DryRunOn) { $sum += "   [$($Hex.Purple) bold]$($Glyph.Dry) DRY RUN - nothing was installed or changed[/]" }
     if ($removed.Count) { $sum += "`n[$($Hex.Gray)]Removed $($removed.Count) new desktop shortcut(s): $(E ($removed -join ', '))[/]" }
     if ($hl) { $sum += "`n[$($Hex.Aqua)]Healed package IDs saved to winget-id-overrides.json - every PC starts healed.[/]" }
     $sum += "`n[$($Hex.Gray)]Log: $(E $log)[/]"
     $border = if ($script:DryRunOn) { $Hex.Purple } elseif ($fl) { $Hex.Red } else { $Hex.Green }
     Out-Render (New-KitPanel $sum " [$border bold]Summary[/] " $border)
-    Say ''
 
     $script:State.LastSelection = @($Selection | ForEach-Object Id)
     $script:State.LastFailed = @($results | Where-Object Status -eq 'failed' | ForEach-Object Id)
@@ -559,54 +770,71 @@ function Invoke-Run {
 
 # ---------------------------------------------------------------- screens
 
-function Wait-Back { [void](Select-One -Title '' -Items @(@{ Key = 'ok'; Label = "[$($Hex.Orange) bold]$($Glyph.Left) Back to main menu[/]" })) }
-
 function Show-Install {
-    Show-Header 'Install or update apps'
-    if (-not $script:ScanDone) { Invoke-Scan -Updates }
-    $def = @($script:Catalog | Where-Object Default)
-    $missing = @($def | Where-Object { -not $script:Installed.ContainsKey($_.Id) })
-    $upd = @($script:Catalog | Where-Object { $script:Updates.ContainsKey($_.Id) })
-    Say "  [$($Hex.Green)]$($Glyph.Ok) $($script:Installed.Count) installed[/]   [$($Hex.Yellow)]$($Glyph.Up) $($upd.Count) with updates[/]   [$($Hex.Gray)]$($Glyph.Not) $($script:Catalog.Count - $script:Installed.Count) not installed[/]"
-    Say ''
-    $items = @(
-        @{ Key = 'def';  Label = "[$($Hex.Fg)]Recommended set[/] [$($Hex.Gray)]($(Get-Plural $def.Count "app"), installed ones update if newer)[/]" }
-        @{ Key = 'miss'; Label = "[$($Hex.Fg)]Recommended, only what's missing here[/] [$($Hex.Gray)]($(Get-Plural $missing.Count "app"))[/]" }
-    )
-    if ($upd.Count) { $items += @{ Key = 'upd'; Label = "[$($Hex.Yellow)]$($Glyph.Up) Everything with an update[/] [$($Hex.Gray)]($(Get-Plural $upd.Count "app"))[/]" } }
-    if ($script:State.LastFailed.Count)    { $items += @{ Key = 'fail'; Label = "[$($Hex.Red)]$($Glyph.Fail) Retry last run's failures[/] [$($Hex.Gray)]($(Get-Plural $script:State.LastFailed.Count "app"))[/]" } }
-    if ($script:State.LastSelection.Count) { $items += @{ Key = 'last'; Label = "[$($Hex.Fg)]My last selection on this PC[/] [$($Hex.Gray)]($(Get-Plural $script:State.LastSelection.Count "app"))[/]" } }
-    $items += @{ Key = 'none'; Label = "[$($Hex.Fg)]Start empty[/]" }
-    $items += @{ Key = 'back'; Label = "[$($Hex.Gray)]$($Glyph.Left) Back[/]" }
-    $start = Select-One -Title "[$($Hex.Fg) bold]Start from[/]" -Items $items
-    $pre = switch ($start) {
-        'def'  { @($def.Id) }
-        'miss' { @($missing.Id) }
-        'upd'  { @($upd.Id) }
-        'fail' { $script:State.LastFailed }
-        'last' { $script:State.LastSelection }
-        'none' { @() }
-        default { return }
-    }
-
-    $sel = @(Select-Apps -Preselect $pre)
+    if (-not $script:ScanDone) { Show-Header 'Install or update apps'; Invoke-Scan -Updates }
+    $step = 'start'; $sel = @()
     while ($true) {
-        Show-Header 'Review'
-        if ($sel.Count -eq 0) { Say "[$($Hex.Gray)]  Nothing selected.[/]" } else { Show-Review $sel }
-        Say ''
-        $acts = @()
-        if ($sel.Count) {
-            $verb = if ($script:DryRunOn) { 'Simulate' } else { 'Install' }
-            $acts += @{ Key = 'go'; Label = "[$($Hex.Orange) bold]$($Glyph.Pointer) $verb now[/] [$($Hex.Gray)]($(Get-Plural $sel.Count "app"))[/]" }
-        }
-        $acts += @{ Key = 'search'; Label = "[$($Hex.Fg)]Search to add or remove an app[/]" }
-        $acts += @{ Key = 'edit';   Label = "[$($Hex.Fg)]Change the selection (full list)[/]" }
-        $acts += @{ Key = 'back';   Label = "[$($Hex.Gray)]$($Glyph.Left) Back to main menu[/]" }
-        switch (Select-One -Title "[$($Hex.Fg) bold]Next[/]" -Items $acts) {
-            'go'     { [void](Invoke-Run -Selection $sel); $script:ScanDone = $false; Wait-Back; return }
-            'search' { $sel = @(Edit-BySearch -Selection $sel) }
-            'edit'   { $sel = @(Select-Apps -Preselect @($sel.Id)) }
-            default  { return }
+        switch ($step) {
+            'start' {
+                Show-Header 'Install or update apps'
+                $def = @($script:Catalog | Where-Object Default)
+                $missing = @($def | Where-Object { -not $script:Installed.ContainsKey($_.Id) })
+                $upd = @($script:Catalog | Where-Object { $script:Updates.ContainsKey($_.Id) })
+                Say "  [$($Hex.Green)]$($Glyph.Ok) $($script:Installed.Count) installed[/]   [$($Hex.Yellow)]$($Glyph.Up) $($upd.Count) with updates[/]   [$($Hex.Gray)]$($Glyph.Not) $($script:Catalog.Count - $script:Installed.Count) not installed[/]"
+                Say ''
+                $items = @(
+                    @{ Key = 'def';  Label = "[$($Hex.Fg)]Recommended set[/] [$($Hex.Gray)]($(Get-Plural $def.Count "app"), installed ones update if newer)[/]" }
+                    @{ Key = 'miss'; Label = "[$($Hex.Fg)]Recommended, only what's missing here[/] [$($Hex.Gray)]($(Get-Plural $missing.Count "app"))[/]" }
+                )
+                if ($upd.Count) { $items += @{ Key = 'upd'; Label = "[$($Hex.Yellow)]$($Glyph.Up) Everything with an update[/] [$($Hex.Gray)]($(Get-Plural $upd.Count "app"))[/]" } }
+                if ($script:State.LastFailed.Count)    { $items += @{ Key = 'fail'; Label = "[$($Hex.Red)]$($Glyph.Fail) Retry last run's failures[/] [$($Hex.Gray)]($(Get-Plural $script:State.LastFailed.Count "app"))[/]" } }
+                if ($script:State.LastSelection.Count) { $items += @{ Key = 'last'; Label = "[$($Hex.Fg)]My last selection on this PC[/] [$($Hex.Gray)]($(Get-Plural $script:State.LastSelection.Count "app"))[/]" } }
+                $items += @{ Key = 'none'; Label = "[$($Hex.Fg)]Start empty[/]" }
+                $start = Select-One -Title "[$($Hex.Fg) bold]Start from[/]" -Items $items -BackLabel 'Back to main menu'
+                $pre = switch ($start) {
+                    'def'  { @($def.Id) }
+                    'miss' { @($missing.Id) }
+                    'upd'  { @($upd.Id) }
+                    'fail' { $script:State.LastFailed }
+                    'last' { $script:State.LastSelection }
+                    'none' { @() }
+                    default { return }
+                }
+                $sel = @($script:Catalog | Where-Object { $pre -contains $_.Id })
+                $step = 'pick'
+            }
+            'pick' {
+                Show-Header 'Choose apps'
+                $r = Select-Apps -Preselect @($sel.Id)
+                if ($r.Action -eq 'back') { $step = 'start'; continue }
+                $sel = @($r.Packages); $step = 'review'
+            }
+            'search' {
+                Show-Header 'Search apps'
+                $r = Select-Apps -Preselect @($sel.Id) -StartSearch -Heading 'Search apps'
+                if ($r.Action -eq 'ok') { $sel = @($r.Packages) }
+                $step = 'review'
+            }
+            'review' {
+                Show-Header 'Review'
+                if ($sel.Count -eq 0) { Say "[$($Hex.Gray)]  Nothing selected.[/]" } else { Show-Review $sel }
+                Say ''
+                $acts = @()
+                if ($sel.Count) {
+                    $verb = if ($script:DryRunOn) { 'Simulate' } else { 'Install' }
+                    $acts += @{ Key = 'go'; Label = "[$($Hex.Orange) bold]$($Glyph.Pointer) $verb now[/] [$($Hex.Gray)]($(Get-Plural $sel.Count "app"))[/]" }
+                }
+                $acts += @{ Key = 'search'; Label = "[$($Hex.Fg)]Search to add or remove an app[/]" }
+                $acts += @{ Key = 'edit';   Label = "[$($Hex.Fg)]Change the selection (full list)[/]" }
+                $acts += @{ Key = 'menu';   Label = "[$($Hex.Gray)]Main menu[/]" }
+                switch (Select-One -Title "[$($Hex.Fg) bold]Next[/]" -Items $acts -BackLabel 'Back to the app list') {
+                    'go'     { [void](Invoke-Run -Selection $sel); $script:ScanDone = $false; Wait-Back; return }
+                    'search' { $step = 'search' }
+                    'edit'   { $step = 'pick' }
+                    'menu'   { return }
+                    default  { $step = 'pick' }
+                }
+            }
         }
     }
 }
@@ -629,46 +857,52 @@ function Show-UpdateAI {
             if ($lt -and $script:Installed.ContainsKey($p.Id) -and -not (Test-KitVersionCurrent -Installed $script:Installed[$p.Id] -Latest $lt)) { $script:Updates[$p.Id] = $lt }
         }
     })
+    $script:ScanDone = $false   # updates map here is AI-only; the install screen rescans
 
-    $t = New-KitTable @(' ', 'Tool', 'Installed', 'Latest', 'How it updates') $Hex.Aqua
-    foreach ($p in $ai) {
-        $inst = if ($script:Installed.ContainsKey($p.Id)) { $v = $script:Installed[$p.Id]; if ($v) { E $v } else { 'installed' } } else { "[$($Hex.Gray)]not installed[/]" }
-        $lt = $script:latest[$p.Id]
-        $latest = if ($script:Updates.ContainsKey($p.Id)) { "[$($Hex.Yellow) bold]$(E $lt)[/]" } elseif ($lt) { "[$($Hex.Green)]$(E $lt)[/]" } elseif ($p.Update) { "[$($Hex.Gray)]checked by $(E $p.Update)[/]" } else { "[$($Hex.Gray)]-[/]" }
-        $how = switch ($p.Method) {
-            'script' { if ($p.Update) { "[$($Hex.Aqua)]$(E $p.Update)[/] [$($Hex.Gray)](official updater)[/]" } else { 'official installer' } }
-            'direct' { "[$($Hex.Aqua)]official download page[/] [$($Hex.Gray)](signed)[/]" }
-            default  { if ($p.Appx) { 'winget + updates itself' } else { 'winget' } }
+    while ($true) {
+        Show-Header 'Update AI tools'
+        $t = New-KitTable @(' ', 'Tool', 'Installed', 'Latest', 'How it updates') $Hex.Aqua
+        foreach ($p in $ai) {
+            $inst = if ($script:Installed.ContainsKey($p.Id)) { $v = $script:Installed[$p.Id]; if ($v) { E $v } else { 'installed' } } else { "[$($Hex.Gray)]not installed[/]" }
+            $lt = $script:latest[$p.Id]
+            $latest = if ($script:Updates.ContainsKey($p.Id)) { "[$($Hex.Yellow) bold]$(E $lt)[/]" } elseif ($lt) { "[$($Hex.Green)]$(E $lt)[/]" } elseif ($p.Update) { "[$($Hex.Gray)]checked by $(E $p.Update)[/]" } else { "[$($Hex.Gray)]-[/]" }
+            $how = switch ($p.Method) {
+                'script' { if ($p.Update) { "[$($Hex.Aqua)]$(E $p.Update)[/] [$($Hex.Gray)](official updater)[/]" } else { 'official installer' } }
+                'direct' { "[$($Hex.Aqua)]official download page[/] [$($Hex.Gray)](signed)[/]" }
+                default  { if ($p.Appx) { 'winget + updates itself' } else { 'winget' } }
+            }
+            Add-KitRow $t @((Get-StateBadge $p), "[$($Hex.Fg)]$(E $p.Name)[/]", $inst, $latest, $how)
         }
-        Add-KitRow $t @((Get-StateBadge $p), "[$($Hex.Fg)]$(E $p.Name)[/]", $inst, $latest, $how)
-    }
-    $t.Title = [Spectre.Console.TableTitle]::new("[$($Hex.Aqua) bold]AI tools[/]")
-    $t.Caption = [Spectre.Console.TableTitle]::new((Get-LegendMarkup))
-    Out-Render $t
-    Say ''
-
-    $have = @($ai | Where-Object { $script:Installed.ContainsKey($_.Id) })
-    $items = @()
-    if ($have.Count) { $items += @{ Key = 'all'; Label = "[$($Hex.Orange) bold]$($Glyph.Pointer) Update all installed[/] [$($Hex.Gray)]($(Get-Plural $have.Count "tool"))[/]" } }
-    $items += @{ Key = 'pick'; Label = "[$($Hex.Fg)]Pick tools (also installs missing ones)[/]" }
-    $items += @{ Key = 'back'; Label = "[$($Hex.Gray)]$($Glyph.Left) Back[/]" }
-    $sel = switch (Select-One -Title "[$($Hex.Fg) bold]Update[/]" -Items $items) {
-        'all'  { $have }
-        'pick' {
-            $p = [Spectre.Console.MultiSelectionPrompt[string]]::new()
-            $p.Title = "[$($Hex.Fg) bold]Choose AI tools[/]"; $p.Required = $false; $p.PageSize = [Math]::Max(3, $ai.Count)
-            $p.HighlightStyle = St "$($Hex.Orange) bold"
-            $p.InstructionsText = Get-KeyHint @("$($Glyph.Up)$($Glyph.Down)|move", 'space|toggle', 'enter|confirm')
-            $map = @{}
-            foreach ($x in $ai) { $lb = Get-AppLabel $x; $map[$lb] = $x; $c = $p.AddChoice($lb); if ($script:Installed.ContainsKey($x.Id)) { [void]$c.Select() } }
-            @(Show-Prompt $p | ForEach-Object { $map[$_] })
+        $t.Caption = [Spectre.Console.TableTitle]::new((Get-LegendMarkup))
+        Out-Render $t
+        Say ''
+        $have = @($ai | Where-Object { $script:Installed.ContainsKey($_.Id) })
+        $items = @()
+        if ($have.Count) { $items += @{ Key = 'all'; Label = "[$($Hex.Orange) bold]$($Glyph.Pointer) Update all installed[/] [$($Hex.Gray)]($(Get-Plural $have.Count "tool"))[/]" } }
+        $items += @{ Key = 'pick'; Label = "[$($Hex.Fg)]Pick tools (also installs missing ones)[/]" }
+        $choice = Select-One -Title "[$($Hex.Fg) bold]Update[/]" -Items $items -BackLabel 'Back to main menu'
+        $sel = $null
+        switch ($choice) {
+            'all'  { $sel = $have }
+            'pick' {
+                Show-Header 'Choose AI tools'
+                $pitems = foreach ($x in $ai) { New-PickItem "$($x.Id)" (Get-AppLabel $x) -Text $x.Name -Group 'AI' -On:($script:Installed.ContainsKey($x.Id)) }
+                $pinned = @(
+                    New-PickItem 'done' "[$($Hex.Orange) bold]$($Glyph.Pointer) Continue[/] [$($Hex.Gray)](enter)[/]"
+                    New-PickItem 'back' "[$($Hex.Gray)]$($Glyph.Left) Back[/]"
+                )
+                $r = Show-Picker -Title @("[$($Hex.Fg) bold]Choose AI tools[/]") -Items @($pitems) -Pinned $pinned -Multi
+                if ($r.Action -eq 'back' -or ($r.Action -eq 'pinned' -and $r.Key -eq 'back')) { continue }
+                $ids = @($r.Selected | ForEach-Object { [int]$_ })
+                $sel = @($ai | Where-Object { $ids -contains $_.Id })
+            }
+            default { return }
         }
-        default { return }
+        if (-not $sel -or $sel.Count -eq 0) { continue }
+        [void](Invoke-Run -Selection $sel -Mode 'update' -Title 'Updating AI tools')
+        Wait-Back
+        return
     }
-    if (-not $sel -or $sel.Count -eq 0) { return }
-    [void](Invoke-Run -Selection $sel -Mode 'update' -Title 'Updating AI tools')
-    $script:ScanDone = $false
-    Wait-Back
 }
 
 function Show-Tweaks {
@@ -684,9 +918,8 @@ function Show-Tweaks {
     $items = @(
         @{ Key = 'here';  Label = "[$($Hex.Fg)]Open here[/]" }
         @{ Key = 'admin'; Label = "[$($Hex.Fg)]Open as administrator[/] [$($Hex.Gray)](new window, all 4 fixes)[/]" }
-        @{ Key = 'back';  Label = "[$($Hex.Gray)]$($Glyph.Left) Back[/]" }
     )
-    switch (Select-One -Title "[$($Hex.Fg) bold]Tweaks[/]" -Items $items) {
+    switch (Select-One -Title "[$($Hex.Fg) bold]Tweaks[/]" -Items $items -BackLabel 'Back to main menu') {
         'here' {
             if ($script:DryRunOn) { Say "[$($Hex.Purple)]$($Glyph.Dry) would run: powershell -File $(E $script_)[/]"; Wait-Back; return }
             & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script_
@@ -709,9 +942,9 @@ function Show-Settings {
             @{ Key = 'sc';  Label = "[$($Hex.Fg)]Remove desktop shortcuts that installers create:[/] $sc" }
             @{ Key = 'dr';  Label = "[$($Hex.Fg)]Dry run (show what would run, install nothing):[/] $dr" }
             @{ Key = 'log'; Label = "[$($Hex.Fg)]Open the log folder[/]" }
-            @{ Key = 'back'; Label = "[$($Hex.Gray)]$($Glyph.Left) Back[/]" }
         )
-        switch (Select-One -Title "[$($Hex.Fg) bold]Settings[/] [$($Hex.Gray)]($((Get-KitOverrideCount)) learned package-ID fixes in use)[/]" -Items $items) {
+        $runlog = if ($env:MYWINKIT_RUNLOG) { "[$($Hex.Gray)]run log: $(E $env:MYWINKIT_RUNLOG)[/]" } else { '' }
+        switch (Select-One -Title @("[$($Hex.Fg) bold]Settings[/] [$($Hex.Gray)]($((Get-KitOverrideCount)) learned package-ID fixes in use)[/]", $runlog) -Items $items -BackLabel 'Back to main menu') {
             'sc'  { $script:State.RemoveShortcuts = -not $script:State.RemoveShortcuts; if (-not $script:Test) { Save-KitState $script:State } }
             'dr'  { if (-not $script:Test) { $script:DryRunOn = -not $script:DryRunOn } }   # smoke tests stay dry
             'log' {
@@ -725,7 +958,7 @@ function Show-Settings {
 }
 
 function Show-Goodbye {
-    Clear-Screen
+    Clear-Screen 'goodbye'
     $w = 64
     $bar = ($Glyph.Shade1 + $Glyph.Shade2 + $Glyph.Shade3 + $Glyph.Full) + ($Glyph.DLineH * ($w - 8)) + ($Glyph.Full + $Glyph.Shade3 + $Glyph.Shade2 + $Glyph.Shade1)
     Say " $(ConvertTo-Gradient $bar $w 2)"
@@ -737,28 +970,39 @@ function Show-Goodbye {
 
 # ---------------------------------------------------------------- main loop
 
-while ($true) {
-    Show-Banner
-    $menu = @(
-        @{ Key = 'install';  Icon = $Glyph.Pointer; Color = $Hex.Orange; Name = 'Install or update apps'; Desc = "pick from $($script:Catalog.Count) apps: install new ones, update the rest" }
-        @{ Key = 'ai';       Icon = $Glyph.Up;      Color = $Hex.Aqua;   Name = 'Update AI tools';        Desc = "Claude Code $($Glyph.Dot) Claude Desktop $($Glyph.Dot) agy $($Glyph.Dot) Antigravity, always latest" }
-        @{ Key = 'tweaks';   Icon = $Glyph.Sun;     Color = $Hex.Yellow; Name = 'Windows tweaks';         Desc = 'Spotlight icon, lock-screen tips, Start web search, auto-lock' }
-        @{ Key = 'settings'; Icon = $Glyph.Menu;    Color = $Hex.Blue;   Name = 'Settings';               Desc = 'shortcut cleanup, dry run, log folder' }
-        @{ Key = 'quit';     Icon = $Glyph.Left;    Color = $Hex.Gray;   Name = 'Quit';                   Desc = '' }
-    )
-    $items = foreach ($m in $menu) {
-        @{ Key = $m.Key; Label = "[$($m.Color) bold]$($m.Icon)[/] [$($Hex.Fg) bold]$(E $m.Name.PadRight(24))[/] [$($Hex.Gray)]$(E $m.Desc)[/]" }
-    }
-    $k = Select-One -Title "[$($Hex.Orange) bold]$($Glyph.HalfL) MAIN MENU[/]" -Items $items
-    switch ($k) {
-        'install'  { Show-Install }
-        'ai'       { Show-UpdateAI }
-        'tweaks'   { Show-Tweaks }
-        'settings' { Show-Settings }
-        default {
-            Show-Goodbye
-            if ($script:Test) { [Console]::Out.Write($script:Test.Output) }
-            exit 0
+try {
+    while ($true) {
+        Show-Banner
+        $menu = @(
+            @{ Key = 'install';  Icon = $Glyph.Pointer; Color = $Hex.Orange; Name = 'Install or update apps'; Desc = "pick from $($script:Catalog.Count) apps: install new ones, update the rest" }
+            @{ Key = 'ai';       Icon = $Glyph.Up;      Color = $Hex.Aqua;   Name = 'Update AI tools';        Desc = "Claude Code $($Glyph.Dot) Claude Desktop $($Glyph.Dot) agy $($Glyph.Dot) Antigravity, always latest" }
+            @{ Key = 'tweaks';   Icon = $Glyph.Sun;     Color = $Hex.Yellow; Name = 'Windows tweaks';         Desc = 'Spotlight icon, lock-screen tips, Start web search, auto-lock' }
+            @{ Key = 'settings'; Icon = $Glyph.Menu;    Color = $Hex.Blue;   Name = 'Settings';               Desc = 'shortcut cleanup, dry run, log folder' }
+            @{ Key = 'quit';     Icon = $Glyph.Left;    Color = $Hex.Gray;   Name = 'Quit';                   Desc = 'or press q' }
+        )
+        $items = foreach ($m in $menu) {
+            @{ Key = $m.Key; Label = "[$($m.Color) bold]$($m.Icon)[/] [$($Hex.Fg) bold]$(E $m.Name.PadRight(24))[/] [$($Hex.Gray)]$(E $m.Desc)[/]" }
+        }
+        $k = Select-One -Title "[$($Hex.Orange) bold]$($Glyph.HalfL) MAIN MENU[/]" -Items $items -QuitKey 'q' -NoBack
+        Write-KitRunLog "menu: $k"
+        switch ($k) {
+            'install'  { Show-Install }
+            'ai'       { Show-UpdateAI }
+            'tweaks'   { Show-Tweaks }
+            'settings' { Show-Settings }
+            default {
+                Show-Goodbye
+                Write-KitRunLog 'frontend: modern quit normally'
+                if ($script:Test) {
+                    [Console]::Out.Write($script:Test.Output)
+                    [Console]::Out.WriteLine("SCREEN-HEIGHTS: $($script:Heights -join '; ')")
+                }
+                exit 0
+            }
         }
     }
+} catch {
+    Write-KitRunLog "modern: ERROR $($_.Exception.Message) at $($_.InvocationInfo.PositionMessage)"
+    if ($script:Test) { [Console]::Out.Write($script:Test.Output); [Console]::Out.WriteLine("SCREEN-HEIGHTS: $($script:Heights -join '; ')") }
+    throw
 }

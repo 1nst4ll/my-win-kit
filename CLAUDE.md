@@ -71,6 +71,19 @@ Front door: [README.md](README.md). Docs index and ownership map: [docs/architec
 - **App `Id`s are permanent:** never renumber or reuse one. The next free Id is in STATUS.
 - **Smoke tests must never install:** `-TestKeys` / `-TestInput` force dry run, and the dry-run toggle is locked
   on in test mode. Keep it that way when adding screens.
+- **Never use Spectre prompts** (`SelectionPrompt`, `MultiSelectionPrompt`, `ConfirmationPrompt`, `Read-Spectre*`):
+  they have no Esc/back. All input goes through `Show-Picker` / `Select-One` / `Select-Apps` in tui-spectre.ps1.
+  Every screen except the main menu gets a pinned « Back row and Esc/Backspace/← = back; the main menu has q.
+- **Every screen must fit 120 × 30 with its picker visible.** The picker sizes itself to what's left; tall tables
+  must be trimmed (`Get-TrimmedRows`). `smoke-tui.ps1` fails any screen taller than 30 rows (`SCREEN-HEIGHTS`).
+- **Console set-up order in tui-spectre.ps1:** UTF-8 output encoding *before* `Import-Module PwshSpectreConsole`,
+  then the explicit TrueColor console. Don't let Spectre auto-detect: it disables colour on `NO_COLOR`, which
+  dev/agent shells export to child windows. The kit's off switch is `MYWINKIT_NO_COLOR=1`.
+- **The TestConsole does not prove real-console rendering** (no cursor moves, no encoding, no colour detection).
+  After changing the picker or console set-up, check a real 120 × 30 conhost window too (launch
+  `conhost.exe powershell.exe -File install.ps1 -DryRun`, drive it, screenshot). Any key-sending helper must find
+  the kit window by title and abort if it can't; never send keys blind.
+- **Prove which front-end ran from the run log** (`%LOCALAPPDATA%\my-win-kit\logs`), not from how the screen looks.
 - `win11-tweaks.ps1` uses StrictMode + `Stop`. `core.psm1` uses `Set-StrictMode -Version 2.0`: read optional
   catalogue keys with the indexer (`$h['Key']`), not `$h.Key`, or StrictMode throws.
 
@@ -85,7 +98,7 @@ powershell -ExecutionPolicy Bypass -File tools/smoke-loader.ps1  # loader decisi
 pwsh -File tools/render-screens.ps1 -OutDir <dir>                # capture every screen (.txt + truecolor .ans)
 ```
 
-After any visual change, run `render-screens.ps1` and check the main menu still fits 30 rows (it prints the height).
+After any visual change, run `render-screens.ps1`: it prints the rows each screen used (budget 30).
 
 CI (`.github/workflows/lint.yml`) runs all of them on `windows-latest`. Settings: `PSScriptAnalyzerSettings.psd1`
 (Error + Warning). The rules it excludes are style choices this kit makes on purpose:
@@ -102,6 +115,6 @@ CI (`.github/workflows/lint.yml`) runs all of them on `windows-latest`. Settings
 `$KnownIssues` in `tools/lint.ps1` turns specific known bugs into warnings. Remove an entry in the same commit
 that fixes its bug. The list must only shrink (it is empty now).
 
-Spectre gotchas found while building: `MultiSelectionPrompt` has no search (search lives in a separate
-`SelectionPrompt` screen); escaped brackets (`[[x]]`) in a searchable label crash Spectre's highlighter, so use
-glyphs; `-like` treats `[1/5]` as a wildcard class, so tests use `.Contains()`.
+Gotchas found while building: Spectre grids wrap even with `NoWrap`, so picker rows go through `Limit-Markup`;`
+`continue` inside a PowerShell `switch` only leaves the switch; `-like` treats `[1/5]` as a wildcard class, so tests
+use `.Contains()`.

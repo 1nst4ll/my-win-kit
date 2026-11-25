@@ -38,7 +38,7 @@ if ($script:Testing) { foreach ($t in ($TestInput -split ";")) { $script:Queue.E
 $cat    = @(Initialize-Kit -KitRoot $KitRoot)
 $groups = @(Get-KitGroups)
 $state  = Get-KitState
-try { $Host.UI.RawUI.WindowTitle = 'my-win-kit (classic)' } catch {}
+try { $Host.UI.RawUI.WindowTitle = "my-win-kit $([char]0x00B7) classic (PowerShell $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor))" } catch {}
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 
 # ---------------------------------------------------------------- colour
@@ -94,6 +94,8 @@ $script:Banner = @(
     '# ^ #  #    ^_^_^ # # ^#   # # #  # '
 ) | ForEach-Object { $_.Replace('#', (C 0x2588)).Replace('^', (C 0x2580)).Replace('_', (C 0x2584)) }
 
+Write-KitRunLog ("frontend: CLASSIC started (src\tui-classic.ps1) - PowerShell {0} ({1}), truecolor VT={2}, dryrun={3}, test={4}" -f $PSVersionTable.PSVersion, $PSVersionTable.PSEdition, $script:VT, [bool]$DryRun, $script:Testing)
+
 # ---------------------------------------------------------------- helpers
 
 function Read-Answer([string]$Prompt) {
@@ -129,7 +131,7 @@ function Show-Menu {
     Clear-Kit
     $on = @($cat | Where-Object On).Count
     foreach ($b in $script:Banner) { Write-Host '  ' -NoNewline; Write-Gradient $b $b.Length }
-    Write-C "  v$(Get-KitVersion) $($Gl.Dot) classic menu $($Gl.Dot) PowerShell $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor) $($Gl.Dot) " $Pal.Gray -NoNewline
+    Write-C "  v$(Get-KitVersion) $($Gl.Dot) classic menu $($Gl.Dot) Windows PowerShell $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor) $($Gl.Dot) " $Pal.Gray -NoNewline
     Write-C "$on selected" $Pal.Orange -NoNewline
     if ($DryRun) { Write-C "   $($Gl.Dry) DRY RUN - nothing will be installed" $Pal.Purple } else { Write-Host '' }
     Write-Rule

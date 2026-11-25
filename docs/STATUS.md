@@ -11,8 +11,9 @@ _A new session can start from this line, no handover needed._
   installer with a loader + Spectre menu + classic fallback + shared engine, and adds always-latest AI tools.
   **Do not merge without Daniel's go:** merging publishes the new kit to every PC through OneDrive.
 - Before merging, Daniel tries it by hand (steps in the PR description): the modern menu, the classic menu
-  (`install.ps1 -Classic`), and one real install or update. His first dry-run feedback (more colour, ASCII art,
-  modern UI) is addressed in the v2.1.0 visual pass; next is his look at it in a real terminal.
+  (`install.ps1 -Classic`), and one real install or update. Feedback so far: colour/ASCII art (v2.1.0 visual pass) and no way back + "looks like plain
+  PowerShell" (universal back picker, UTF-8/truecolor console fix, run log). Next: his look in a real terminal.
+  If it still looks plain, read the newest `%LOCALAPPDATA%\my-win-kit\logs\run-*.log` first.
 - After the merge: check the post-merge publish output (expect `src/` + 4 files copied), then open
   `OneDrive\[98] Shortcuts\install.cmd` on a second PC.
 - Watch-outs: `main` auto-publishes. This clone has `core.hooksPath=.githooks`; other clones need it too.
@@ -29,7 +30,9 @@ _A new session can start from this line, no handover needed._
 | Next free app Id | 59 |
 | Kit version (branch) | 2.1.0 (`$script:KitVersion` in src/core.psm1) |
 | Modern menu needs | PowerShell 7.4+, PwshSpectreConsole ≥ 2.3 (tested with 2.6.3 on pwsh 7.7.0) |
-| Startup (this PC) | ~750 ms launch → banner → quit; main menu 16 rows, classic menu 26 rows (budget 30) |
+| Startup (this PC) | ~750 ms launch → banner → quit |
+| Screen heights (120 × 30) | main 17, start 14, app picker 29, review ≤ 29, results ≤ 28, AI 22, tweaks ≤ 27, settings 12, classic 26 |
+| Run logs | `%LOCALAPPDATA%\my-win-kit\logs\run-*.log` (newest 30 kept) |
 | Latest direct versions seen | Antigravity IDE 2.8.0, Antigravity 2.35.1 (2026-11-25, from antigravity.google/download) |
 | CI | lint.yml: ps51 job (parse, test-core, smoke-loader) + pwsh job (lint, test-core -Online, smoke-tui) |
 

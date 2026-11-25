@@ -22,12 +22,12 @@ New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 $env:MYWINKIT_STATE_DIR = Join-Path ([IO.Path]::GetTempPath()) ("my-win-kit-render-" + [guid]::NewGuid())
 
 $screens = [ordered]@{
-    '1-main-menu+goodbye' = 'UpArrow,Enter'
-    '2-install-flow'      = 'Enter,Enter,Enter,Enter,Enter,UpArrow,Enter'
-    '3-search'            = 'Enter,UpArrow,UpArrow,Enter,Enter,Enter,text:anti,Enter,text:Done,Enter,Enter,Enter,UpArrow,Enter'
-    '4-update-ai'         = 'DownArrow,Enter,Enter,Enter,UpArrow,Enter'
-    '5-tweaks'            = 'DownArrow,DownArrow,Enter,Enter,Enter,UpArrow,Enter'
-    '6-settings'          = 'DownArrow,DownArrow,DownArrow,Enter,UpArrow,Enter,UpArrow,Enter'
+    '1-main-menu+goodbye' = 'text:q'
+    '2-install-flow'      = 'Enter,Enter,Enter,Enter,Enter,text:q'
+    '3-search'            = 'Enter,UpArrow,UpArrow,Enter,Enter,Enter,text:anti,Enter,Spacebar,Enter,Enter,Enter,text:q'
+    '4-update-ai'         = 'DownArrow,Enter,End,Enter,Escape,Home,DownArrow,Enter,Enter,text:q'
+    '5-tweaks'            = 'DownArrow,DownArrow,Enter,Enter,Enter,text:q'
+    '6-settings'          = 'DownArrow,DownArrow,DownArrow,Enter,Escape,text:q'
 }
 $esc = [char]27
 foreach ($name in $screens.Keys) {
@@ -39,7 +39,8 @@ foreach ($name in $screens.Keys) {
     $clean = ($txt -split "`n" | Where-Object { $_.Trim() }) -join "`n"
     Set-Content -LiteralPath (Join-Path $OutDir "$name.ans") -Value $ans -Encoding utf8
     Set-Content -LiteralPath (Join-Path $OutDir "$name.txt") -Value $clean -Encoding utf8
-    Write-Host ("  {0,-22} {1,6} chars ansi, {2,5} lines text" -f $name, $ans.Length, ($clean -split "`n").Count)
+    $hl = ($txt -split "`n" | Where-Object { $_ -like 'SCREEN-HEIGHTS:*' } | Select-Object -Last 1)
+    Write-Host ("  {0,-22} {1,6} chars ansi  {2}" -f $name, $ans.Length, $hl)
 }
 
 # Classic menu (VT truecolor forced for the capture)
@@ -50,9 +51,5 @@ Set-Content -LiteralPath (Join-Path $OutDir '7-classic.ans') -Value $cl -Encodin
 Set-Content -LiteralPath (Join-Path $OutDir '7-classic.txt') -Value ($cl -replace "$esc\[[0-9;]*m", '') -Encoding utf8
 Write-Host ("  {0,-22} {1,6} chars ansi" -f '7-classic', $cl.Length)
 
-# Height check: main menu = from the first banner line to the "Quit" item
-$lines = Get-Content -LiteralPath (Join-Path $OutDir '1-main-menu+goodbye.txt')
-$start = ($lines | Select-String -Pattern '__  __' | Select-Object -First 1).LineNumber
-$end = ($lines | Select-String -Pattern 'Quit' | Select-Object -First 1).LineNumber
-Write-Host "  main menu height: $($end - $start + 1) rows (budget 30, blank lines dropped in .txt)"
+# Rows per screen come from the menu itself (SCREEN-HEIGHTS, budget 30).
 Remove-Item -LiteralPath $env:MYWINKIT_STATE_DIR -Recurse -Force -ErrorAction SilentlyContinue

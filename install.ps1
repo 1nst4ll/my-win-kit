@@ -63,6 +63,22 @@ if (-not (Test-Path -LiteralPath $cmdPath)) {
 }
 
 function Write-Say([string]$Text, [string]$Color = 'Gray') { Write-Host "  $Text" -ForegroundColor $Color }
+$Dot = [string][char]0x00B7
+
+# ---------------------------------------------------------------- run log (which front-end ran, and why)
+# One file per run in <state dir>\logs. Child menus append to the same file via MYWINKIT_RUNLOG.
+$stateDir = if ($env:MYWINKIT_STATE_DIR) { $env:MYWINKIT_STATE_DIR } else { Join-Path $env:LOCALAPPDATA 'my-win-kit' }
+try {
+    $logDir = Join-Path $stateDir 'logs'
+    if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+    $env:MYWINKIT_RUNLOG = Join-Path $logDir ('run-{0:yyyyMMdd-HHmmss}-{1}.log' -f (Get-Date), $PID)
+    # keep the newest 30
+    Get-ChildItem -LiteralPath $logDir -Filter 'run-*.log' | Sort-Object LastWriteTime -Descending | Select-Object -Skip 30 | Remove-Item -Force -ErrorAction SilentlyContinue
+} catch {}
+function Write-RunLog([string]$Text) {
+    try { Add-Content -LiteralPath $env:MYWINKIT_RUNLOG -Value ('{0:yyyy-MM-dd HH:mm:ss} [{1}] {2}' -f (Get-Date), $PID, $Text) -Encoding UTF8 } catch {}
+}
+Write-RunLog ("loader: Windows PowerShell {0} ({1}), kit {2}, args: {3}" -f $PSVersionTable.PSVersion, $PSVersionTable.PSEdition, $root, (($PSBoundParameters.GetEnumerator() | ForEach-Object { "-$($_.Key) $($_.Value)" }) -join ' '))
 
 # ---------------------------------------------------------------- PowerShell 7 detection
 
@@ -124,7 +140,9 @@ function Install-Pwsh {
 
 # ---------------------------------------------------------------- launchers
 
-function Start-Classic {
+function Start-Classic([string]$Why = '') {
+    Write-RunLog "loader: starting CLASSIC menu (src\tui-classic.ps1) in Windows PowerShell $($PSVersionTable.PSVersion)$(if ($Why) { " - reason: $Why" })"
+    Write-Say "Starting classic menu $Dot Windows PowerShell $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor)$(if ($Why) { " $Dot $Why" })" 'DarkYellow'
     $a = @{ KitRoot = $root }
     if ($DryRun) { $a.DryRun = $true }
     if ($script:HasClassicTI) { $a.TestInput = $ClassicTestInput }
@@ -135,29 +153,39 @@ function Start-Classic {
 function Start-Modern($Pwsh) {
     $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'src\tui-spectre.ps1'), '-KitRoot', $root)
     if ($DryRun) { $a += '-DryRun' }
+    Write-RunLog "loader: starting MODERN menu (src\tui-spectre.ps1) with $($Pwsh.Path) (PowerShell $($Pwsh.Version))"
+    Write-Say "Starting modern menu $Dot PowerShell $($Pwsh.Version.Major).$($Pwsh.Version.Minor) $Dot Spectre" 'Cyan'
+    try { $Host.UI.RawUI.WindowTitle = "my-win-kit $Dot modern (PowerShell 7)" } catch {}
     & $Pwsh.Path @a
-    if ($LASTEXITCODE -eq 3) {
-        Write-Say 'The modern menu could not load its module - opening the classic menu.' 'Yellow'
-        Start-Sleep -Seconds 2
-        Start-Classic
+    $ec = $LASTEXITCODE
+    Write-RunLog "loader: modern menu exited with code $ec"
+    if ($ec -eq 3) {
+        Write-Say 'The modern menu could not load PwshSpectreConsole (details above) - opening the classic menu.' 'Yellow'
+        Write-Say "Run log: $env:MYWINKIT_RUNLOG" 'DarkGray'
+        Start-Sleep -Seconds 3
+        Start-Classic 'Spectre module unavailable'
     }
-    exit $LASTEXITCODE
+    exit $ec
 }
 
 # ---------------------------------------------------------------- decide
 
 if ($Classic) {
+    Write-RunLog 'loader: decision = classic (forced with -Classic)'
     if ($WhatIfLoader) { 'decision: classic (forced)'; exit 0 }
-    Start-Classic
+    Start-Classic '-Classic switch'
 }
 
 $pw = Find-Pwsh
+Write-RunLog $(if ($pw) { "loader: found pwsh $($pw.Path) version $($pw.Version) (needs $MinPwsh+)" } elseif ($NoPwsh -or $env:MYWINKIT_SIMULATE_NO_PWSH -eq '1') { 'loader: pwsh search skipped (simulated absent)' } else { 'loader: no pwsh found' })
 if ($pw -and $pw.Version -ge $MinPwsh) {
+    Write-RunLog 'loader: decision = modern'
     if ($WhatIfLoader) { "decision: modern ($($pw.Path) $($pw.Version))"; exit 0 }
     Start-Modern $pw
 }
 
 $found = if ($pw) { "found $($pw.Version), needs $MinPwsh+" } else { 'not installed' }
+Write-RunLog "loader: decision = offer PowerShell 7 install ($found)"
 if ($WhatIfLoader) { "decision: offer-install (PowerShell 7 $found)"; exit 0 }
 
 Write-Host ''
@@ -168,18 +196,21 @@ Write-Host ''
 if ($PSBoundParameters.ContainsKey('Answer')) { $ans = $Answer; Write-Say "Install PowerShell 7 now? [Y/n] $ans" 'Cyan' }
 else { Write-Host '  Install PowerShell 7 now? [Y/n] ' -ForegroundColor Cyan -NoNewline; $ans = Read-Host }
 
-if ($ans -match '^[Nn]') { Start-Classic }
+Write-RunLog "loader: install PowerShell 7 answer = '$ans'"
+if ($ans -match '^[Nn]') { Start-Classic 'PowerShell 7 install declined' }
 
 if ($DryRun) {
     Write-Say 'Dry run: would install PowerShell 7 (winget Microsoft.PowerShell, MSI fallback).' 'Magenta'
-    Start-Classic
+    Start-Classic 'dry run: PowerShell 7 not installed'
 }
 if (Install-Pwsh) {
     $pw = Find-Pwsh
     if ($pw -and $pw.Version -ge $MinPwsh) { Start-Modern $pw }
     Write-Say 'PowerShell 7 was installed but could not be found yet - opening the classic menu.' 'Yellow'
+    $why = 'PowerShell 7 installed but not found yet'
 } else {
     Write-Say 'PowerShell 7 was not installed - opening the classic menu.' 'Yellow'
+    $why = 'PowerShell 7 install failed'
 }
 Start-Sleep -Seconds 2
-Start-Classic
+Start-Classic $why
