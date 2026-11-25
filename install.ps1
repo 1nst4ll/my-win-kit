@@ -1,20 +1,32 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    my-win-kit loader: picks the best menu this PC can run.
+    my-win-kit loader: keeps the kit up to date and picks the best menu this PC can run.
 .DESCRIPTION
     Works on stock Windows PowerShell 5.1 with nothing else installed.
+      0. Self-update: if GitHub main has a newer kit version than this copy, ask once
+         ("Update kit 2.3.0 -> 2.4.0? [Y/n]"), download the repo zip into
+         %LOCALAPPDATA%\my-win-kit\app\<version>, verify it, and run from there.
+         Any failure falls back to this copy. A newer copy already downloaded is
+         used without asking.
       1. PowerShell 7.4+ present  -> modern menu (src/tui-spectre.ps1) under pwsh.
       2. Missing or too old       -> offer to install PowerShell 7 (winget,
                                      fallback: signed MSI from GitHub), then 1.
       3. Declined / failed        -> classic menu (src/tui-classic.ps1) in 5.1.
-    If the modern menu cannot load its module (exit 3) it also falls back to 2/3's
+    If the modern menu cannot load its module (exit 3) it also falls back to the
     classic menu, so a fresh PC is never stuck.
-    Quick start: double-click install.cmd (recreated next to this file if missing).
+    Quick start: double-click install.cmd, or on any PC (public repo):
+        irm https://raw.githubusercontent.com/1nst4ll/my-win-kit/main/install.ps1 | iex
+    Run that way ($PSScriptRoot empty) it downloads the kit into
+    %LOCALAPPDATA%\my-win-kit\app\<version> and starts it from there.
 .PARAMETER Classic
     Skip detection and open the classic menu.
 .PARAMETER DryRun
     Show what would run, install nothing (passed to either menu).
+.PARAMETER NoUpdate
+    Skip the self-update check (also used when a downloaded copy re-runs itself).
+.PARAMETER UpdateAnswer
+    Testing: answer for the "update kit?" question (y or n).
 .PARAMETER NoPwsh
     Testing: behave as if PowerShell 7 were not installed. Same as
     environment variable MYWINKIT_SIMULATE_NO_PWSH=1.
@@ -26,11 +38,16 @@
     Testing: passed to the classic menu as -TestInput.
 .NOTES
     Keep ASCII-only and Windows PowerShell 5.1 compatible.
+    Overrides (tests): MYWINKIT_REPO, MYWINKIT_BRANCH, MYWINKIT_RAW_URL (base of
+    raw files, or file:///folder), MYWINKIT_ZIP_URL (zip, or file:///kit.zip),
+    MYWINKIT_STATE_DIR, MYWINKIT_BOOTSTRAP_ARGS (args for the iex bootstrap).
 #>
 [CmdletBinding()]
 param(
     [switch]$Classic,
     [switch]$DryRun,
+    [switch]$NoUpdate,
+    [string]$UpdateAnswer,
     [switch]$NoPwsh,
     [switch]$WhatIfLoader,
     [string]$Answer,
@@ -45,6 +62,166 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::S
 $root = $PSScriptRoot
 $MinPwsh = [version]'7.4'
 $script:HasClassicTI = $PSBoundParameters.ContainsKey('ClassicTestInput')
+function Write-Say([string]$Text, [string]$Color = 'Gray') { Write-Host "  $Text" -ForegroundColor $Color }
+$Dot = [string][char]0x00B7
+
+# ---------------------------------------------------------------- run log (which front-end ran, and why)
+# One file per run in <state dir>\logs. Child menus append to the same file via MYWINKIT_RUNLOG.
+$stateDir = if ($env:MYWINKIT_STATE_DIR) { $env:MYWINKIT_STATE_DIR } else { Join-Path $env:LOCALAPPDATA 'my-win-kit' }
+try {
+    $logDir = Join-Path $stateDir 'logs'
+    if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+    # a re-run of a newer copy (-NoUpdate) keeps writing to the parent's log
+    if (-not ($NoUpdate -and $env:MYWINKIT_RUNLOG)) { $env:MYWINKIT_RUNLOG = Join-Path $logDir ('run-{0:yyyyMMdd-HHmmss}-{1}.log' -f (Get-Date), $PID) }
+    # keep the newest 30
+    Get-ChildItem -LiteralPath $logDir -Filter 'run-*.log' | Sort-Object LastWriteTime -Descending | Select-Object -Skip 30 | Remove-Item -Force -ErrorAction SilentlyContinue
+} catch {}
+function Write-RunLog([string]$Text) {
+    try { Add-Content -LiteralPath $env:MYWINKIT_RUNLOG -Value ('{0:yyyy-MM-dd HH:mm:ss} [{1}] {2}' -f (Get-Date), $PID, $Text) -Encoding UTF8 } catch {}
+}
+Write-RunLog ("loader: Windows PowerShell {0} ({1}), kit {2}, args: {3}" -f $PSVersionTable.PSVersion, $PSVersionTable.PSEdition, $(if ($root) { $root } else { '(none: irm | iex bootstrap)' }), (($PSBoundParameters.GetEnumerator() | ForEach-Object { "-$($_.Key) $($_.Value)" }) -join ' '))
+
+# ---------------------------------------------------------------- self-update / bootstrap from GitHub
+
+$Repo    = if ($env:MYWINKIT_REPO) { $env:MYWINKIT_REPO } else { '1nst4ll/my-win-kit' }
+$Branch  = if ($env:MYWINKIT_BRANCH) { $env:MYWINKIT_BRANCH } else { 'main' }
+$RawBase = if ($env:MYWINKIT_RAW_URL) { $env:MYWINKIT_RAW_URL.TrimEnd('/') } else { "https://raw.githubusercontent.com/$Repo/$Branch" }
+$ZipUrl  = if ($env:MYWINKIT_ZIP_URL) { $env:MYWINKIT_ZIP_URL } else { "https://codeload.github.com/$Repo/zip/refs/heads/$Branch" }
+$AppDir  = Join-Path $stateDir 'app'
+
+function Get-KitVersionFromText([string]$Text) {
+    $m = [regex]::Match($Text, "KitVersion\s*=\s*'([0-9]+(\.[0-9]+){1,3})'")
+    if ($m.Success) { return [version]$m.Groups[1].Value }
+    return $null
+}
+function Get-LocalKitVersion([string]$Dir) {
+    try { return Get-KitVersionFromText ([IO.File]::ReadAllText((Join-Path $Dir 'src\core.psm1'))) } catch { return $null }
+}
+function Get-RemoteKitVersion {
+    <# KitVersion of src/core.psm1 on GitHub main (3 s timeout), or $null. #>
+    try {
+        if ($RawBase -like 'file:*') { $text = [IO.File]::ReadAllText(([Uri]"$RawBase/src/core.psm1").LocalPath) }
+        else { $text = (Invoke-WebRequest -Uri "$RawBase/src/core.psm1" -UseBasicParsing -TimeoutSec 3 -UserAgent 'my-win-kit' -Headers @{ 'Cache-Control' = 'no-cache' }).Content }
+        return Get-KitVersionFromText $text
+    } catch {
+        Write-RunLog "update: version check failed ($RawBase): $($_.Exception.Message)"
+        return $null
+    }
+}
+function Test-KitCopy([string]$Dir) {
+    <# A usable kit folder: required files present, every script parses, catalog.json parses. Returns '' or the problem. #>
+    foreach ($req in 'install.ps1', 'src\core.psm1', 'src\tui-spectre.ps1', 'src\tui-classic.ps1', 'config\catalog.json') {
+        if (-not (Test-Path -LiteralPath (Join-Path $Dir $req))) { return "missing $req" }
+    }
+    foreach ($fl in (Get-ChildItem -LiteralPath $Dir -Recurse -File | Where-Object { $_.Extension -in '.ps1', '.psm1' })) {
+        $t = $null; $e = $null
+        [void][System.Management.Automation.Language.Parser]::ParseFile($fl.FullName, [ref]$t, [ref]$e)
+        if ($e -and $e.Count) { return "parse error in $($fl.Name): $($e[0].Message)" }
+    }
+    try { $j = [IO.File]::ReadAllText((Join-Path $Dir 'config\catalog.json')) | ConvertFrom-Json; if (@($j.Packages).Count -lt 1) { return 'catalog.json has no packages' } }
+    catch { return "catalog.json does not parse: $($_.Exception.Message)" }
+    return ''
+}
+function Get-NewestKitCopy {
+    <# Newest downloaded copy under %LOCALAPPDATA%\my-win-kit\app: @{ Path; Version } or $null. #>
+    if (-not (Test-Path -LiteralPath $AppDir)) { return $null }
+    $best = $null
+    foreach ($d in (Get-ChildItem -LiteralPath $AppDir -Directory -ErrorAction SilentlyContinue)) {
+        $v = Get-LocalKitVersion $d.FullName
+        if ($v -and (-not $best -or $v -gt $best.Version) -and (Test-Path -LiteralPath (Join-Path $d.FullName 'install.ps1'))) { $best = [pscustomobject]@{ Path = $d.FullName; Version = $v } }
+    }
+    return $best
+}
+function Install-KitCopy([version]$Version) {
+    <# Download the repo zip, verify it, put it at app\<version>. Returns the folder or $null. #>
+    $dest = Join-Path $AppDir $Version.ToString()
+    if ((Test-Path -LiteralPath $dest) -and -not (Test-KitCopy $dest)) { return $dest }
+    $work = Join-Path $env:TEMP ("my-win-kit-update-{0}" -f [guid]::NewGuid())
+    try {
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+        $zip = Join-Path $work 'kit.zip'
+        if ($ZipUrl -like 'file:*') { Copy-Item -LiteralPath ([Uri]$ZipUrl).LocalPath -Destination $zip }
+        else {
+            $pp = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'
+            try { Invoke-WebRequest -Uri $ZipUrl -OutFile $zip -UseBasicParsing -TimeoutSec 60 -UserAgent 'my-win-kit' } finally { $ProgressPreference = $pp }
+        }
+        Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $work 'x') -Force
+        $top = Get-ChildItem -LiteralPath (Join-Path $work 'x') -Directory | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'install.ps1') } | Select-Object -First 1
+        if (-not $top) { throw 'no install.ps1 in the downloaded zip' }
+        $bad = Test-KitCopy $top.FullName
+        if ($bad) { throw "downloaded kit failed verification: $bad" }
+        $got = Get-LocalKitVersion $top.FullName
+        if ($got -ne $Version) { throw "downloaded kit is version $got, expected $Version" }
+        if (-not (Test-Path -LiteralPath $AppDir)) { New-Item -ItemType Directory -Path $AppDir -Force | Out-Null }
+        if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Recurse -Force }
+        Move-Item -LiteralPath $top.FullName -Destination $dest
+        Get-ChildItem -LiteralPath $dest -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
+        # keep the three newest copies
+        Get-ChildItem -LiteralPath $AppDir -Directory | Sort-Object { Get-LocalKitVersion $_.FullName } -Descending | Select-Object -Skip 3 | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        Write-RunLog "update: kit $Version installed at $dest"
+        return $dest
+    } catch {
+        Write-RunLog "update: FAILED to install kit $Version - $($_.Exception.Message)"
+        Write-Say "Update failed: $($_.Exception.Message)" 'Yellow'
+        return $null
+    } finally { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+# irm | iex: no script folder -> download the kit and start it from %LOCALAPPDATA%
+if (-not $root) {
+    Write-Say "my-win-kit $Dot downloading the kit from github.com/$Repo..." 'Cyan'
+    $rv = Get-RemoteKitVersion
+    $dir = $null
+    if ($rv) { $dir = Install-KitCopy $rv }
+    if (-not $dir) { $n = Get-NewestKitCopy; if ($n) { $dir = $n.Path; Write-Say "Using the copy already on this PC (v$($n.Version))." 'Yellow' } }
+    if (-not $dir) { Write-Say 'Could not download the kit. Check the internet connection (and that the repo is public), then try again.' 'Red'; return }
+    $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $dir 'install.ps1'), '-NoUpdate')
+    if ($env:MYWINKIT_BOOTSTRAP_ARGS) { $childArgs += @($env:MYWINKIT_BOOTSTRAP_ARGS -split '\s+' | Where-Object { $_ }) }
+    Write-RunLog "loader: bootstrap -> $dir"
+    & powershell.exe @childArgs
+    return   # not exit: under iex, exit would close the user's PowerShell window
+}
+
+# Self-update (file run). Re-runs the newer copy's loader with -NoUpdate and the same arguments.
+if (-not $NoUpdate) {
+    $here = Get-LocalKitVersion $root
+    $useDir = $null; $useVer = $here
+    $n = Get-NewestKitCopy
+    if ($n -and $here -and $n.Version -gt $here -and $n.Path -ne $root) { $useDir = $n.Path; $useVer = $n.Version; Write-RunLog "update: newer copy already on this PC: v$($n.Version) at $($n.Path)" }
+    $rv = Get-RemoteKitVersion
+    Write-RunLog "update: this copy v$here, best local v$useVer, GitHub v$(if ($rv) { $rv } else { '?' })"
+    if ($rv -and $useVer -and $rv -gt $useVer) {
+        $upFile = Join-Path $stateDir 'update.json'
+        $declined = ''; try { $declined = ([IO.File]::ReadAllText($upFile) | ConvertFrom-Json).declined } catch {}
+        if ($declined -eq $rv.ToString() -and -not $PSBoundParameters.ContainsKey('UpdateAnswer')) {
+            Write-RunLog "update: v$rv was declined earlier - not asking again"
+        } elseif (-not $PSBoundParameters.ContainsKey('UpdateAnswer') -and [Console]::IsInputRedirected) {
+            Write-RunLog "update: v$rv available but input is redirected (CI/pipe) - not asking, keeping v$useVer"
+        } else {
+            if ($PSBoundParameters.ContainsKey('UpdateAnswer')) { $ua = $UpdateAnswer; Write-Say "Update kit $useVer -> $($rv)? [Y/n] $ua" 'Cyan' }
+            else { Write-Host "  Update kit $useVer -> $($rv)? [Y/n] " -ForegroundColor Cyan -NoNewline; $ua = Read-Host }
+            Write-RunLog "update: answer '$ua' for v$rv"
+            if ($ua -match '^[Nn]') {
+                try { [IO.File]::WriteAllText($upFile, ('{ "declined": "' + $rv + '" }')) } catch {}
+            } else {
+                $d = Install-KitCopy $rv
+                if ($d) { $useDir = $d; $useVer = $rv; Write-Say "Updated to v$rv." 'Green' }
+                else { Write-Say "Keeping v$useVer." 'Yellow' }
+            }
+        }
+    }
+    if ($useDir) {
+        $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $useDir 'install.ps1'), '-NoUpdate')
+        foreach ($kv in $PSBoundParameters.GetEnumerator()) {
+            if ($kv.Key -in 'UpdateAnswer', 'NoUpdate') { continue }
+            if ($kv.Value -is [System.Management.Automation.SwitchParameter]) { if ($kv.Value.IsPresent) { $childArgs += "-$($kv.Key)" } }
+            else { $childArgs += @("-$($kv.Key)", [string]$kv.Value) }
+        }
+        Write-RunLog "loader: running kit v$useVer from $useDir"
+        & powershell.exe @childArgs
+        exit $LASTEXITCODE
+    }
+}
 
 # ---------------------------------------------------------------- fresh-system bootstrap
 # Remove mark-of-the-web from the kit files so later direct runs are not blocked,
@@ -61,24 +238,6 @@ if (-not (Test-Path -LiteralPath $cmdPath)) {
         )
     } catch {}
 }
-
-function Write-Say([string]$Text, [string]$Color = 'Gray') { Write-Host "  $Text" -ForegroundColor $Color }
-$Dot = [string][char]0x00B7
-
-# ---------------------------------------------------------------- run log (which front-end ran, and why)
-# One file per run in <state dir>\logs. Child menus append to the same file via MYWINKIT_RUNLOG.
-$stateDir = if ($env:MYWINKIT_STATE_DIR) { $env:MYWINKIT_STATE_DIR } else { Join-Path $env:LOCALAPPDATA 'my-win-kit' }
-try {
-    $logDir = Join-Path $stateDir 'logs'
-    if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
-    $env:MYWINKIT_RUNLOG = Join-Path $logDir ('run-{0:yyyyMMdd-HHmmss}-{1}.log' -f (Get-Date), $PID)
-    # keep the newest 30
-    Get-ChildItem -LiteralPath $logDir -Filter 'run-*.log' | Sort-Object LastWriteTime -Descending | Select-Object -Skip 30 | Remove-Item -Force -ErrorAction SilentlyContinue
-} catch {}
-function Write-RunLog([string]$Text) {
-    try { Add-Content -LiteralPath $env:MYWINKIT_RUNLOG -Value ('{0:yyyy-MM-dd HH:mm:ss} [{1}] {2}' -f (Get-Date), $PID, $Text) -Encoding UTF8 } catch {}
-}
-Write-RunLog ("loader: Windows PowerShell {0} ({1}), kit {2}, args: {3}" -f $PSVersionTable.PSVersion, $PSVersionTable.PSEdition, $root, (($PSBoundParameters.GetEnumerator() | ForEach-Object { "-$($_.Key) $($_.Value)" }) -join ' '))
 
 # ---------------------------------------------------------------- PowerShell 7 detection
 

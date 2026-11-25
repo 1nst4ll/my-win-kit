@@ -2,7 +2,7 @@
 
 Personal Windows workstation kit. `install.cmd` → `install.ps1` (loader) → the modern menu
 (`src/tui-spectre.ps1`, PowerShell 7.4+) or the classic menu (`src/tui-classic.ps1`, 5.1). Both call the engine
-`src/core.psm1`, and the app list lives in `src/catalog.psd1`. `win11-tweaks.ps1` is the registry tweaks menu.
+`src/core.psm1`, and the app list and settings live in `config/*.json` on GitHub (read at start, edited from the menu as commits). `win11-tweaks.ps1` is the registry tweaks menu.
 Front door: [README.md](README.md). Docs index and ownership map: [docs/architecture.md](docs/architecture.md#ownership-map).
 
 ## Session continuity: resume without a handover
@@ -20,7 +20,7 @@ Front door: [README.md](README.md). Docs index and ownership map: [docs/architec
 ## Drift rules
 
 1. **One owner per fact.** See the ownership map. Link to the owner, never copy. In particular, never copy the
-   app list out of `src/catalog.psd1`. Link to it.
+   app list out of `config/catalog.json`. Link to it.
 2. **Volatile numbers live only in STATUS:** app counts, dates, the last publish, open bugs, the next free Id.
 3. **Reference docs use the present tense.** History goes in CHANGELOG (append-only, newest on top).
 4. **Change the system → update the owning doc + a CHANGELOG entry, in the same commit.**
@@ -43,7 +43,7 @@ Front door: [README.md](README.md). Docs index and ownership map: [docs/architec
 ## Constraints
 
 - **The loader, engine and classic menu are Windows PowerShell 5.1 compatible** (`install.ps1`,
-  `src/core.psm1`, `src/tui-classic.ps1`, `src/catalog.psd1`): no `??`, `?.`, ternary, `&&`; no modules beyond
+  `src/core.psm1`, `src/tui-classic.ps1`): no `??`, `?.`, ternary, `&&`; no modules beyond
   what ships with Windows. They must run on a fresh PC before anything is installed.
 - `src/tui-spectre.ps1` needs PowerShell 7.4+ (PwshSpectreConsole 2.x requires it) but must still **parse**
   under 5.1, because CI parses every file under both editions. Avoid 7-only syntax there too.
@@ -83,11 +83,20 @@ Front door: [README.md](README.md). Docs index and ownership map: [docs/architec
   After changing the picker or console set-up, check a real 120 × 30 conhost window too (launch
   `conhost.exe powershell.exe -File install.ps1 -DryRun`, drive it, screenshot). Any key-sending helper must find
   the kit window by title and abort if it can't; never send keys blind.
-- **The menu never edits `src/catalog.psd1`.** Daniel's package-list edits go to `my-packages.json` (overlay next
-  to install.ps1, synced by OneDrive, gitignored, protected in publish.ps1). Only `tools/import-overlay.ps1` moves
-  them into the repo. App Ids are never reused: removed ones go to `RetiredIds`; the overlay keeps `lastId`.
-- **Tests that save the overlay use a scratch copy of the kit** (`test-overlay.ps1`, the real-save smoke
-  scenario with `MYWINKIT_TEST_ALLOW_SAVE=1`), never the repo root or OneDrive.
+- **Config lives on GitHub, not in the deployed copies.** `config/catalog.json`, `settings.json` and
+  `winget-id-overrides.json` on `main` are the single home. The menu edits them only through
+  `Save-KitConfigChange` (gh contents API, sha + one conflict retry). Never write config into a deployed folder or
+  OneDrive. Every operation must be a re-appliable change on the parsed document (that's what makes the retry safe).
+- **Menu commits are Daniel's commits:** plain messages like `config: add 7-Zip (from ATHENA)`, no co-author line.
+  The kit never stores tokens; gh holds the sign-in. Keep `config/*.json` in canonical form
+  (`ConvertTo-KitJsonDocument`: ASCII, one item per line); `test-config.ps1` fails otherwise.
+- **App `Id`s are never reused:** removing moves an entry to `Removed` (restorable); a new Id is above every Id in
+  Packages, Removed and `RetiredIds`.
+- **Tests never write to `main`.** Real commits only via `tools/test-config.ps1 -Write`, on a throwaway branch that
+  it deletes afterwards. Everything else runs offline on scratch folders (`file:///` config/zip URLs).
+- **Self-update must never strand a PC:** any failure keeps the running copy; under `irm | iex` the loader must
+  `return`, never `exit`. Test scripts that start install.ps1 point `MYWINKIT_RAW_URL` at a non-existent file so
+  they test *this* copy, not GitHub main.
 - **Prove which front-end ran from the run log** (`%LOCALAPPDATA%\my-win-kit\logs`), not from how the screen looks.
 - `win11-tweaks.ps1` uses StrictMode + `Stop`. `core.psm1` uses `Set-StrictMode -Version 2.0`: read optional
   catalogue keys with the indexer (`$h['Key']`), not `$h.Key`, or StrictMode throws.
@@ -100,7 +109,7 @@ powershell -File tools/lint.ps1 -ParseOnly                       # parse under W
 powershell -File tools/test-core.ps1                             # catalogue + engine (add -Online for scan + vendor pages)
 pwsh -File tools/smoke-tui.ps1                                   # Spectre menu, scripted keys
 powershell -ExecutionPolicy Bypass -File tools/smoke-loader.ps1  # loader decisions + classic menu
-powershell -ExecutionPolicy Bypass -File tools/test-overlay.ps1 -Online   # package-list overlay on a scratch kit
+powershell -ExecutionPolicy Bypass -File tools/test-config.ps1  # config read/write (dry), self-update, irm|iex (add -Write: throwaway branch)
 pwsh -File tools/render-screens.ps1 -OutDir <dir>                # capture every screen (.txt + truecolor .ans)
 ```
 

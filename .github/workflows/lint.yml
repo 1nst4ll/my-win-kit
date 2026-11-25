@@ -26,9 +26,9 @@ jobs:
       - name: Loader decisions + classic menu (dry run)
         shell: powershell
         run: ./tools/smoke-loader.ps1
-      - name: Package-list overlay (scratch kit copy)
+      - name: GitHub config, self-update, irm|iex bootstrap (scratch folders, no network writes)
         shell: powershell
-        run: ./tools/test-overlay.ps1
+        run: ./tools/test-config.ps1
 
   pwsh:
     name: PowerShell 7 (lint, core, Spectre menu)
@@ -41,9 +41,9 @@ jobs:
       - name: Core engine tests (dry run, resolves vendor download pages)
         shell: pwsh
         run: ./tools/test-core.ps1 -Online
-      - name: Package-list overlay + winget search (scratch kit copy)
+      - name: GitHub config, self-update, irm|iex bootstrap (scratch folders, no network writes)
         shell: pwsh
-        run: ./tools/test-overlay.ps1 -Online
+        run: ./tools/test-config.ps1
       - name: Install PwshSpectreConsole
         shell: pwsh
         run: Install-PSResource -Name PwshSpectreConsole -Scope CurrentUser -TrustRepository -Quiet

@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "_about": "my-win-kit settings shared by every PC. Edited by the menu (Settings) as commits.",
+  "removeShortcuts": true,
+  "dryRunByDefault": false
+}

@@ -6,8 +6,7 @@
     One-way copy: repo -> target. The repo is the single source of truth.
     - Copies ONLY the kit files listed in $KitFiles. Never deletes anything in
       the target and never touches other files there (shortcuts, tools, and the
-      per-PC/synced state next to install.ps1: winget-id-overrides.json and the
-      package-list overlay my-packages.json(.bak/.tmp) - see $Protected).
+      legacy state files listed in $Protected).
     - Skips files whose content is already identical (SHA-256 compare).
     - Skips kit files with uncommitted changes (only committed state ships).
     - Drift guard: if a target file differs from the repo copy AND is newer
@@ -40,13 +39,14 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 $srcFiles = @(Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'src') -File |
     Where-Object { $_.Extension -in '.ps1', '.psm1', '.psd1' } | Sort-Object Name |
     ForEach-Object { 'src/' + $_.Name })
-$KitFiles = @($srcFiles) + @('win11-tweaks.ps1', 'install.cmd', 'install.ps1')
+$cfgFiles = @(Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'config') -File -Filter '*.json' | Sort-Object Name | ForEach-Object { 'config/' + $_.Name })
+# config/*.json ship as the bundled offline fallback; every start reads the live copy from GitHub
+$KitFiles = @($srcFiles) + @($cfgFiles) + @('win11-tweaks.ps1', 'install.cmd', 'install.ps1')
 
-# Files that live in the target but belong to the PCs, not the repo: never written,
-# never deleted. my-packages.json holds Daniel's package-list edits (Settings ->
-# Manage packages) and syncs between PCs through OneDrive.
+# Files that may exist in the target but never come from the repo: never written, never deleted.
+# (Legacy per-PC state from older kit versions; live config is on GitHub since v2.3.0.)
 $Protected = @('my-packages.json', 'my-packages.json.bak', 'my-packages.json.tmp', 'winget-id-overrides.json')
-$clash = @($KitFiles | Where-Object { $Protected -contains (Split-Path -Leaf $_) })
+$clash = @($KitFiles | Where-Object { $Protected -contains $_ })   # repo-relative paths: config/winget-id-overrides.json is fine
 if ($clash.Count) {
     Write-Host "publish: refusing - protected file(s) in the kit file set: $($clash -join ', ')" -ForegroundColor Red
     exit 1

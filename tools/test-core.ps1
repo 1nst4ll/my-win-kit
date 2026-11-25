@@ -1,9 +1,9 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Test src/core.psm1 and src/catalog.psd1 without installing anything.
+    Test src/core.psm1 and config/catalog.json without installing anything.
 .DESCRIPTION
-    1. Catalogue sanity: unique Ids/names, known groups and methods, Direct
+    1. Catalogue sanity (config/catalog.json, the bundled copy - offline unless -Online): unique Ids/names, known groups and methods, Direct
        keys exist, DEV/POST off by default, Interactive only where expected.
     2. -DryRun every package through Invoke-KitPackage (no side effects).
     3. -Online: also scan what's installed and resolve the direct downloads
@@ -27,9 +27,9 @@ function Check([bool]$Ok, [string]$What) {
 }
 
 Write-Host "test-core: PowerShell $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))"
-$cat = @(Initialize-Kit -KitRoot $root)
+$cat = @(Initialize-Kit -KitRoot $root -Offline:(-not $Online))
 $groups = @(Get-KitGroups)
-$data = Import-PowerShellDataFile -LiteralPath (Join-Path $root 'src\catalog.psd1')
+$data = ConvertFrom-KitJsonText ([IO.File]::ReadAllText((Join-Path $root 'config\catalog.json')))
 
 Check ($cat.Count -ge 50) "catalogue loads ($($cat.Count) packages)"
 Check (@($cat.Id | Select-Object -Unique).Count -eq $cat.Count) 'package Ids are unique'
@@ -39,7 +39,7 @@ Check (@($cat | Where-Object { $gk -notcontains $_.Group }).Count -eq 0) 'every 
 Check (@($groups.Letter | Select-Object -Unique).Count -eq $groups.Count) 'group letters are unique'
 $methods = 'winget', 'msstore', 'script', 'direct', 'npm', 'builtin'
 Check (@($cat | Where-Object { $methods -notcontains $_.Method }).Count -eq 0) 'every method is known'
-Check (@($cat | Where-Object { $_.Method -eq 'direct' -and -not $data.Direct.ContainsKey($_.Ref) }).Count -eq 0) 'every direct Ref has a Direct entry'
+Check (@($cat | Where-Object { $_.Method -eq 'direct' -and -not $data['Direct'].Contains($_.Ref) }).Count -eq 0) 'every direct Ref has a Direct entry'
 Check (@($cat | Where-Object { $_.Group -in 'DEV', 'POST' -and $_.Default }).Count -eq 0) 'DEV and POST are off by default'
 Check (@($cat | Where-Object { $_.Group -eq 'POST' -and -not $_.Interactive }).Count -eq 0) 'POST items are Interactive (never under a spinner)'
 Check (@($cat | Where-Object { $_.Method -eq 'script' -and $_.Ref -notmatch '^https://' }).Count -eq 0) 'script installers use https'
@@ -61,7 +61,7 @@ foreach ($p in $order) {
     Check $okStatus ("{0,-22} {1,-7} {2}" -f $p.Name, $r.Status, $r.Detail)
 }
 if ($Online) {
-    foreach ($k in $data.Direct.Keys) {
+    foreach ($k in @($data['Direct'].Keys)) {
         try { $d = Resolve-KitDirect -Key $k; Check ([bool]$d.Version) "direct $k -> v$($d.Version) $($d.FileName)" }
         catch { Check $false "direct $k resolve: $_" }
     }

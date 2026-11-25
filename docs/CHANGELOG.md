@@ -2,6 +2,34 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-25: config on GitHub + self-update, kit v2.3.0 (branch `rebuild-tui`, not merged yet)
+
+- Daniel: "system that will allow changing settings from any computer while you're outside the repo, just on an
+  actually deployed version... Possibly we should use GitHub for that. By the way, this repo can be a public repo."
+- **Decision (coordinator, matching Daniel's lean):** GitHub is the single home for config. `src/catalog.psd1` is
+  migrated to `config/catalog.json` (same fields + `Removed`), new `config/settings.json` (`removeShortcuts`,
+  `dryRunByDefault`) and `config/winget-id-overrides.json`. The `my-packages.json` overlay and
+  `tools/import-overlay.ps1` (added earlier today) are removed.
+- **Read:** every start fetches the latest config (raw GitHub URL, 4 s; `gh api` when the repo is private) and
+  caches it; offline → cache → bundled copy. The banner shows the source.
+- **Write:** Manage packages and Settings commit to `main` through `gh api` (contents API, sha; on a conflict
+  re-fetch, re-apply, retry once). Plain user commit messages ("config: add 7-Zip (from ATHENA)"). Offers to
+  install gh and runs `gh auth login --web`; no tokens stored by the kit. Dry run previews the commit.
+- **Learned heals** are committed when signed in, else held per PC and pushed from Settings.
+- **Self-update:** the loader compares `KitVersion` with GitHub `main`, asks once per version, downloads the repo
+  zip into `%LOCALAPPDATA%\my-win-kit\app\<version>`, verifies it and runs it; any failure keeps the local copy.
+  **`irm https://raw.githubusercontent.com/1nst4ll/my-win-kit/main/install.ps1 | iex`** bootstraps a fresh PC.
+- **Public repo: not flipped.** The history scan found no secrets, tokens or keys, but all 10 commits carry
+  a personal email as author/committer, and `docs/STATUS.md` had the Windows user path in 2 commits
+  (removed from the current files now). The coordinator's rule was to stop and report, so the decision is with
+  Daniel.
+- Fixes found on the way: `.ContainsKey` on ordered dictionaries (`.Contains`); `"$rv?"` parsed as a variable
+  named `rv?` in the update prompt; `Get-Content -Raw` on `[98]` paths in 5.1 needs `-LiteralPath`; publish's
+  protected-file check compared leaf names (would have blocked `config/winget-id-overrides.json`).
+- Tests: new `tools/test-config.ps1` (offline read chain, JSON writer, dry-run edits, pending heals, publish,
+  self-update accept/reuse/decline/broken, `irm | iex`; `-Write` = real commits on a throwaway branch incl. a
+  forced conflict). `test-overlay.ps1` removed. smoke scenarios now check the dry-run commit previews.
+
 ## 2026-11-25: Manage packages, kit v2.2.0 (branch `rebuild-tui`, not merged yet)
 
 - Daniel's request: "add setting section where we can manage lists of packages (remove or search for and add

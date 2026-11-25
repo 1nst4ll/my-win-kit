@@ -12,15 +12,17 @@
 | [STATUS.md](STATUS.md) | Every volatile fact: counts, last publish, open bugs, next step. | How it works. |
 | [CHANGELOG.md](CHANGELOG.md) | Dated history, append-only. | Current state. |
 | architecture.md (this) | How the loader, menus, engine, publish and CI work. | Counts, history. |
-| [src/catalog.psd1](../src/catalog.psd1) | The **base** app catalogue (names, methods, IDs/URLs, groups, defaults, detection), `RetiredIds`, and the direct-download rules. Changed only in the repo. | Never copy it into docs. Daniel's live edits (next row). |
-| `my-packages.json` next to install.ps1 (the OneDrive copy; gitignored) | Daniel's **live edits** to the package list from Settings → Manage packages: added packages, removed Ids, default on/off overrides, new groups. Syncs to every PC through OneDrive; core.psm1 merges it over the base, so both menus see the same list. Never written by publish or git. See [Package list = base + overlay](#package-list--base--overlay-my-packagesjson). | The base list. Fold it into the repo with `tools/import-overlay.ps1`. |
+| [config/catalog.json](../config/catalog.json) **on GitHub `main`** | The app catalogue: groups, packages (name, method, Id/URL, default on/off, detection), removed packages, `RetiredIds`, the direct-download rules. Edited by the menu (Settings → Manage packages) as commits, or by hand. Every PC reads the live copy at start. Fields: [Catalog fields](#catalog-fields). | Never copy it into docs. |
+| [config/settings.json](../config/settings.json) **on GitHub `main`** | Kit settings shared by every PC (`removeShortcuts`, `dryRunByDefault`). Edited from Settings as commits. | Per-PC state (last selection, last failures: `%LOCALAPPDATA%\my-win-kit\state.json`). |
+| [config/winget-id-overrides.json](../config/winget-id-overrides.json) **on GitHub `main`** | Learned winget-ID heals (old → new, `msstore:` prefix = Store). Written by the installer: a commit when gh is signed in, otherwise held in the PC's cache until pushed. | |
+| `$script:KitVersion` in [src/core.psm1](../src/core.psm1) | The kit version. The loader compares it with GitHub `main` for the self-update. | |
 | `$script:Fixes` in [win11-tweaks.ps1](../win11-tweaks.ps1#L87) | The tweak catalogue (registry keys, apply/check/revert). | |
 
 ## Repo layout and delivery
 
 ```
 install.cmd  install.ps1           # launcher + loader (Windows PowerShell 5.1, zero deps)
-src/catalog.psd1                   # the app list (data only)
+config/catalog.json settings.json winget-id-overrides.json   # live config (GitHub main is the home)
 src/core.psm1                      # install engine, shared by both menus (5.1-compatible)
 src/tui-spectre.ps1                # modern menu (PowerShell 7.4+ + PwshSpectreConsole)
 src/tui-classic.ps1                # fallback menu (Windows PowerShell 5.1)
@@ -65,7 +67,7 @@ Runs on stock Windows PowerShell 5.1 with nothing installed.
 
 No UI. Both menus call the same functions, so behaviour is identical in both.
 
-- **`Initialize-Kit -KitRoot`** loads `catalog.psd1` (`Import-PowerShellDataFile`, data only), turns each entry
+- **`Initialize-Kit -KitRoot`** loads `config/catalog.json` (see [Configuration on GitHub](#configuration-on-github)), turns each entry
   into an object with a mutable `On`, and applies learned heals from `winget-id-overrides.json` beside
   `install.ps1` (old→new chains up to 5 hops; `msstore:` prefix switches channel).
 - **`Get-KitInstalled`** returns `Id → version` for everything installed: one `winget export --include-versions`
@@ -166,41 +168,75 @@ picker, `Show-Picker`, built on `[Console]::ReadKey`.
   the keys to the picker; it forces dry run and locks it on, and prints `SCREEN-HEIGHTS: name=rows; ...` on exit
   so tests can prove every screen fits 30 rows.
 
-## Package list = base + overlay (my-packages.json)
+## Configuration on GitHub
 
-**Decision (2026-11-25):** the kit runs from `OneDrive\[98] Shortcuts` on every PC and publish is one-way
-repo → OneDrive with a drift guard, so the menu must never edit `src/catalog.psd1`. Daniel's changes go to a user
-overlay, `my-packages.json` next to `install.ps1` (same pattern as `winget-id-overrides.json`): it syncs to every PC
-through OneDrive, is gitignored, and `publish.ps1` never touches it (`$Protected`, tested). Base = the curated
-catalogue in the repo; overlay = Daniel's live changes.
+**Decision (2026-11-25, Daniel + coordinator):** settings and the package list must be changeable from any PC
+running a deployed copy, outside the repo. GitHub is the single home: `config/catalog.json`,
+`config/settings.json` and `config/winget-id-overrides.json` on `main`. The menu edits them directly as commits;
+there is no local overlay and no import step (the earlier `my-packages.json` overlay and its import tool are
+gone). Every deployed copy reads the latest at start-up.
 
-- **Schema 1:** `{ "schema": 1, "lastId": N, "added": [ {Id, Name, Group, On, Method, Ref, Desc} ], "removed": [Ids],
-  "defaults": { "<Id>": true|false }, "groups": [ {Key, Label, Letter} ] }`.
-- **Merge (`Update-KitCatalog`, run at load and after every change):** base groups + overlay groups (new groups go
-  before POST); base packages + added packages (an added Id that exists in the base is ignored: base wins, e.g.
-  after an import); default overrides applied; removed Ids are hidden from the catalogue and listed by
-  `Get-KitRemovedPackages` for restore; winget-ID heals applied last.
-- **Ids are never reused:** a new package gets max(base Ids, `RetiredIds`, added, removed, `lastId`) + 1.
-  "Reset my changes" keeps only `lastId` when Ids above the base were handed out.
-- **Writes are atomic:** temp file + `[IO.File]::Replace` (previous version → `my-packages.json.bak`).
-- **Robust reads:** missing file = no changes. Unreadable file = warning on screen and in the run log, base list,
-  the file copied to `.bak` (the next save replaces it). A newer schema = ignored and never overwritten
-  (read-only for the session). Invalid entries are skipped with a warning.
-- **Dry run:** `Set-KitOverlayMemoryOnly` - edits stay in memory for the session and every Manage screen says so.
-- **API (core.psm1):** `Add-KitPackage`, `Set-KitPackageDefault`, `Remove-KitPackage`, `Restore-KitPackage`,
-  `Reset-KitOverlay`, `Get-KitOverlayInfo`, `Find-KitWingetPackages` (`winget search` in the winget and msstore
-  sources), `Test-KitWingetId` (exact Id, winget then Store).
-- **UI (modern menu only):** Settings → Manage packages. A header line shows where changes are saved (or the dry-run
-  notice). Package list (by group, default `● on` / `○ off`, installed badge, method, "added by you"):
-  Space/Enter toggles the default, `d`/Del removes after a confirm, `/` filters. Add a package: search box →
-  `winget search` results (name · Id · version · source, "√ in the list" marked) → group (existing or new) →
-  default on/off → saved. Add by exact winget ID. Removed packages (Enter restores). Reset my changes (confirm).
-  Esc goes back one level everywhere. The classic menu just uses the merged list (new groups get a neutral icon).
-- **Making changes permanent:** `tools/import-overlay.ps1` folds the overlay into `src/catalog.psd1` with text
-  edits that keep comments: default overrides → `On =`, removed → line deleted + Id into `RetiredIds`, new groups
-  before POST, added packages above the Post-install section (ASCII-only names). It validates the result before
-  replacing the file. Safe order: import → `test-core.ps1` → commit on `main` (publishes) → `-ClearOverlay`
-  (renames the overlay to `my-packages.imported-<date>.json`).
+- **Read (`Read-KitConfigFile`, per file):** `https://raw.githubusercontent.com/<repo>/<branch>/config/<file>`
+  (4 s timeout, needs the repo **public**) → if that 404s and gh is signed in, the contents API through `gh api`
+  (works while the repo is private) → `%LOCALAPPDATA%\my-win-kit\cache\<file>` (last good copy) → the copy bundled
+  with the kit (`config/` next to install.ps1) → built-in defaults (settings/overrides only). A network failure
+  skips the other files' timeouts. Every fetched copy is validated before it is used or cached; a damaged cache is
+  reported and skipped. The banner and the Manage/Settings headers show the source (GitHub, GitHub via gh,
+  cached <time>, bundled).
+- **Write (`Save-KitConfigChange`):** `gh api` GET contents (file + sha) → apply the change → PUT with that sha
+  (`--input` body file, no command-line size limit). On a conflict (HTTP 409/422: someone committed meanwhile) it
+  re-fetches, re-applies the change to the new file and retries once, else tells the user. The commit message is
+  plain, e.g. `config: add 7-Zip (from ATHENA)` (user commits: no co-author line). The kit never stores tokens:
+  gh holds the sign-in. Missing gh → the menu offers `winget install GitHub.cli`; not signed in → it runs
+  `gh auth login --web --hostname github.com --git-protocol https` (browser + one-time code). **Dry run** applies
+  the change in memory only and shows the commit that would be made.
+- **Operations (core.psm1):** `Add-KitPackage` (new Id above every Id in Packages, Removed and `RetiredIds`; a new
+  group goes before POST with a free letter F/H/J/K/V/Y), `Set-KitPackageDefault`, `Remove-KitPackage` (moves the
+  entry to `Removed`: hidden, restorable, Id kept), `Restore-KitPackage`, `Set-KitSetting`,
+  `Push-KitPendingOverrides`. Each is a re-appliable change on the parsed document, which is what makes the
+  conflict retry safe.
+- **Learned heals:** committed straight away when gh is signed in; otherwise kept in
+  `cache\pending-overrides.json`, applied locally at every start, and pushed from Settings ("Push N learned
+  package-ID fixes") or automatically at the next heal while signed in.
+- **JSON format:** `ConvertTo-KitJsonDocument` writes ASCII-only JSON (`\uXXXX` escapes) with one group / package /
+  direct rule per line, so each menu change is a one-line diff. `test-config.ps1` checks the committed file is in
+  this canonical form.
+- **Test hooks:** `MYWINKIT_REPO`, `MYWINKIT_BRANCH` (throwaway branches), `MYWINKIT_CONFIG_URL` (another base, or a
+  `file:///` folder), `MYWINKIT_GH=none` (simulate no gh), `MYWINKIT_TEST_STALE_SHA=1` (force one conflict).
+
+### Catalog fields
+
+`Groups`: `Key`, `Label`, `Letter` (classic-menu hotkey). `Packages` (and `Removed`), required: `Id` (permanent,
+never renumbered or reused), `Name` (unique), `Group`, `On` (in the recommended set), `Method` (`winget` | `msstore`
+| `script` | `direct` | `npm` | `builtin`), `Ref` (winget ID | Store product ID | script URL | Direct key | npm
+package | builtin name), `Desc`. Optional: `AI` (listed under Update AI tools), `Interactive` (needs the console,
+never under a spinner), `Exe` (file that proves a script/npm install, env vars expanded), `Version` (command whose
+output has the installed version), `Update` (native updater, e.g. `claude update`), `Appx` (MSIX package name),
+`Uninstall` (regex on the uninstall DisplayName), `Fallback` (winget ID when a direct download can't be resolved),
+`Requires` (command that must exist first). `RetiredIds`: Ids that must never be reused. `Direct.<key>`: `Page`,
+`Pattern` (regex with `{arch}` / `{arch2}`), `Arch`, `Arch2`, `Signer` (Authenticode subject), `Args` (silent
+switches). Claude Desktop stays on winget on purpose: Anthropic's latest-download link refuses scripted clients.
+
+## Self-update and the one-line install
+
+The loader (Windows PowerShell 5.1) keeps every PC on the newest kit without git or OneDrive changes:
+
+- **Version check:** `KitVersion` from `src/core.psm1` on GitHub `main` (raw URL, 3 s timeout). Newer than the
+  running copy → "Update kit 2.3.0 -> 2.4.0? [Y/n]" once per version (a "no" is remembered in
+  `%LOCALAPPDATA%\my-win-kit\update.json`; no question when input is redirected, e.g. CI).
+- **Install:** the repo zip (`codeload.github.com/<repo>/zip/refs/heads/main`) → extract → verify (required files,
+  every script parses, catalog.json parses, version matches) → `%LOCALAPPDATA%\my-win-kit\app\<version>` (the three
+  newest kept). The loader then re-runs that copy's `install.ps1 -NoUpdate` with the same arguments. Any failure
+  (offline, private repo, bad zip) keeps the running copy. A newer copy already downloaded is used without asking.
+- **`irm https://raw.githubusercontent.com/1nst4ll/my-win-kit/main/install.ps1 | iex`** (fresh PC, public repo):
+  `$PSScriptRoot` is empty, so the loader downloads the kit into `app\<version>` the same way, starts it as a child
+  `powershell.exe`, and returns (never `exit`, which would close the user's window).
+- `OneDrive\[98] Shortcuts\install.cmd` keeps working as the launcher: it runs the published copy, which updates
+  itself from GitHub.
+- **While the repo is private** the raw/zip URLs return 404: no self-update and no `irm | iex`; config is still
+  read through `gh api` on PCs where gh is signed in, else from the cache or the bundled copy.
+- Test hooks: `MYWINKIT_RAW_URL`, `MYWINKIT_ZIP_URL` (`file:///` allowed), `MYWINKIT_BOOTSTRAP_ARGS`,
+  `-UpdateAnswer`.
 
 ## Run log (which front-end ran)
 
@@ -234,10 +270,11 @@ engine; failures stay selected for a retry. `-TestInput "a;b;c"` feeds answers (
 
 ## publish.ps1
 
-- Copies only the kit file set: `src/*.ps1|psm1|psd1` first, then `win11-tweaks.ps1`, `install.cmd`, and
-  `install.ps1` **last**, so a PC that syncs mid-publish never gets a loader whose `src/` is missing. It creates
-  `src\` in the target when needed. It never deletes anything or touches other files there, in particular
-  `winget-id-overrides.json`, which installs write there on purpose so heals sync to every PC.
+- Copies only the kit file set: `src/*.ps1|psm1|psd1` first, then `config/*.json` (the bundled offline fallback;
+  live config is read from GitHub), `win11-tweaks.ps1`, `install.cmd`, and `install.ps1` **last**, so a PC that
+  syncs mid-publish never gets a loader whose `src/` is missing. It creates `src\` / `config\` in the target when
+  needed. It never deletes anything or touches other files there; `` names legacy root files from older
+  versions (`my-packages.json*`, `winget-id-overrides.json`) that must never be written.
 - Skips files with identical SHA-256 (computed through .NET: `Get-FileHash` fails to load in 5.1 when a git hook
   inherits a PowerShell 7 `PSModulePath`) and files with uncommitted changes.
 - **Drift guard:** a target file that differs and is newer than the repo copy was edited on another PC: not
@@ -259,9 +296,9 @@ All tests run the kit in dry-run mode; nothing installs.
 | `tools/test-core.ps1` | 5.1 + pwsh | catalogue sanity (unique Ids/names, groups, methods, DEV/POST off, POST interactive), dry run of every package, version compare; `-Online` adds the installed scan and vendor-page resolution |
 | `tools/smoke-tui.ps1` | pwsh | the Spectre menu driven by scripted keys: install flow, search, AI table, settings + tweaks (+ "update all" when an AI tool is installed, local only) |
 | `tools/smoke-loader.ps1` | 5.1 | loader decisions (pwsh present / absent / forced classic), declining and dry-run accepting the PowerShell 7 install, a classic-menu run |
-| `tools/test-overlay.ps1` | 5.1 + pwsh | overlay on a scratch kit copy: add (Id, atomic write), defaults, remove/restore, Ids never reused, memory-only, corrupt + newer-schema files, reset, classic menu with an overlay, publish leaving it alone, import-overlay; `-Online` adds a real winget search + Id lookup |
+| `tools/test-config.ps1` | 5.1 + pwsh | config read chain (remote / cache / corrupt cache / bundled / defaults), JSON writer (canonical, ASCII, round trip), dry-run edits + commit previews, Ids never reused, pending heals, publish, self-update (accept / reuse / decline / broken zip), `irm \| iex` bootstrap. `-Write`: real commits on a throwaway GitHub branch incl. a forced conflict retry; the branch is deleted after |
 | `tools/render-screens.ps1 -OutDir <dir>` | pwsh (+5.1 for classic) | not a test: captures every screen as `.txt` (layout) and truecolor `.ans` (view with `Get-Content x.ans -Raw` in Windows Terminal) at 120 × 30, and prints the main-menu height |
 
-`.github/workflows/lint.yml` runs two jobs on `windows-latest`: **ps51** (parse, test-core, smoke-loader, test-overlay) and
-**pwsh** (lint, test-core -Online, test-overlay -Online, install PwshSpectreConsole, smoke-tui). `$KnownIssues` in `lint.ps1`
+`.github/workflows/lint.yml` runs two jobs on `windows-latest`: **ps51** (parse, test-core, smoke-loader, test-config) and
+**pwsh** (lint, test-core -Online, test-config, install PwshSpectreConsole, smoke-tui). `$KnownIssues` in `lint.ps1`
 downgrades listed findings to warnings; it is empty.

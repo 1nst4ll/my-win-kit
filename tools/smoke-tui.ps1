@@ -45,11 +45,11 @@ $scenarios = @(
        Keys = 'DownArrow,DownArrow,Enter,Escape,DownArrow,DownArrow,Enter,Enter,Enter,text:q'
        Expect = @('Windows 11 tweaks', 'would run: powershell -File', 'see you next time') }
     @{ Name = 'settings: toggle, esc back'
-       Keys = 'DownArrow,DownArrow,DownArrow,Enter,DownArrow,Enter,Escape,text:q'
-       Expect = @('Manage packages', 'Remove desktop shortcuts', 'Dry run', 'run log:', 'see you next time') }
-    @{ Name = 'manage packages: default off, remove (confirm), restore, reset - dry run keeps it in memory'
-       Keys = 'DownArrow,DownArrow,DownArrow,Enter,Enter,Enter,DownArrow,Spacebar,text:d,Enter,Escape,DownArrow,DownArrow,DownArrow,Enter,Enter,Escape,End,Enter,Enter,Escape,Escape,text:q'
-       Expect = @('Package list', 'space default on/off', 'Remove it?', 'Removed packages', 'Reset?', 'changes stay in memory', 'see you next time') }
+       Keys = 'DownArrow,DownArrow,DownArrow,Enter,DownArrow,Enter,Enter,Escape,text:q'
+       Expect = @('Manage packages', 'Remove desktop shortcuts', 'Start in dry run', 'GitHub account', 'Would commit', 'config: setting removeShortcuts = False', 'run log:', 'see you next time') }
+    @{ Name = 'manage packages: default off, remove (confirm), restore - dry run previews each commit'
+       Keys = 'DownArrow,DownArrow,DownArrow,Enter,Enter,Enter,DownArrow,Spacebar,Enter,text:d,Enter,Enter,Escape,DownArrow,DownArrow,DownArrow,Enter,Enter,Enter,Enter,Escape,Escape,text:q'
+       Expect = @('Package list', 'space default on/off', 'Would commit', 'config: UniGetUI default off', 'Remove it?', 'config: remove UniGetUI', 'config: restore UniGetUI', 'Nothing removed', 'nothing is pushed', 'see you next time') }
     @{ Name = 'manage packages: esc from every level (list, search box, id box, removed)'
        Keys = 'DownArrow,DownArrow,DownArrow,Enter,Enter,Enter,Escape,DownArrow,Enter,Escape,DownArrow,DownArrow,Enter,Escape,DownArrow,DownArrow,DownArrow,Enter,Escape,Escape,Escape,text:q'
        Expect = @('Search winget and the Microsoft Store for', 'Exact winget ID', 'Nothing removed', 'Back to Settings', 'see you next time') }
@@ -63,24 +63,16 @@ if ($hasAi -and -not $env:GITHUB_ACTIONS) {
         Expect = @('Update all installed', 'Updating AI tools', 'would run', 'Summary') }
 }
 
-# Real winget search + add by Id, saved for real into a SCRATCH copy of the kit (never the repo or OneDrive)
-$scratch = $null
+# Real (read-only) winget search + add by exact Id; the commits are only previewed (dry run).
+# Real commits are tested against a throwaway branch by tools/test-config.ps1 -Write.
 if (Get-Command winget -ErrorAction SilentlyContinue) {
-    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("my-win-kit-smoke-kit-" + [guid]::NewGuid())
-    New-Item -ItemType Directory -Path (Join-Path $scratch 'src') -Force | Out-Null
-    Copy-Item -Path (Join-Path $root 'src\*') -Destination (Join-Path $scratch 'src')
-    foreach ($f in 'install.ps1', 'install.cmd', 'win11-tweaks.ps1') { Copy-Item -LiteralPath (Join-Path $root $f) -Destination $scratch }
-    $scenarios += @{ Name = 'manage packages: winget search + add, add by exact Id into a new group (real save, scratch kit)'
-        Kit = $scratch; AllowSave = $true
+    $scenarios += @{ Name = 'manage packages: winget search + add, add by exact Id into a new group (dry-run commit preview)'
         Keys = 'DownArrow,DownArrow,DownArrow,Enter,Enter,DownArrow,Enter,text:7zip,Enter,Enter,Enter,Enter,Enter,DownArrow,DownArrow,Enter,text:Mozilla.Firefox,Enter,End,Enter,text:My tools,Enter,DownArrow,Enter,Enter,Escape,Escape,text:q'
-        Expect = @('Searching winget', 'result(s)', 'Which group?', 'In the recommended set?', 'Added', 'saved to my-packages.json', 'Name of the new group', 'Mozilla Firefox', 'see you next time') }
+        Expect = @('Searching winget', 'result(s)', 'Which group?', 'In the recommended set?', 'Would commit', 'config: add', 'Name of the new group', 'config: add Mozilla Firefox', 'see you next time') }
 }
-
 foreach ($s in $scenarios) {
-    $kitRoot = if ($s.ContainsKey('Kit')) { $s.Kit } else { $root }
-    $env:MYWINKIT_TEST_ALLOW_SAVE = if ($s.ContainsKey('AllowSave')) { '1' } else { '' }
+    $kitRoot = $root
     $out = & pwsh -NoProfile -File $tui -KitRoot $kitRoot -TestKeys $s.Keys 2>&1 | Out-String
-    $env:MYWINKIT_TEST_ALLOW_SAVE = ''
     $ec = $LASTEXITCODE
     $missing = @($s.Expect | Where-Object { -not $out.Contains($_) })   # literal, not -like (brackets are wildcards)
     $hl = ($out -split "`n" | Where-Object { $_ -like 'SCREEN-HEIGHTS:*' } | Select-Object -Last 1)
@@ -94,20 +86,6 @@ foreach ($s in $scenarios) {
         Write-Host "  FAIL  $($s.Name) (exit $ec; missing: $($missing -join ' | '); taller than 30: $($tall -join ', '))" -ForegroundColor Red
         ($out -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 15) | ForEach-Object { Write-Host "        $_" -ForegroundColor DarkGray }
     }
-}
-if ($scratch) {
-    # the real save must have landed in the scratch kit, and only there
-    $ovf = Join-Path $scratch 'my-packages.json'
-    $okSave = $false
-    if (Test-Path -LiteralPath $ovf) {
-        $j = Get-Content -LiteralPath $ovf -Raw | ConvertFrom-Json
-        $ff = @($j.added | Where-Object { $_.Ref -eq 'Mozilla.Firefox' })
-        $okSave = ($j.schema -eq 1 -and @($j.added).Count -eq 2 -and $ff.Count -eq 1 -and $ff[0].On -eq $true -and $ff[0].Group -eq 'MY1' -and @($j.groups | Where-Object Label -eq 'My tools').Count -eq 1)
-    }
-    $repoClean = -not (Test-Path -LiteralPath (Join-Path $root 'my-packages.json'))
-    if ($okSave -and $repoClean) { Write-Host '  ok    real save: scratch my-packages.json has 7zip + Firefox (on, new group MY1); repo root untouched' -ForegroundColor Green }
-    else { $fail++; Write-Host "  FAIL  real save check (saved ok: $okSave, repo root clean: $repoClean)" -ForegroundColor Red; if (Test-Path $ovf) { Get-Content $ovf | Write-Host } }
-    Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
 }
 Remove-Item -LiteralPath $env:MYWINKIT_STATE_DIR -Recurse -Force -ErrorAction SilentlyContinue
 if ($fail -eq 0) { Write-Host 'smoke-tui: all passed' -ForegroundColor Green } else { Write-Host "smoke-tui: $fail failure(s)" -ForegroundColor Red }

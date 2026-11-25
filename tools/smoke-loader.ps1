@@ -17,6 +17,8 @@ param()
 $root = Split-Path -Parent $PSScriptRoot
 $loader = Join-Path $root 'install.ps1'
 $env:MYWINKIT_STATE_DIR = Join-Path ([IO.Path]::GetTempPath()) ("my-win-kit-smoke-" + [guid]::NewGuid())
+# test THIS copy: no self-update to whatever is on GitHub main
+$env:MYWINKIT_RAW_URL = 'file:///C:/nonexistent-my-win-kit-update-source'
 $script:fail = 0
 
 function Invoke-Loader([string[]]$LoaderArgs) {

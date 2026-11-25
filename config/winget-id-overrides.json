@@ -1,0 +1,5 @@
+{
+  "schema": 1,
+  "_about": "Learned winget-ID heals (old -> new; msstore: prefix = Store). Written by the installer when it finds a renamed or broken package ID.",
+  "overrides": {  }
+}
