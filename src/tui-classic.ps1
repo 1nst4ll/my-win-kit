@@ -180,7 +180,7 @@ function Show-Menu {
     Write-C '  I' $Pal.Orange -NoNewline; Write-C ' install  ' $Pal.Fg -NoNewline; Write-C 'L' $Pal.Orange -NoNewline; Write-C ' update  ' $Pal.Fg -NoNewline
     Write-C 'W' $Pal.Orange -NoNewline; Write-C ' tweaks  ' $Pal.Fg -NoNewline
     # per-PC switches: value + where it comes from
-    foreach ($tg in @(@{ Key = 'K'; Label = ' auto PS7 + Terminal: '; Val = (Get-KitAutoInstallPwsh) }, @{ Key = 'V'; Label = ' admin at start: '; Val = (Get-KitElevateAtStart) })) {
+    foreach ($tg in @(@{ Key = 'K'; Label = ' essentials on start: '; Val = (Get-KitAutoInstallEssentials) }, @{ Key = 'V'; Label = ' admin at start: '; Val = (Get-KitElevateAtStart) })) {
         Write-C $tg.Key $Pal.Orange -NoNewline; Write-C $tg.Label $Pal.Fg -NoNewline
         Write-C $(if ($tg.Val.On) { 'on' } else { 'off' }) $(if ($tg.Val.On) { $Pal.Green } else { $Pal.Gray }) -NoNewline
         Write-C $(if ($tg.Val.Source -eq 'this PC') { ' (this PC)  ' } else { ' (shared)  ' }) $Pal.Gray -NoNewline
@@ -333,7 +333,7 @@ while ($true) {
     }
     if ($u -eq 'K') {
         # per-PC preference (local-settings.json, never GitHub); tests only write into their scratch state folder
-        if (-not $script:Testing -or $env:MYWINKIT_STATE_DIR) { Set-KitLocalPref -Name 'autoInstallPwsh' -Value (-not (Get-KitAutoInstallPwsh).On) }
+        if (-not $script:Testing -or $env:MYWINKIT_STATE_DIR) { Set-KitLocalPref -Name 'autoInstallEssentials' -Value (-not (Get-KitAutoInstallEssentials).On) }
         continue
     }
     if ($u -eq 'V') {

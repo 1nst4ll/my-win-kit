@@ -74,13 +74,24 @@ try {
     $doc = ConvertFrom-KitJsonText ([IO.File]::ReadAllText((Join-Path $repo 'config\catalog.json')))
     $t1 = ConvertTo-KitJsonDocument $doc; $t2 = ConvertTo-KitJsonDocument (ConvertFrom-KitJsonText $t1)
     Check ($t1 -eq $t2) 'JSON writer: stable round trip'
-    foreach ($cf in 'catalog.json', 'settings.json', 'winget-id-overrides.json') {
+    foreach ($cf in 'catalog.json', 'settings.json', 'winget-id-overrides.json', 'terminal.json') {
         $txt = [IO.File]::ReadAllText((Join-Path $repo "config\$cf"))
         Check ($txt -eq (ConvertTo-KitJsonDocument (ConvertFrom-KitJsonText $txt))) "config/$cf is in canonical form (ConvertTo-KitJsonDocument)"
     }
     $u = ConvertTo-KitJsonDocument ([ordered]@{ Name = "Caf$([char]0xE9) `"q`" \ x" })
     Check (-not @([Text.Encoding]::UTF8.GetBytes($u) | Where-Object { $_ -gt 127 }).Count -and (ConvertFrom-KitJsonText $u)['Name'] -eq "Caf$([char]0xE9) `"q`" \ x") 'JSON writer: ASCII-only (\u escapes), round-trips quotes and backslashes'
     Check (@(($t1 -split "`n") | Where-Object { $_ -match '^\s+\{ "Id": ' }).Count -eq (@($doc['Packages']).Count + @(@($doc['Removed']) | Where-Object { $_ }).Count)) 'JSON writer: one package per line (Packages and Removed)'
+
+    # ---------------------------------------------------------------- config/terminal.json (public repo: no personal data)
+    $tj = [IO.File]::ReadAllText((Join-Path $repo 'config\terminal.json'))
+    Check (-not @([Text.Encoding]::UTF8.GetBytes($tj) | Where-Object { $_ -gt 127 }).Count) 'terminal.json: ASCII-only (the robot icon is a \u escape)'
+    $personal = @(@('C:\\Users\\', 'D:\\OneDrive', $env:USERNAME, $env:COMPUTERNAME, 'Stacy', '@', 'startOnUserLogin') | Where-Object { $_ -and $tj.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+    $ip = [regex]::Match($tj, '\b\d{1,3}(\.\d{1,3}){3}\b')
+    Check (-not $personal.Count -and -not $ip.Success) "terminal.json: no user names, host names, personal paths or IPs$(if ($personal.Count) { ': ' + ($personal -join ', ') })"
+    $td = ConvertFrom-KitJsonText $tj
+    $tp = @(@($td['profiles']) | Where-Object { $_['guid'] -eq $td['defaultProfile'] })
+    Check ($tp.Count -eq 1 -and $tp[0]['name'] -eq 'Claude Code' -and @($td['keybindings']).Count -eq 3 -and $td['startingDirectory']['prefer'] -eq '%OneDrive%\.playground' -and $td['profileDefaults']['font']['face'] -eq 'CaskaydiaCove Nerd Font Mono') 'terminal.json: Claude Code profile is the default, 3 key bindings, %OneDrive%\.playground, Nerd Font face'
+    Check (Test-Path (Join-Path $state 'cache\terminal.json')) 'read: terminal.json fetched and cached like the other config files'
 
     # ---------------------------------------------------------------- hand-edited catalogue: Ids are permanent
     $all = @(@($doc['Packages']) + @($doc['Removed']) | Where-Object { $_ } | ForEach-Object { [int]$_['Id'] })

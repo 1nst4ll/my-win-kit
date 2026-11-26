@@ -5,10 +5,14 @@
 .DESCRIPTION
     Runs under Windows PowerShell 5.1 (the engine a fresh PC has):
       - decision with PowerShell 7 present / simulated absent / -Classic
-      - autoInstallPwsh on (default): PowerShell 7 and Windows Terminal are installed
+      - autoInstallEssentials on (default): PowerShell 7 and Windows Terminal are installed
         WITHOUT the question (dry run and MYWINKIT_SIMULATE_INSTALL=ok|fail), and a
         failed or unfinished install still ends in the classic menu
-      - autoInstallPwsh off (this PC's local-settings.json): the old ask-first flow:
+      - essentials (MYWINKIT_SIMULATE_ESSENTIALS): order PS7, Terminal, Claude Code, font,
+        Terminal settings, default terminal; skipped when present; a failure carries on
+        and is not retried the same day; setting off = none run; /auto runs them too
+      - autoInstallEssentials off (this PC's local-settings.json; the older
+        autoInstallPwsh name is used for back-compat): the old ask-first flow:
         declined -> classic menu, accepted in dry run -> skips the install, classic menu
       - local override beats the shared settings.json; the classic menu's K toggles it
       - administrator rights at start (MYWINKIT_SIMULATE_*; never a real UAC prompt):
@@ -52,7 +56,7 @@ function Check([string]$Name, $Run, [string[]]$Expect, [string[]]$Absent = @()) 
         ($Run.Out -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 12) | ForEach-Object { Write-Host "        $_" -ForegroundColor DarkGray }
     }
 }
-function Set-LocalAuto($Value, [string]$Name = 'autoInstallPwsh') {
+function Set-LocalAuto($Value, [string]$Name = 'autoInstallPwsh') {   # older name on purpose: back-compat
     if ($null -eq $Value) { Remove-Item -LiteralPath $localPrefs -Force -ErrorAction SilentlyContinue }
     else { [IO.File]::WriteAllText($localPrefs, "{`n  `"$Name`": $(if ($Value) { 'true' } else { 'false' })`n}`n") }
 }
@@ -73,6 +77,12 @@ function Set-Sim([hashtable]$Vars) {
     foreach ($n in 'MYWINKIT_SIMULATE_ADMIN', 'MYWINKIT_SIMULATE_ELEVATION', 'MYWINKIT_SIMULATE_UAC', 'MYWINKIT_SIMULATE_SESSION_USER') { Remove-Item "Env:$n" -ErrorAction SilentlyContinue }
     foreach ($k in $Vars.Keys) { Set-Item "Env:$k" $Vars[$k] }
 }
+function Test-Order([string]$Name, $Run, [string[]]$Seq) {
+    $pos = -1; $bad = @()
+    foreach ($t in $Seq) { $i = $Run.Out.IndexOf($t); if ($i -le $pos) { $bad += $t } else { $pos = $i } }
+    if (-not $bad.Count) { Write-Host "  ok    $Name" -ForegroundColor Green }
+    else { $script:fail++; Write-Host "  FAIL  $Name (missing or out of order: $($bad -join ' | '))" -ForegroundColor Red }
+}
 function Get-NewestLog {
     $l = Get-ChildItem -LiteralPath (Join-Path $env:MYWINKIT_STATE_DIR 'logs') -Filter 'run-*.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($l) { return @{ Out = (Get-Content -LiteralPath $l.FullName -Raw); Ec = 0 } } else { return @{ Out = ''; Ec = 0 } }
@@ -82,7 +92,7 @@ Set-Sim @{ MYWINKIT_SIMULATE_ADMIN = '0' }
 $ask = 'Install PowerShell 7 now?'
 $hasPwsh = [bool](Get-Command pwsh.exe -ErrorAction SilentlyContinue)
 
-Write-Host 'autoInstallPwsh on (the shared default):'
+Write-Host 'autoInstallEssentials on (the shared default):'
 Set-LocalAuto $null
 if ($hasPwsh) {
     Check 'decision: PowerShell 7 + Terminal present -> modern' (Invoke-Loader @('-WhatIfLoader')) @('decision: modern')
@@ -102,13 +112,48 @@ if ($hasPwsh) {
 Remove-Item -LiteralPath (Join-Path $env:MYWINKIT_STATE_DIR 'loader.json') -Force -ErrorAction SilentlyContinue
 $env:MYWINKIT_SIMULATE_INSTALL = ''
 
-Write-Host 'autoInstallPwsh off on this PC (local override beats the shared on):'
+Write-Host 'essentials (simulated with MYWINKIT_SIMULATE_ESSENTIALS; nothing installed or changed):'
+Check 'what-if: essentials on, the six steps named' (Invoke-Loader @('-WhatIfLoader')) @('essentials: on (', 'Claude Code, CaskaydiaCove Nerd Font, Terminal settings, default terminal app')
+Check 'test mode without the simulation: the steps are skipped' (Invoke-Loader @('-NoPwsh', '-NoTerminal', '-DryRun', '-ClassicTestInput', 'Q')) @('classic menu') @('Claude Code:', 'CaskaydiaCove Nerd Font:')
+$env:MYWINKIT_SIMULATE_INSTALL = 'ok'
+$env:MYWINKIT_SIMULATE_ESSENTIALS = 'absent'
+$r = Invoke-Loader @('-NoPwsh', '-NoTerminal', '-ClassicTestInput', 'Q')
+Check 'all missing: installed without a question, then the classic menu' $r @('no question asked', 'Claude Code: simulated', 'Default terminal app: simulated', 'classic menu') @($ask)
+Test-Order 'order: PowerShell 7, Terminal, Claude Code, font, Terminal settings, default terminal' $r @('Simulated: PowerShell 7 install (ok)', 'Simulated: Windows Terminal install (ok)', 'Claude Code: simulated', 'CaskaydiaCove Nerd Font: simulated', 'Terminal settings: simulated', 'Default terminal app: simulated')
+$env:MYWINKIT_SIMULATE_ESSENTIALS = 'present'
+$r = Invoke-Loader @('-NoPwsh', '-ClassicTestInput', 'Q')
+Check 'all present: nothing runs (skipped quietly)' $r @('classic menu') @('Claude Code:', 'CaskaydiaCove Nerd Font:', 'Terminal settings:', 'Default terminal app:')
+Check 'run log: each step recorded as current' (Get-NewestLog) @('essentials: Claude Code -> current', 'essentials: CaskaydiaCove Nerd Font -> current', 'essentials: Terminal settings -> current', 'essentials: Default terminal app -> current')
+$env:MYWINKIT_SIMULATE_ESSENTIALS = 'font,default-terminal'
+$r = Invoke-Loader @('-NoPwsh', '-ClassicTestInput', 'Q')
+Check 'font + default terminal present: only Claude Code and the settings run' $r @('Claude Code: simulated', 'Terminal settings: simulated') @('CaskaydiaCove Nerd Font:', 'Default terminal app:')
+$env:MYWINKIT_SIMULATE_ESSENTIALS = 'absent'
+$env:MYWINKIT_SIMULATE_FAIL = 'claude'
+$r = Invoke-Loader @('-NoPwsh', '-ClassicTestInput', 'Q')
+Check 'Claude Code fails: shown once, the next steps and the menu still run' $r @('Claude Code not set up: simulated failure - carrying on (next try tomorrow)', 'CaskaydiaCove Nerd Font: simulated', 'Default terminal app: simulated', 'classic menu')
+$r = Invoke-Loader @('-NoPwsh', '-ClassicTestInput', 'Q')
+Check 'failed today: Claude Code not retried at the next start' $r @('CaskaydiaCove Nerd Font: simulated', 'classic menu') @('Claude Code not set up')
+Check 'run log: the skip is recorded' (Get-NewestLog) @('essentials: claude failed earlier today - not retrying until tomorrow')
+Remove-Item -LiteralPath (Join-Path $env:MYWINKIT_STATE_DIR 'loader.json') -Force -ErrorAction SilentlyContinue
+$env:MYWINKIT_SIMULATE_FAIL = ''
+$r = Invoke-Loader @('-NoPwsh', '-NoTerminal', '-DryRun', '-ClassicTestInput', 'Q')
+Check 'dry run: every step says what it would do' $r @('Dry run: would install PowerShell 7', 'Dry run: Claude Code: would set it up', 'Dry run: Default terminal app: would set it up', 'DRY RUN')
+$r = Invoke-LoaderNoInput @('/auto', '/dryrun')
+Check '/auto runs the essentials too (no question)' $r @('Dry run: Claude Code: would set it up', 'Exit code 0') @('[Y/n]', 'TIMEOUT')
+Set-LocalAuto $false 'autoInstallEssentials'
+$r = Invoke-Loader @('-NoPwsh', '-Answer', 'n', '-DryRun', '-ClassicTestInput', 'Q')
+Check 'autoInstallEssentials off: none of them run (PowerShell 7 asked first, as before)' $r @($ask, 'classic menu') @('Claude Code:', 'CaskaydiaCove Nerd Font:', 'Terminal settings:', 'Default terminal app:')
+Check 'what-if: essentials off (this PC)' (Invoke-Loader @('-WhatIfLoader', '-NoPwsh')) @('essentials: off (this PC)', 'decision: offer-install')
+Set-LocalAuto $null
+$env:MYWINKIT_SIMULATE_ESSENTIALS = ''; $env:MYWINKIT_SIMULATE_INSTALL = ''
+
+Write-Host 'essentials off on this PC via the older autoInstallPwsh (local override beats the shared on):'
 Set-LocalAuto $false
 Check 'decision: PowerShell 7 absent -> offer install (ask first)' (Invoke-Loader @('-WhatIfLoader', '-NoPwsh', '-NoTerminal')) @('decision: offer-install')
 Check 'declined PowerShell 7 -> classic menu'          (Invoke-Loader @('-NoPwsh', '-Answer', 'n', '-DryRun', '-ClassicTestInput', 'Q')) @($ask, 'classic menu', 'DRY RUN')
 Check 'accepted in dry run -> no install, classic'     (Invoke-Loader @('-NoPwsh', '-Answer', 'y', '-DryRun', '-ClassicTestInput', 'Q')) @('Dry run: would install PowerShell 7', 'classic menu')
-Check 'classic menu shows the local choice'           (Invoke-Loader @('-Classic', '-DryRun', '-ClassicTestInput', 'Q')) @('auto PS7 + Terminal: off (this PC)')
-Check 'classic K toggles it back on (this PC)'         (Invoke-Loader @('-Classic', '-DryRun', '-ClassicTestInput', 'K;Q')) @('auto PS7 + Terminal: on (this PC)')
+Check 'classic menu shows the local choice'           (Invoke-Loader @('-Classic', '-DryRun', '-ClassicTestInput', 'Q')) @('essentials on start: off (this PC)')
+Check 'classic K toggles it back on (this PC)'         (Invoke-Loader @('-Classic', '-DryRun', '-ClassicTestInput', 'K;Q')) @('essentials on start: on (this PC)')
 Check 'after K: loader auto-installs again'            (Invoke-Loader @('-WhatIfLoader', '-NoPwsh')) @('decision: auto-install')
 Set-LocalAuto $null
 
@@ -152,12 +197,12 @@ $r = Invoke-LoaderNoInput @('-Auto', '-DryRun')
 Check '-Auto: elevates once (simulated), runs as administrator, exit 0' $r @('Simulated: administrator prompt accepted', 'as administrator (nothing else will ask)', 'Exit code 0') @('[Y/n]', 'TIMEOUT')
 Set-Sim @{ MYWINKIT_SIMULATE_ADMIN = '0' }
 Set-LocalAuto $false
-Check '/auto with autoInstallPwsh off and no PowerShell 7: no question' (Invoke-LoaderNoInput @('/auto', '/dryrun', '-NoPwsh')) @('Exit code 0') @($ask, 'TIMEOUT')
+Check '/auto with essentials off and no PowerShell 7: no question' (Invoke-LoaderNoInput @('/auto', '/dryrun', '-NoPwsh')) @('Exit code 0') @($ask, 'TIMEOUT')
 Set-LocalAuto $null
 
 Write-Host 'classic menu:'
 Check 'classic L: update submenu -> everything (kit + rest of PC), declined' (Invoke-Loader @('-Classic', '-DryRun', '-NoElevate', '-ClassicTestInput', 'L;1;n;L;;Q')) @('1 everything (kit apps + rest of PC)', '2 AI tools only', 'Kit apps (', 'Other apps on this PC (', 'see you next time')
-Check 'classic: toggles + POST + simulated run'        (Invoke-Loader @('-Classic', '-DryRun', '-ClassicTestInput', '0;2;46;X;I;y;;Q')) @('0 selected', '[1/5] Notepad++', '[5/5] Enable RDP Host', '5 ok', '0 failed', 'see you next time', 'auto PS7 + Terminal: on (shared)', 'admin at start: on (shared)')
+Check 'classic: toggles + POST + simulated run'        (Invoke-Loader @('-Classic', '-DryRun', '-ClassicTestInput', '0;2;46;X;I;y;;Q')) @('0 selected', '[1/5] Notepad++', '[5/5] Enable RDP Host', '5 ok', '0 failed', 'see you next time', 'essentials on start: on (shared)', 'admin at start: on (shared)')
 
 # The run log must prove which front-end started (newest log = the classic run above)
 $log = Get-ChildItem -LiteralPath (Join-Path $env:MYWINKIT_STATE_DIR 'logs') -Filter 'run-*.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -165,6 +210,6 @@ $logText = if ($log) { Get-Content -LiteralPath $log.FullName -Raw } else { '' }
 Check 'run log records loader decision + front-end' @{ Out = $logText; Ec = 0 } @('loader: decision = classic', 'loader: starting CLASSIC menu', 'frontend: CLASSIC started')
 
 Remove-Item -LiteralPath $env:MYWINKIT_STATE_DIR -Recurse -Force -ErrorAction SilentlyContinue
-foreach ($n in 'MYWINKIT_SIMULATE_WT', 'MYWINKIT_SIMULATE_INSTALL', 'MYWINKIT_SIMULATE_ADMIN', 'MYWINKIT_SIMULATE_ELEVATION', 'MYWINKIT_SIMULATE_UAC', 'MYWINKIT_SIMULATE_SESSION_USER') { Remove-Item "Env:$n" -ErrorAction SilentlyContinue }
+foreach ($n in 'MYWINKIT_SIMULATE_WT', 'MYWINKIT_SIMULATE_INSTALL', 'MYWINKIT_SIMULATE_ESSENTIALS', 'MYWINKIT_SIMULATE_FAIL', 'MYWINKIT_SIMULATE_ADMIN', 'MYWINKIT_SIMULATE_ELEVATION', 'MYWINKIT_SIMULATE_UAC', 'MYWINKIT_SIMULATE_SESSION_USER') { Remove-Item "Env:$n" -ErrorAction SilentlyContinue }
 if ($script:fail -eq 0) { Write-Host 'smoke-loader: all passed' -ForegroundColor Green } else { Write-Host "smoke-loader: $($script:fail) failure(s)" -ForegroundColor Red }
 exit $script:fail

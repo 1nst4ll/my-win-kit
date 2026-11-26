@@ -1078,14 +1078,17 @@ function Get-SettingsPanel {
     $known = @(
         @{ Name = 'removeShortcuts'; Default = $true;  Desc = 'remove desktop shortcuts that installers create' }
         @{ Name = 'dryRunByDefault'; Default = $false; Desc = 'start every run in dry run' }
-        @{ Name = 'autoInstallPwsh'; Default = $true;  Desc = 'loader installs PowerShell 7 + Terminal unasked (each PC can override)' }
+        @{ Name = 'autoInstallEssentials'; Default = $true; Desc = 'loader installs PS7, Terminal, Claude Code, font, WT settings unasked' }
         @{ Name = 'elevateAtStart';  Default = $true;  Desc = 'ask for admin once at start, then nothing else asks (each PC can override)' }
     )
     $first = $true
     foreach ($s in $known) {
-        $v = if (Get-KitSetting $s.Name $s.Default) { $on } else { $off }
+        $sv = Get-KitSetting $s.Name $null
+        if ($null -eq $sv -and $s.Name -eq 'autoInstallEssentials') { $sv = Get-KitSetting 'autoInstallPwsh' $null }   # older name
+        if ($null -eq $sv) { $sv = $s.Default }
+        $v = if ($sv) { $on } else { $off }
         $label = if ($first) { 'Settings ' } else { '         ' }
-        $lines += "[$($Hex.Gray)]$label[/] [$($Hex.Fg)]$($s.Name.PadRight(16))[/] $v [$($Hex.Gray)]$($Glyph.Dot) $(E $s.Desc)[/]"
+        $lines += "[$($Hex.Gray)]$label[/] [$($Hex.Fg)]$($s.Name.PadRight(21))[/] $v [$($Hex.Gray)]$($Glyph.Dot) $(E $s.Desc)[/]"
         $first = $false
     }
     $fx = { param([int]$n) if ($n -eq 1) { '1 package-ID fix' } else { "$n package-ID fixes" } }
@@ -1108,14 +1111,14 @@ function Show-Settings {
         Out-Render (Get-SettingsPanel)
         Say ''
         $dr = if ($script:DryRunOn) { "[$($Hex.Purple) bold]on[/]" } else { "[$($Hex.Gray)]off[/]" }
-        $ap = Get-KitAutoInstallPwsh
+        $ap = Get-KitAutoInstallEssentials
         $apv = if ($ap.On) { "[$($Hex.Green) bold]on[/]" } else { "[$($Hex.Gray)]off[/]" }
         $aps = if ($ap.Source -eq 'this PC') { '(this PC)' } else { '(this PC: shared default)' }
         $el = Get-KitElevateAtStart
         $elv = if ($el.On) { "[$($Hex.Green) bold]on[/]" } else { "[$($Hex.Gray)]off[/]" }
         $els = if ($el.Source -eq 'this PC') { '(this PC, from the next start)' } else { '(this PC: shared default)' }
         $items = @(
-            @{ Key = 'auto'; Label = "[$($Hex.Fg)]Auto-install PowerShell 7 + Terminal on start:[/] $apv [$($Hex.Gray)]$aps[/]" }
+            @{ Key = 'auto'; Label = "[$($Hex.Fg)]Install essentials on start (PS7, Terminal, Claude Code, font, Terminal settings):[/] $apv [$($Hex.Gray)]$aps[/]" }
             @{ Key = 'elev'; Label = "[$($Hex.Fg)]Ask for administrator rights once at start:[/] $elv [$($Hex.Gray)]$els[/]" }
             @{ Key = 'dr';   Label = "[$($Hex.Fg)]Dry run now (show what would run, install nothing):[/] $dr [$($Hex.Gray)](this session)[/]" }
             @{ Key = 'log';  Label = "[$($Hex.Fg)]Open the log folder[/]" }
@@ -1123,7 +1126,7 @@ function Show-Settings {
         $runlog = if ($env:MYWINKIT_RUNLOG) { "[$($Hex.Gray)]run log: $(E $env:MYWINKIT_RUNLOG)[/]" } else { '' }
         switch (Select-One -Title @("[$($Hex.Fg) bold]Settings[/]", $runlog) -Items $items -BackLabel 'Back to main menu') {
             # per-PC preference in local-settings.json (never GitHub); tests only write into their scratch state folder
-            'auto' { if (-not $script:Test -or $env:MYWINKIT_STATE_DIR) { Set-KitLocalPref -Name 'autoInstallPwsh' -Value (-not $ap.On) } }
+            'auto' { if (-not $script:Test -or $env:MYWINKIT_STATE_DIR) { Set-KitLocalPref -Name 'autoInstallEssentials' -Value (-not $ap.On) } }
             'elev' { if (-not $script:Test -or $env:MYWINKIT_STATE_DIR) { Set-KitLocalPref -Name 'elevateAtStart' -Value (-not $el.On) } }
             'dr'  { if (-not $script:Test) { $script:DryRunOn = -not $script:DryRunOn } }   # smoke tests stay dry
             'log' {
@@ -1155,7 +1158,7 @@ try {
             @{ Key = 'install';  Icon = $Glyph.Pointer; Color = $Hex.Orange; Name = 'Install apps';           Desc = "pick from $($script:Catalog.Count) apps: add new ones (installed ones update too)" }
             @{ Key = 'update';   Icon = $Glyph.Up;      Color = $Hex.Aqua;   Name = 'Update';                 Desc = 'everything installed (kit apps + the rest of the PC), or just the AI tools' }
             @{ Key = 'tweaks';   Icon = $Glyph.Sun;     Color = $Hex.Yellow; Name = 'Windows tweaks';         Desc = 'Spotlight icon, lock-screen tips, Start web search, auto-lock' }
-            @{ Key = 'settings'; Icon = $Glyph.Menu;    Color = $Hex.Blue;   Name = 'Settings';               Desc = 'config (read-only), auto PowerShell 7 on this PC, dry run, log folder' }
+            @{ Key = 'settings'; Icon = $Glyph.Menu;    Color = $Hex.Blue;   Name = 'Settings';               Desc = 'config (read-only), essentials + admin at start on this PC, dry run, log folder' }
             @{ Key = 'quit';     Icon = $Glyph.Left;    Color = $Hex.Gray;   Name = 'Quit';                   Desc = 'or press q' }
         )
         $items = foreach ($m in $menu) {

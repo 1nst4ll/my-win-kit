@@ -12,16 +12,30 @@ The kit is already in **`OneDrive\[98] Shortcuts`** on every PC signed in to Dan
 1. Open `OneDrive\[98] Shortcuts`.
 2. Double-click `install.cmd`.
 
-What happens next depends on the PC:
+### What every PC gets automatically (the essentials)
 
-- **PowerShell 7.4+ and Windows Terminal installed** → it prints *"Starting modern menu · PowerShell 7.x ·
-  Spectre"* and the modern menu opens (window title `my-win-kit · modern (PowerShell 7)`).
-- **Either one missing** (a fresh PC) → it installs PowerShell 7 and the latest Windows Terminal straight away,
-  **without asking**, then opens the modern menu under PowerShell 7. The first run also installs the
-  PwshSpectreConsole module for the current user (a few seconds). If an install fails, the simpler classic menu
-  opens in Windows PowerShell 5.1; every install works in both.
-- **Auto-install switched off** (Settings → *Auto-install PowerShell 7 + Terminal on start*, per PC; classic menu:
-  `K`) → it asks *"Install PowerShell 7 now? [Y/n]"* first, as before. `n` opens the classic menu.
+At every start the kit checks these and sets up whatever is missing, **without asking**, in this order:
+
+1. **PowerShell 7** (latest, winget; the official signed MSI if winget fails).
+2. **Windows Terminal** (latest, winget).
+3. **Claude Code CLI** (Anthropic's official installer, into your own profile at your normal user rights).
+4. **CaskaydiaCove Nerd Font** (Cascadia Code from the latest Nerd Fonts release on GitHub, checked against its
+   published SHA-256; for all users when the kit runs as administrator).
+5. **Windows Terminal set up the same way on every PC** ([config/terminal.json](config/terminal.json)): a
+   *Claude Code* profile (PowerShell 7 running `claude`) as the default tab, the Nerd Font, the *Dark+* colours at
+   90% opacity, Ctrl+C / Ctrl+V copy and paste, Alt+Shift+D duplicate pane, and every tab starting in
+   `%OneDrive%\.playground` (the dev folder, `D:\dev\git` or `C:\dev\git`, when that folder doesn't exist). Your
+   other profiles and settings stay; the old file is backed up first as `settings.json.bak-my-win-kit-<date>`.
+6. **Windows Terminal as the default terminal app** (console programs open in Terminal).
+
+Anything already there is skipped, so a set-up PC starts as fast as before. A step that fails shows one yellow
+line and the kit carries on (a failed download is retried the next day). Then the modern menu opens under
+PowerShell 7 (*"Starting modern menu · PowerShell 7.x · Spectre"*; the first run also installs the
+PwshSpectreConsole module, a few seconds). If PowerShell 7 can't be installed, the simpler classic menu opens in
+Windows PowerShell 5.1; every install works in both.
+
+**Switch the essentials off** per PC in Settings → *Install essentials on start* (classic menu: `K`): then the kit
+only asks *"Install PowerShell 7 now? [Y/n]"* when PowerShell 7 is missing, as before. `n` opens the classic menu.
 
 **Administrator rights once:** at start Windows asks once ("Do you want to allow this app to make changes?"); the
 kit then runs as administrator in its own window (orange **ADMIN** badge), and no installer asks again. The first
@@ -29,8 +43,8 @@ window waits and closes when the kit finishes. Say **No** and the kit carries on
 itself). On a standard account (where Windows would ask for another account's password) the kit doesn't ask up
 front, so per-user apps land in the right profile. Switch it off per PC in Settings → *Ask for administrator rights
 once at start* (classic menu: `V`), or for one run with `install.cmd /noelevate`. A few apps never install as
-administrator (OneDrive, VS Code, GitHub Desktop, Cursor: `NoAdmin` in the catalogue); the kit runs those at your
-normal rights.
+administrator (OneDrive, VS Code, GitHub Desktop, Claude Code, Cursor: `NoAdmin` in the catalogue); the kit runs
+those at your normal rights.
 
 By hand: `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1` (add `-Classic` to skip straight
 to the classic menu, or `-DryRun` to see what would run without installing anything).
@@ -42,7 +56,7 @@ install.cmd /auto
 ```
 
 One administrator prompt, then no questions at all: it updates the kit itself if GitHub has a newer version,
-installs PowerShell 7 + Windows Terminal if missing, installs every recommended app that is missing, and runs
+sets up the essentials (above) if missing, installs every recommended app that is missing, and runs
 **Update everything** (below). Items that need a person (post-install tools, WSL + Ubuntu, the Chris Titus prompt)
 are skipped and listed as "Skipped (needs you)". It ends with the results, the log paths and an exit code: `0` all
 ok, `1` something failed. Add `/dryrun` to see what it would do, `/pause` to keep the window open at the end
@@ -77,8 +91,8 @@ available, · not installed, × failed, ↔ healed. In dry run every screen carr
   (winget upgrade, npm, or the tool's own updater). It never installs a missing tool: use Install apps for that.
 - **Windows tweaks:** opens the tweaks menu (here, or as administrator for all 4 fixes).
 - **Settings:** read-only: where the config came from (GitHub, cached copy or bundled copy), the current settings,
-  package-ID fixes this PC learned and the file they are in. Changeable on this PC only: auto-install of PowerShell 7
-  + Windows Terminal at start and asking for administrator rights once at start (saved in
+  package-ID fixes this PC learned and the file they are in. Changeable on this PC only: installing the essentials
+  at start and asking for administrator rights once at start (saved in
   `%LOCALAPPDATA%\my-win-kit\local-settings.json`), the dry-run toggle for this session, and the log folder.
 
 Each run ends with a results table and writes a log to `%TEMP%\my-win-kit\`.
@@ -87,8 +101,8 @@ Each run ends with a results table and writes a log to `%TEMP%\my-win-kit\`.
 
 Type into the prompt and press Enter: numbers (`5`, `1 5 12`), ranges (`20-27`), group letters (`U`, `B`, `D` …),
 `*` (all except post-install), `0` (none). Commands: `Z` recommended set, `N` only what's new here, `I` install,
-`L` update (`1` everything, `2` AI tools; Enter = back), `W` Windows tweaks, `K` auto-install PowerShell 7 +
-Terminal on/off, `V` administrator rights at start on/off (both per PC), `Q` quit. Failed apps stay selected, so `I`
+`L` update (`1` everything, `2` AI tools; Enter = back), `W` Windows tweaks, `K` essentials on start on/off, `V`
+administrator rights at start on/off (both per PC), `Q` quit. Failed apps stay selected, so `I`
 retries them.
 
 ## Set-up items that aren't apps
@@ -98,14 +112,14 @@ retries them.
   may need a restart (run it again afterwards), and Ubuntu asks for a Linux user name and password; type `exit`
   to come back to the kit.
 - **Chris Titus prompt** (Dev tools, off): Chris Titus Tech's PowerShell 7 profile (oh-my-posh, Terminal-Icons,
-  zoxide, Nerd Font) from its official `setup.ps1`, in its own administrator window. Afterwards set the Terminal
-  font to `CaskaydiaCove NF`.
+  zoxide, Nerd Font) from its official `setup.ps1`, in its own administrator window. The essentials already set
+  the Terminal font to `CaskaydiaCove Nerd Font Mono`.
 
 ## Always-latest AI tools
 
 | Tool | Installed from | Updates with |
 |---|---|---|
-| Claude Code CLI | official `irm https://claude.ai/install.ps1 \| iex` | `claude update` |
+| Claude Code CLI | official `irm https://claude.ai/install.ps1 \| iex` (the loader installs it at start) | `claude update` |
 | Antigravity CLI (`agy`) | official `irm https://antigravity.google/cli/install.ps1 \| iex` | `agy update` |
 | Antigravity IDE, Antigravity | the latest installer linked on antigravity.google/download (must be signed by Google LLC) | same, skipped when already current |
 | Claude Desktop | winget `Anthropic.Claude` | the app updates itself |
@@ -125,9 +139,10 @@ run it as administrator for that one.
 
 ## Settings and the package list live on GitHub
 
-`config/catalog.json` (the apps), `config/settings.json` (desktop-shortcut cleanup, start in dry run, auto-install
-PowerShell 7 + Terminal, administrator rights at start; a PC can override the last two in Settings) and
-`config/winget-id-overrides.json` in this repo are the copy that counts. Every PC reads the latest from GitHub when
+`config/catalog.json` (the apps), `config/settings.json` (desktop-shortcut cleanup, start in dry run, essentials
+at start, administrator rights at start; a PC can override the last two in Settings), `config/terminal.json` (the
+Windows Terminal settings every PC gets) and `config/winget-id-overrides.json` in this repo are the copy that
+counts. Every PC reads the latest from GitHub when
 the kit starts (falling back to its last cached copy, then to the copy that came with the kit, when offline). No
 sign-in is needed: the repo is public.
 
