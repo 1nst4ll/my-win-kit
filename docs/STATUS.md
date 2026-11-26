@@ -7,17 +7,16 @@
 
 _A new session can start from this line, no handover needed._
 
-- **Kit v2.7.0 is on branch `essentials` (PR #4 into `main`, waiting for Daniel's go; not merged, not published).**
-  The essentials step: at every start, without asking, in order: PowerShell 7, Windows Terminal, Claude Code CLI,
-  CaskaydiaCove Nerd Font, the Windows Terminal settings tidied from Stacy (new `config/terminal.json`: Claude Code
-  profile as default, Dark+, Nerd Font, opacity 90, copy/paste/duplicate-pane keys, `%OneDrive%\.playground` start
-  folder with the dev folder as fallback) and Windows Terminal as the default terminal app. Setting
-  `autoInstallEssentials` (was `autoInstallPwsh`, still read). All local tests pass; nothing ran for real (see Open
+- **Kit v2.7.0 is live:** PR #4 merged into `main` (f28612d) on 2026-11-26 with Daniel's go ("merge 4"); the
+  post-merge publish copied 8 files to OneDrive (incl. the new `config/terminal.json`). The essentials step: at
+  every start, without asking, in order: PowerShell 7, Windows Terminal, Claude Code CLI, CaskaydiaCove Nerd Font,
+  the Windows Terminal settings tidied from Stacy (`config/terminal.json`) and Windows Terminal as the default
+  terminal app. Setting `autoInstallEssentials` (was `autoInstallPwsh`, still read). Not yet run for real (Open
   items 1).
 - **Kit v2.6.0 is live:** PR #3 merged into `main` (6b9fcc5) on 2026-11-26 with Daniel's go ("merge 3"); the
   post-merge publish copied 7 files to OneDrive. Admin once at start, unattended `install.cmd /auto`, the Update
   menu (Update everything + Update AI tools), `NoAdmin` installs at normal user rights.
-- After the PR #4 merge: run `install.cmd` on this PC once (one UAC prompt, then no others). Expect the essentials
+- **Next on this PC:** run `install.cmd` once (one UAC prompt, then no others). Expect the essentials
   to add the Nerd Font and change this PC's Terminal (Claude Code profile as default, start folder
   `%OneDrive%\.playground`, no acrylic; backup next to it as `settings.json.bak-my-win-kit-<date>`). Then try
   `install.cmd /auto /dryrun`, then Update → Update everything for real.
@@ -41,14 +40,14 @@ _A new session can start from this line, no handover needed._
 | Fact | Value |
 |---|---|
 | Repo | github.com/1nst4ll/my-win-kit (**public**). `main` = the rebuild (merged 2026-11-25); `rebuild-tui` merged, can be deleted |
-| Config home | `config/catalog.json`, `config/settings.json`, `config/winget-id-overrides.json` on GitHub `main` (+ `config/terminal.json` on branch `essentials`), edited by hand |
+| Config home | `config/catalog.json`, `config/settings.json`, `config/winget-id-overrides.json`, `config/terminal.json` on GitHub `main`, edited by hand |
 | Publish target | `$env:OneDrive\[98] Shortcuts` (the OneDrive folder every PC syncs) |
-| Last publish | 2026-11-26: merge of PR #3 (kit v2.6.0, 6b9fcc5), 7 files copied. Before that: PR #2 (kit v2.5.0), 6 files |
-| Apps in `config/catalog.json` | 59 total: 33 in the recommended set, 22 DEV (off), 3 POST (off); 2 removed (Perplexity 8, Samsung Quick Share 33). NoAdmin: 4 on `main` (OneDrive, VS Code, GitHub Desktop, Cursor), 5 on branch `essentials` (+ Claude Code CLI) |
+| Last publish | 2026-11-26: merge of PR #4 (kit v2.7.0, f28612d), 8 files copied. Before that: PR #3 (kit v2.6.0), 7 files |
+| Apps in `config/catalog.json` | 59 total: 33 in the recommended set, 22 DEV (off), 3 POST (off); 2 removed (Perplexity 8, Samsung Quick Share 33). NoAdmin: 5 (OneDrive, VS Code, GitHub Desktop, Cursor, Claude Code CLI) |
 | By method | 45 winget, 2 Store, 6 script, 2 direct, 1 npm, 3 builtin. AI-flagged (Update AI tools): 9 (Claude Desktop, Claude Code CLI, KiloCode CLI, Cursor, Codex CLI, Antigravity IDE, Antigravity, Antigravity CLI, Hermes Agent) |
 | Next free app Id | 62 (above every Id in Packages, Removed, RetiredIds; use it when adding an app to `config/catalog.json` by hand) |
-| Kit version | 2.7.0 on branch `essentials` (`$script:KitVersion` in src/core.psm1); `main` is 2.6.0 |
-| Shared settings | `removeShortcuts` true, `dryRunByDefault` false, `elevateAtStart` true; `autoInstallPwsh` true on `main`, renamed `autoInstallEssentials` (true) on branch `essentials` |
+| Kit version | 2.7.0 (`$script:KitVersion` in src/core.psm1) |
+| Shared settings | `removeShortcuts` true, `dryRunByDefault` false, `elevateAtStart` true; `autoInstallEssentials` true (was `autoInstallPwsh`, still read) |
 | Modern menu needs | PowerShell 7.4+, PwshSpectreConsole ≥ 2.3 (tested with 2.6.3 on pwsh 7.7.0); no GitHub CLI or sign-in |
 | Startup (this PC) | ~750 ms launch → banner → quit, plus the config fetch (3 small files; 4 with `terminal.json`). The essentials checks add ~0.3 s when everything is already set up (core import ~55 ms, Terminal settings compare ~260 ms in 5.1) |
 | Screen heights (120 × 30) | main 17, start 14, app picker 29, review ≤ 29, results ≤ 25, Update 11, Update everything review ≤ 28, AI 26 (9 tools; pick 18), tweaks ≤ 24, settings 25 (27 with local fixes), classic 29 incl. the prompt line (1 row spare: one more row of apps in a group needs a layout change) |
@@ -89,8 +88,7 @@ _A new session can start from this line, no handover needed._
 
 ## What's next
 
-- Daniel's go on PR #4 (`essentials`, kit v2.7.0), then the merge (publishes to OneDrive), then the real checks in
-  Open items 1 (UAC once, the essentials on this PC and on a fresh one, `/auto`, Update everything).
+- The real checks in Open items 1 (UAC once, the essentials on this PC and on a fresh one, `/auto`, Update everything).
 
 - Run `irm https://raw.githubusercontent.com/1nst4ll/my-win-kit/main/install.ps1 | iex`
   on a spare PC, and bump `KitVersion` once to see the update prompt on a second PC.

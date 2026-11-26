@@ -2,6 +2,12 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-26: v2.7.0 merged to `main` and published
+
+- Daniel: "merge 4". PR #4 (`essentials`) merged as f28612d after review; CI green on both jobs. The post-merge
+  publish copied 8 files to OneDrive (`src/*`, `config/catalog.json`, `config/settings.json`, the new
+  `config/terminal.json`, `win11-tweaks.ps1`, `install.ps1`).
+
 ## 2026-11-26: essentials at start: PowerShell 7, Terminal, Claude Code, Nerd Font, Terminal settings, default terminal (kit v2.7.0, branch `essentials`)
 
 - Daniel: "go to stacy and copy settings for terminal app then analyze and tidy up and add to auto install upon the
