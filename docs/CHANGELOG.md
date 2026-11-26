@@ -57,6 +57,12 @@
   the loader moves into Terminal before the menu opens. Console window as before when wt.exe is missing or fails;
   `/auto` stays in its window; `-InTerminal` stops a second relaunch; tests simulate it
   (`MYWINKIT_SIMULATE_WT_LAUNCH`) and never start wt.
+- **Dev folder = `dev\github`:** Daniel: "some machines have already /dev/github instead of git" and chose
+  `dev\github`. A read-only check of his 4 PCs found `C:\dev\github`, `D:\dev\github` and (twice)
+  `C:\dev\git`. `Get-KitDevFolderPath` (Dev folder app 60, the Terminal start folder) now uses the
+  first existing one of `D:\dev\github`, `C:\dev\github`, `D:\dev\git`, `C:\dev\git` (D: only as a ready local fixed
+  disk) and creates nothing then; without one it creates `D:\dev\github`, else `C:\dev\github`. Nothing is moved,
+  renamed or deleted. Id 60's Desc says so; `config/terminal.json` keeps `prefer: dev-folder` (no hard-coded folder).
 - **Small:** `install-*.log` names carry the PID; CLAUDE.md's "Config lives on GitHub" lists `terminal.json`.
 - **Left for Daniel:** Bitwarden nullsoft + user scope, the Affinity rename, PostgreSQL password note, Zoom per-user,
   MAS DoH fallback (STATUS → Open items).

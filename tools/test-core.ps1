@@ -98,12 +98,31 @@ Check (Test-KitVersionCurrent -Installed '2.8.0' -Latest '2.8.0') 'version compa
 Check (-not (Test-KitVersionCurrent -Installed '2.5.5' -Latest '2.8.0')) 'version compare: older is not current'
 Check (Test-KitVersionCurrent -Installed '6.28899.6.0' -Latest '6.28899.6') 'version compare: trailing .0'
 
-Write-Host 'dev folder (Get-KitDevFolderPath, injected D: check):'
+Write-Host 'dev folder (Get-KitDevFolderPath, injected D: check + folder checks, every combination):'
 $sys = if ($env:SystemDrive) { $env:SystemDrive } else { 'C:' }
-Check ((Get-KitDevFolderPath -DDriveType 'Fixed') -eq 'D:\dev\git') 'D: is a fixed disk -> D:\dev\git'
-foreach ($t in '', 'CDRom', 'Removable', 'Network') { Check ((Get-KitDevFolderPath -DDriveType $t) -eq "$sys\dev\git") "D: '$t' -> $sys\dev\git" }
-$r = Invoke-KitDevFolder -DryRun -DDriveType ''
-Check (($r.Status -eq 'dryrun' -and $r.Detail -eq "would create $sys\dev\git") -or ($r.Status -eq 'current' -and $r.Detail -like '*already exists')) "dry run creates nothing: $($r.Status) - $($r.Detail)"
+$devCands = @('D:\dev\github', "$sys\dev\github", 'D:\dev\git', "$sys\dev\git")
+$devBad = @()
+foreach ($dt in 'Fixed', '', 'CDRom', 'Removable', 'Network') {
+    $hasD = $dt -eq 'Fixed'
+    for ($mask = 0; $mask -lt 16; $mask++) {
+        $present = @(for ($b = 0; $b -lt 4; $b++) { if ($mask -band (1 -shl $b)) { $devCands[$b] } })
+        $ex = { param($p) $present -contains $p }.GetNewClosure()
+        # expected: the first existing candidate in order (D: ones only with a fixed D:), else a new dev\github
+        $want = $null
+        foreach ($c in $devCands) { if ($present -contains $c -and ($hasD -or $c -notlike 'D:*')) { $want = $c; break } }
+        if (-not $want) { $want = if ($hasD) { 'D:\dev\github' } else { "$sys\dev\github" } }
+        $got = Get-KitDevFolderPath -DDriveType $dt -Exists $ex
+        if ($got -ne $want) { $devBad += "D:'$dt' present=[$($present -join ',')] got $got want $want" }
+    }
+}
+Check (-not $devBad.Count) "80 combinations (D: fixed / none / CD / USB / network x 16 sets of existing folders): existing dev\github before dev\git, D: before C:, else a new dev\github$(if ($devBad.Count) { ': ' + ($devBad | Select-Object -First 3) -join '; ' })"
+Check ((Get-KitDevFolderPath -DDriveType 'Fixed' -Exists { param($p) $p -eq "$sys\dev\github" }) -eq "$sys\dev\github") 'athena-style: C:\dev\github exists, D: present -> C:\dev\github (nothing new on D:)'
+Check ((Get-KitDevFolderPath -DDriveType 'Fixed' -Exists { param($p) $p -in 'D:\dev\github', "$sys\dev\git" }) -eq 'D:\dev\github') 'stacy-style: D:\dev\github wins over an old dev\git'
+Check ((Get-KitDevFolderPath -DDriveType '' -Exists { param($p) $p -eq "$sys\dev\git" }) -eq "$sys\dev\git") 'joanna/ninja-style: only C:\dev\git -> reused, never moved or renamed'
+$r = Invoke-KitDevFolder -DryRun -DDriveType '' -Exists { param($p) [void]$p; $false }
+Check ($r.Status -eq 'dryrun' -and $r.Detail -eq "would create $sys\dev\github") "nothing there, no D: -> would create $sys\dev\github (dry run creates nothing)"
+$r = Invoke-KitDevFolder -DryRun -DDriveType '' -Exists { param($p) $p -eq "$sys\dev\git" }
+Check ($r.Status -eq 'current' -and $r.To -eq "$sys\dev\git") "an existing dev\git -> current, nothing created ($($r.Detail))"
 
 Write-Host 'WSL (Select-KitUbuntuDistro on sample wsl --list --online output):'
 $wslOnline = @('The following is a list of valid distributions that can be installed.', "Install using 'wsl.exe --install <Distro>'.", '',
@@ -386,7 +405,7 @@ Check ($s1.Source -eq 'prefer' -and $s1.Path -eq (Join-Path $od '.playground')) 
 $s1 = Resolve-KitTerminalStartDir -Prefer '%MYWINKIT_NO_SUCH_VAR%\.playground' -Fallback (Join-Path $wt 'devgit')
 Check ($s1.Source -eq 'fallback') 'an unset variable (no OneDrive) -> the dev folder'
 Remove-Item Env:MYWINKIT_TEST_OD
-Check ((Get-KitDevFolderPath -DDriveType 'Fixed') -eq 'D:\dev\git') 'default fallback = the dev folder logic (Id 60)'
+Check ((Get-KitDevFolderPath -DDriveType 'Fixed' -Exists { param($p) [void]$p; $false }) -eq 'D:\dev\github') 'default fallback = the dev folder logic (Id 60)'
 $s1 = Resolve-KitTerminalStartDir -Prefer 'dev-folder' -DryRun
 Check ($s1.Path -eq (Get-KitDevFolderPath)) "prefer 'dev-folder' (the keyword in config/terminal.json) = the dev folder: $($s1.Path)"
 $tjd = ConvertFrom-KitJsonText ([IO.File]::ReadAllText((Join-Path $root 'config\terminal.json')))

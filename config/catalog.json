@@ -22,7 +22,7 @@
     { "Id": 2, "Name": "Notepad++", "Group": "UTIL", "On": true, "Method": "winget", "Ref": "Notepad++.Notepad++", "Desc": "Text and code editor", "InstallerType": "nullsoft" },
     { "Id": 3, "Name": "PowerToys", "Group": "UTIL", "On": true, "Method": "winget", "Ref": "Microsoft.PowerToys", "Desc": "Microsoft power-user utilities", "Uninstall": "^PowerToys" },
     { "Id": 4, "Name": "Obsidian", "Group": "UTIL", "On": false, "Method": "winget", "Ref": "Obsidian.Obsidian", "Desc": "Markdown notes" },
-    { "Id": 60, "Name": "Dev folder", "Group": "UTIL", "On": true, "Method": "builtin", "Ref": "dev-folder", "Desc": "Creates D:\\dev\\git (C:\\dev\\git when there is no D: drive)", "Detect": "dev-folder" },
+    { "Id": 60, "Name": "Dev folder", "Group": "UTIL", "On": true, "Method": "builtin", "Ref": "dev-folder", "Desc": "Creates D:\\dev\\github, or C:\\dev\\github when there is no D: drive; reuses an existing dev\\github or dev\\git", "Detect": "dev-folder" },
     { "Id": 5, "Name": "Microsoft Office", "Group": "OFCE", "On": true, "Method": "winget", "Ref": "Microsoft.Office", "Desc": "Microsoft 365 apps (updates itself)", "SelfUpdates": true, "HashNote": "Microsoft changed setup.exe; try tomorrow" },
     { "Id": 6, "Name": "LibreOffice", "Group": "OFCE", "On": true, "Method": "winget", "Ref": "TheDocumentFoundation.LibreOffice", "Desc": "Free office suite" },
     { "Id": 7, "Name": "Google Chrome", "Group": "BROW", "On": true, "Method": "winget", "Ref": "Google.Chrome", "Desc": "Web browser (updates itself)", "SelfUpdates": true },

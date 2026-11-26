@@ -12,7 +12,9 @@ _A new session can start from this line, no handover needed._
   PowerToys / Node.js detection, Hermes, Antigravity IDE, Acrobat Reader, Notepad++ installer type, SelfUpdates on
   8 apps), winget outcome buckets (restart / blocked / skipped), in-use check + Retry failed, hash-mismatch
   handling, PowerShell 7 `.msixbundle` fallback, RDP firewall group by resource string, Smart App Control, Terminal
-  start folder on kit profiles, and the kit running inside **Windows Terminal** (elevated or not). Waiting for
+  start folder on kit profiles, the kit running inside **Windows Terminal** (elevated or not), and the dev folder
+  named **dev\github** (an existing `dev\github` or `dev\git` is reused: of Daniel's 4 PCs two keep their `dev\github`, two their
+  `C:\dev\git`; a PC without one gets `D:\dev\github` or `C:\dev\github`). Waiting for
   Daniel's review and go to merge (merging publishes to every PC).
 - **Kit v2.7.0 is live:** PR #4 merged into `main` (f28612d) on 2026-11-26 with Daniel's go ("merge 4"); the
   post-merge publish copied 8 files to OneDrive (incl. the new `config/terminal.json`). The essentials step: at
@@ -25,7 +27,7 @@ _A new session can start from this line, no handover needed._
   menu (Update everything + Update AI tools), `NoAdmin` installs at normal user rights.
 - **Next on this PC:** run `install.cmd` once (one UAC prompt, then no others). Expect the essentials
   to add the Nerd Font and change this PC's Terminal (Claude Code profile as default, start folder
-  `D:\dev\git` or `C:\dev\git`, no acrylic; backup next to it as `settings.json.bak-my-win-kit-<date>`). Then try
+  = the dev folder, `C:\dev\github` on this PC from v2.8, no acrylic; backup next to it as `settings.json.bak-my-win-kit-<date>`). Then try
   `install.cmd /auto /dryrun`, then Update → Update everything for real.
 - **The rebuild is live (kit v2.4.2 on `main`).** PR #1 merged into `main` on 2026-11-25 with Daniel's go ("fix both and
   merge comit push to mainn"); the post-merge publish copied 8 files to OneDrive. Every PC now gets the modern

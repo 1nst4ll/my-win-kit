@@ -1314,21 +1314,38 @@ function Get-KitDriveType {
 
 function Get-KitDevFolderPath {
     <#
-    D:\dev\git when D: is a local fixed disk (not a CD/DVD, USB stick or network
-    drive), else <system drive>\dev\git. -DDriveType injects the D: check (tests).
+    The dev folder. An existing one wins (nothing is created, moved or renamed),
+    checked in this order: D:\dev\github, C:\dev\github, D:\dev\git, C:\dev\git
+    (D: only when it is a ready local fixed disk: not a CD/DVD, USB stick or
+    network drive; C: = the system drive). None there: D:\dev\github when D: is
+    a fixed disk, else C:\dev\github (the caller creates it).
+    Tests: -DDriveType injects the D: check, -Exists (scriptblock: path -> bool)
+    the folder checks.
     #>
-    param([AllowEmptyString()][string]$DDriveType)
+    param([AllowEmptyString()][string]$DDriveType, [scriptblock]$Exists)
     if (-not $PSBoundParameters.ContainsKey('DDriveType')) { $DDriveType = Get-KitDriveType 'D' }
-    if ($DDriveType -eq 'Fixed') { return 'D:\dev\git' }
+    if (-not $Exists) { $Exists = { param($p) Test-Path -LiteralPath $p -PathType Container } }
     $sys = $env:SystemDrive; if (-not $sys) { $sys = 'C:' }
-    return "$sys\dev\git"
+    $hasD = $DDriveType -eq 'Fixed'
+    $cands = @()
+    foreach ($leaf in 'dev\github', 'dev\git') {
+        if ($hasD) { $cands += "D:\$leaf" }
+        $cands += "$sys\$leaf"
+    }
+    foreach ($c in $cands) { if (& $Exists $c) { return $c } }
+    if ($hasD) { return 'D:\dev\github' }
+    return "$sys\dev\github"
 }
 
 function Invoke-KitDevFolder {
-    <# Create the dev folder (idempotent). @{ Status = done|current|dryrun|failed; Detail; To = path }. #>
-    param([switch]$DryRun, [AllowEmptyString()][string]$DDriveType)
-    $path = if ($PSBoundParameters.ContainsKey('DDriveType')) { Get-KitDevFolderPath -DDriveType $DDriveType } else { Get-KitDevFolderPath }
-    if (Test-Path -LiteralPath $path -PathType Container) { return @{ Status = 'current'; Detail = "$path already exists"; To = $path } }
+    <# Create the dev folder unless one exists (idempotent). @{ Status = done|current|dryrun|failed; Detail; To = path }. #>
+    param([switch]$DryRun, [AllowEmptyString()][string]$DDriveType, [scriptblock]$Exists)
+    $gp = @{}
+    if ($PSBoundParameters.ContainsKey('DDriveType')) { $gp.DDriveType = $DDriveType }
+    if ($Exists) { $gp.Exists = $Exists }
+    $path = Get-KitDevFolderPath @gp
+    $there = if ($Exists) { & $Exists $path } else { Test-Path -LiteralPath $path -PathType Container }
+    if ($there) { return @{ Status = 'current'; Detail = "$path already exists"; To = $path } }
     if ($DryRun) { return @{ Status = 'dryrun'; Detail = "would create $path"; To = $path } }
     try {
         New-Item -ItemType Directory -Path $path -Force -ErrorAction Stop | Out-Null

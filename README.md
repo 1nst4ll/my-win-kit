@@ -24,7 +24,7 @@ At every start the kit checks these and sets up whatever is missing, **without a
 5. **Windows Terminal set up the same way on every PC** ([config/terminal.json](config/terminal.json)): a
    *Claude Code* profile (PowerShell 7 running `claude`) as the default tab, the Nerd Font, the *Dark+* colours at
    90% opacity, Ctrl+C / Ctrl+V copy and paste, Alt+Shift+D duplicate pane, and every tab starting in
-   the dev folder (`D:\dev\git`, or `C:\dev\git` when there is no D: drive; the kit's own profiles too), plus a
+   the dev folder (below; the kit's own profiles too), plus a
    *my-win-kit* profile that starts the kit from the OneDrive folder. Your other profiles and settings stay; the
    old file is backed up first as `settings.json.bak-my-win-kit-<date>`.
 6. **Windows Terminal as the default terminal app** (console programs open in Terminal).
@@ -116,7 +116,9 @@ blocked apps at once; they also stay selected, so `I` retries them later.
 
 ## Set-up items that aren't apps
 
-- **Dev folder** (recommended set): creates `D:\dev\git`, or `C:\dev\git` when the PC has no local D: disk.
+- **Dev folder** (recommended set): uses the dev folder the PC already has (`D:\dev\github`, `C:\dev\github`,
+  `D:\dev\git` or `C:\dev\git`, in that order); without one it creates `D:\dev\github`, or `C:\dev\github` when the
+  PC has no local D: disk. It never moves or renames a folder.
 - **WSL + Ubuntu** (Dev tools, off): installs or updates WSL, then the newest Ubuntu LTS. Windows asks for admin,
   may need a restart (run it again afterwards), and Ubuntu asks for a Linux user name and password; type `exit`
   to come back to the kit.
