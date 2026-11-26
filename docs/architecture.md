@@ -13,7 +13,8 @@
 | [CHANGELOG.md](CHANGELOG.md) | Dated history, append-only. | Current state. |
 | architecture.md (this) | How the loader, menus, engine, publish and CI work. | Counts, history. |
 | [config/catalog.json](../config/catalog.json) **on GitHub `main`** | The app catalogue: groups, packages (name, method, Id/URL, default on/off, detection), removed packages, `RetiredIds`, the direct-download rules. Edited by hand in the repo (the menu never writes it). Every PC reads the live copy at start. Fields: [Catalog fields](#catalog-fields). | Never copy it into docs. |
-| [config/settings.json](../config/settings.json) **on GitHub `main`** | Kit settings shared by every PC (`removeShortcuts`, `dryRunByDefault`, `autoInstallPwsh`, `elevateAtStart`). Edited by hand in the repo; Settings shows them read-only. | Per-PC state (last selection, last failures: `%LOCALAPPDATA%\my-win-kit\state.json`) and per-PC preferences (`local-settings.json`, e.g. this PC's `autoInstallPwsh` / `elevateAtStart` override). |
+| [config/settings.json](../config/settings.json) **on GitHub `main`** | Kit settings shared by every PC (`removeShortcuts`, `dryRunByDefault`, `autoInstallEssentials`, `elevateAtStart`). Edited by hand in the repo; Settings shows them read-only. | Per-PC state (last selection, last failures: `%LOCALAPPDATA%\my-win-kit\state.json`) and per-PC preferences (`local-settings.json`, e.g. this PC's `autoInstallEssentials` / `elevateAtStart` override). |
+| [config/terminal.json](../config/terminal.json) **on GitHub `main`** | The Windows Terminal settings every PC gets (essentials step): default profile, the Claude Code profile, profile defaults, globals, key bindings, starting folder. Fields: [Windows Terminal settings](#windows-terminal-settings). | The PC's own Terminal settings (merged into, never replaced). |
 | [config/winget-id-overrides.json](../config/winget-id-overrides.json) **on GitHub `main`** | Shared winget-ID heals (old → new, `msstore:` prefix = Store). Edited by hand. Heals a PC learns itself stay in that PC's `cache\local-overrides.json` until copied in here. | |
 | `$script:KitVersion` in [src/core.psm1](../src/core.psm1) | The kit version. The loader compares it with GitHub `main` for the self-update. | |
 | `$script:Fixes` in [win11-tweaks.ps1](../win11-tweaks.ps1#L87) | The tweak catalogue (registry keys, apply/check/revert). | |
@@ -22,7 +23,7 @@
 
 ```
 install.cmd  install.ps1           # launcher + loader (Windows PowerShell 5.1, zero deps)
-config/catalog.json settings.json winget-id-overrides.json   # live config (GitHub main is the home)
+config/catalog.json settings.json winget-id-overrides.json terminal.json   # live config (GitHub main is the home)
 src/core.psm1                      # install engine, shared by both menus (5.1-compatible)
 src/tui-spectre.ps1                # modern menu (PowerShell 7.4+ + PwshSpectreConsole)
 src/tui-classic.ps1                # fallback menu (Windows PowerShell 5.1)
@@ -52,7 +53,7 @@ Runs on stock Windows PowerShell 5.1 with nothing installed.
    switches (`ValueFromRemainingArguments`, `PositionalBinding = $false`); anything else is named and ignored.
    Self-update ([below](#self-update-and-the-one-line-install)) runs first.
 1. **Bootstrap:** TLS 1.2, `Unblock-File` on every kit file (mark-of-the-web), recreate `install.cmd` if missing.
-1a. **Administrator rights, once** (`elevateAtStart`, read like `autoInstallPwsh`: this PC's `local-settings.json`,
+1a. **Administrator rights, once** (`elevateAtStart`, read like `autoInstallEssentials`: this PC's `local-settings.json`,
    else the cached / bundled `settings.json`, else on; `Get-LoaderSwitch`):
    - already elevated → nothing to do (a warning when the elevated account is not the signed-in user);
    - off, or `-NoElevate` → installers ask for admin one by one, as before;
@@ -67,40 +68,54 @@ Runs on stock Windows PowerShell 5.1 with nothing installed.
    - **The elevated copy** compares its account SID with the owner of `explorer.exe` in its session
      (`Get-SessionUserSid`, CIM `GetOwnerSid`). Different → exit 75, and the waiting parent carries on
      non-elevated. The run log records `elevate: elevated = yes|no - <why>`.
-   - Ordering: elevation comes before the PowerShell 7 / Terminal install, so those run elevated (no prompt) and
-     `pwsh` started for the modern menu inherits the token.
+   - Ordering: elevation comes before the essentials (PowerShell 7, Terminal, ...), so those run elevated (no
+     prompt) and `pwsh` started for the modern menu inherits the token.
    - Never a real prompt in tests: in test mode (`-WhatIfLoader`, `-ClassicTestInput`, `-Answer`, `-UpdateAnswer`,
      or `MYWINKIT_STATE_DIR` set) the step is skipped unless `MYWINKIT_SIMULATE_UAC=accept|decline` simulates it
      (`accept` runs the child copy in the same console with `MYWINKIT_SIMULATE_ADMIN=1`). Other hooks:
      `MYWINKIT_SIMULATE_ADMIN=1|0`, `MYWINKIT_SIMULATE_ELEVATION=same|other`, `MYWINKIT_SIMULATE_SESSION_USER=same|other`.
 2. **Find PowerShell 7** (`Find-Pwsh`): checks `pwsh` on PATH plus the known install paths (PATH is stale right
    after an install) and asks each candidate for its version. The best one wins.
-3. **Read the auto-install setting** (`Get-AutoPwshSetting`): this PC's `<state>\local-settings.json`
-   `autoInstallPwsh` (set from Settings / classic `K`), else `settings.json` `autoInstallPwsh` (the cached copy
-   in `<state>\cache`, then the bundled one; the loader does not fetch config itself), else **on**. The engine's
-   `Get-KitAutoInstallPwsh` uses the same order.
+3. **Read the essentials setting** (`Get-EssentialsSetting`): `autoInstallEssentials` from this PC's
+   `<state>\local-settings.json` (set from Settings / classic `K`), else `settings.json` (the cached copy in
+   `<state>\cache`, then the bundled one; the loader does not fetch config itself), else **on**. In each file the
+   older name `autoInstallPwsh` is read after the new one (back-compat with kits before 2.7.0 and their per-PC
+   choice). The engine's `Get-KitAutoInstallEssentials` uses the same order.
 4. **Decide:**
-   - **auto on** and PowerShell 7.4+ or Windows Terminal missing → installs what is missing **without asking**:
-     `Install-Pwsh` (`winget install Microsoft.PowerShell`, then the official MSI from the latest GitHub release;
-     its Authenticode signer must be Microsoft Corporation; installs elevated), then `Install-Terminal`
-     (`winget install Microsoft.WindowsTerminal`; winget's "nothing to do" exits count as success; there is no
-     other channel). It re-finds pwsh by path and starts the modern menu. pwsh still unavailable → classic menu
-     (never stranded). A failed Terminal install does not stop the start-up and is not retried until the next
-     day (`<state>\loader.json`), so a PC without winget doesn't retry on every start. Terminal detection:
-     `%LOCALAPPDATA%\Microsoft\WindowsApps\wt.exe` or the `Microsoft.WindowsTerminal*` Appx package.
+   - **essentials on** → the **essentials step**, without asking, in this order; each step checks first and does
+     nothing when it is already done:
+     1. **PowerShell 7** when 7.4+ is missing: `Install-Pwsh` (`winget install Microsoft.PowerShell`, then the
+        official MSI from the latest GitHub release; its Authenticode signer must be Microsoft Corporation).
+     2. **Windows Terminal** when missing: `Install-Terminal` (`winget install Microsoft.WindowsTerminal`; winget's
+        "nothing to do" exits count as success; there is no other channel). Detection:
+        `%LOCALAPPDATA%\Microsoft\WindowsApps\wt.exe` or the `Microsoft.WindowsTerminal*` Appx package. winget runs
+        through the engine's `Invoke-KitProcess` (the loader imports `src\core.psm1`, which is 5.1-compatible).
+     3. to 6. **`Invoke-LoaderEssentials`** → `Invoke-KitEssential` (engine, [below](#essentials)) for `claude`
+        (Claude Code CLI), `font` (CaskaydiaCove Nerd Font), `terminal-settings` (config/terminal.json merged into
+        Terminal's settings.json) and `default-terminal` (Windows Terminal as the default terminal app; the last
+        two only when Terminal is installed).
+
+     A step that fails prints one yellow line and the start-up carries on; done steps print one green line,
+     already-done steps only reach the run log (`essentials: <step> -> <status> - <detail>`). The download-type
+     steps (Terminal, Claude Code, the font) are not retried until the next day after a failure (`<state>\loader.json`
+     keys `wtFailed`, `claude-failed`, `font-failed`), so a PC without winget or network doesn't retry on every
+     start. Then: pwsh available → modern menu; pwsh still missing → classic menu (never stranded).
    - pwsh **7.4+** → `pwsh -NoProfile -ExecutionPolicy Bypass -File src\tui-spectre.ps1 -KitRoot <folder>`.
      If that exits **3** (Spectre module unavailable) → classic menu.
-   - **auto off** and pwsh missing or older → asks "Install PowerShell 7 now? [Y/n]" (Enter = yes), then the
-     same `Install-Pwsh` and modern menu.
+   - **essentials off** and pwsh missing or older → asks "Install PowerShell 7 now? [Y/n]" (Enter = yes), then the
+     same `Install-Pwsh` and modern menu. Nothing else of the essentials runs.
    - declined or failed → `src\tui-classic.ps1` in the same 5.1 process.
    - `-Classic` skips all of this.
-   - **`-Auto`** (`/auto`): the same steps without a question (`autoInstallPwsh` off and no PowerShell 7 → no
-     question, no install), then always `src\tui-classic.ps1 -Auto` in this 5.1 process instead of a menu
-     (`Start-Auto`), exit code passed through.
+   - **`-Auto`** (`/auto`): the same steps without a question (essentials off and no PowerShell 7 → no question, no
+     install), then always `src\tui-classic.ps1 -Auto` in this 5.1 process instead of a menu (`Start-Auto`), exit
+     code passed through.
 5. Test switches (no effect on normal use): `-NoPwsh` / env `MYWINKIT_SIMULATE_NO_PWSH=1` pretend pwsh is
    absent, `-NoTerminal` / `MYWINKIT_SIMULATE_WT=absent|present` fake Windows Terminal, `MYWINKIT_SIMULATE_INSTALL=ok|fail`
-   makes both installs report that result without running anything, `-WhatIfLoader` prints the decision
-   (modern / auto-install / offer-install / classic; also `elevate: ...` and, with `-Auto`, `front-end: unattended`), `-Answer` answers the question, `-ClassicTestInput` feeds
+   makes both installs report that result without running anything, `MYWINKIT_SIMULATE_ESSENTIALS=absent|present|<steps
+   that are present>` simulates steps 3-6 (detection and result; without it they are skipped in test mode, so tests
+   never touch this PC's Terminal, fonts or registry), `MYWINKIT_SIMULATE_FAIL=<steps>` fails those, `-WhatIfLoader`
+   prints the decision (modern / auto-install / offer-install / classic; also `elevate: ...`, `essentials: on|off`
+   and, with `-Auto`, `front-end: unattended`), `-Answer` answers the question, `-ClassicTestInput` feeds
    the classic menu, `-Classic` forces it, `-DryRun` passes through to either menu (in auto mode it prints what
    would be installed, no question).
 
@@ -185,9 +200,9 @@ No UI. Both menus call the same functions, so behaviour is identical in both.
 - **State** (`%LOCALAPPDATA%\my-win-kit\state.json`, per PC, never synced): last selection, last failures,
   the desktop-shortcut setting. `MYWINKIT_STATE_DIR` overrides the folder (tests).
 - **Per-PC preferences** (`%LOCALAPPDATA%\my-win-kit\local-settings.json`, canonical JSON, never synced):
-  `Get-KitLocalPrefs` / `Set-KitLocalPref`. Keys `autoInstallPwsh` and `elevateAtStart`; `Get-KitLocalSwitch`
-  (wrapped by `Get-KitAutoInstallPwsh` / `Get-KitElevateAtStart`) returns the effective value and its source
-  (`this PC` / `shared` / `default`).
+  `Get-KitLocalPrefs` / `Set-KitLocalPref`. Keys `autoInstallEssentials` (older name `autoInstallPwsh`, still read)
+  and `elevateAtStart`; `Get-KitLocalSwitch -Legacy` (wrapped by `Get-KitAutoInstallEssentials` / `Get-KitElevateAtStart`)
+  returns the effective value and its source (`this PC` / `shared` / `default`).
 - **NoAdmin installs from an elevated kit:** `Test-KitDeElevate` = the package has `NoAdmin`, the kit is elevated
   (`Test-KitAdmin`, which honours `MYWINKIT_SIMULATE_ADMIN`) and it isn't Interactive. Then its install command
   (winget, script, native updater, npm, direct installer) goes through `Invoke-KitDeElevated` instead of
@@ -202,6 +217,34 @@ No UI. Both menus call the same functions, so behaviour is identical in both.
   winget run as admin that exits `0x8A150056` (installer prohibits elevation, manifest `elevationProhibited`) or
   `0x8A15007D` (admin context prohibited for a user-scope package) is retried once de-elevated, catalogue flag or
   not. `MYWINKIT_SIMULATE_DEELEVATE=ok|fail` fakes the result (tests).
+- <a id="essentials"></a>**Essentials** (`Invoke-KitEssential -Name claude|font|terminal-settings|default-terminal`,
+  called by the loader in that order; returns `Name, Label, Status = done|current|dryrun|failed|skipped, Detail`, never
+  throws; `MYWINKIT_SIMULATE_ESSENTIALS` / `MYWINKIT_SIMULATE_FAIL` simulate it):
+  - **`claude`** (`Install-KitClaudeCode`): present = `%USERPROFILE%\.local\bin\claude.exe` or `claude` on PATH
+    (`Test-KitClaudeCode`). Otherwise Anthropic's official `irm https://claude.ai/install.ps1 | iex` in a child
+    `powershell.exe` (`Get-KitRemoteScriptArgs`). The installer only writes to the user's profile
+    (`%USERPROFILE%\.claude\downloads`, `%USERPROFILE%\.local\bin`) and Anthropic's docs say it needs no
+    administrator rights; Claude Code updates itself in the background later, as the user. So from an elevated kit
+    it runs at the signed-in user's normal rights (`Invoke-KitDeElevated`; if that cannot start, it runs in the kit's
+    own context, which is the same account). The catalogue entry (Id 46) is `NoAdmin` for the same reason and stays
+    in Update AI tools.
+  - **`font`** (`Install-KitNerdFont`): present = `CaskaydiaCoveNerdFontMono-Regular.ttf` in `%WINDIR%\Fonts` or
+    `%LOCALAPPDATA%\Microsoft\Windows\Fonts`, or a `CaskaydiaCove Nerd Font Mono*` value under HKLM/HKCU
+    `...\Windows NT\CurrentVersion\Fonts` (`Test-KitNerdFont`). Source: the GitHub API's
+    `repos/ryanoasis/nerd-fonts/releases/latest` → asset `CascadiaCode.zip` (`Get-KitNerdFontRelease`; never a fixed
+    version). Verification: the download's SHA-256 (.NET, `Get-KitFileSha256`) must equal the asset's `digest` that
+    GitHub publishes, else the line for it in the release's `SHA-256.txt`; with neither it is not installed. The zip
+    is opened with `System.IO.Compression.ZipFile` (not `Expand-Archive`), and only the leaf names
+    `CaskaydiaCoveNerdFont-*.ttf` and `CaskaydiaCoveNerdFontMono-*.ttf` are extracted (no Propo variant, no paths
+    from the archive). Elevated: copied to `%WINDIR%\Fonts`, registered under HKLM by file name; otherwise
+    `%LOCALAPPDATA%\Microsoft\Windows\Fonts` + HKCU by full path (value names from the file names,
+    `ConvertTo-KitFontRegName`). Then `AddFontResource` + `WM_FONTCHANGE`, so it works without signing out.
+  - **`terminal-settings`** (`Merge-KitTerminalSettings`): see [Windows Terminal settings](#windows-terminal-settings).
+  - **`default-terminal`** (`Set-KitDefaultTerminal`): `HKCU\Console\%%Startup` `DelegationConsole` =
+    `{2EACA947-7F5F-4CFA-BA87-8F7FBEEFBE69}` and `DelegationTerminal` = `{E12CFF52-A866-4C77-9A90-F570A7AA2C6B}` (Windows
+    Terminal, stable; values from Microsoft's Terminal group-policy page; Preview and "let Windows decide" use other
+    GUIDs). Written only when they differ. Registry access goes through `@{ Read; Write }` scriptblocks
+    (`Get-KitRegistryAccess`), which tests replace with an in-memory stub.
 - **Update everything:** `Get-KitUpdateAllPlan -Installed -Updates` returns `Kit` (`Get-KitCatalogUpdateSet`:
   installed catalogue apps with a known newer version, plus script tools with a native updater and npm tools,
   whose updates winget doesn't list; never Interactive or POST) and `Other`: the rows of `winget upgrade`
@@ -293,7 +336,8 @@ picker, `Show-Picker`, built on `[Console]::ReadKey`.
   `-Mode update`; latest versions are looked up for installed tools only.
 - **Windows tweaks:** describes the 4 fixes and runs `win11-tweaks.ps1` here or elevated in a new window.
 - **Settings:** read-only shared config (see [Configuration on GitHub](#configuration-on-github-read-only)); this
-  PC's "Auto-install PowerShell 7 + Terminal on start" and "Ask for administrator rights once at start" toggles
+  PC's "Install essentials on start (PS7, Terminal, Claude Code, font, Terminal settings)" and "Ask for administrator
+  rights once at start" toggles
   (`local-settings.json`; each row says whether the value is this PC's own or the shared default; the admin one
   takes effect at the next start), session dry-run toggle, open the log folder.
 - **Interactive items** (POST, Chris Titus prompt, WSL + Ubuntu) run after the progress view; their `OnStatus`
@@ -306,7 +350,8 @@ picker, `Show-Picker`, built on `[Console]::ReadKey`.
 
 **Decision (2026-11-25, Daniel):** in-menu saving to GitHub can't be relied on (gh install, sign-in and real
 keyboard entry are untested on other PCs), so the menu never writes config. GitHub is the single home:
-`config/catalog.json`, `config/settings.json` and `config/winget-id-overrides.json` on `main`. Daniel edits them
+`config/catalog.json`, `config/settings.json`, `config/winget-id-overrides.json` and `config/terminal.json` on
+`main`. Daniel edits them
 by hand in the repo; every deployed copy reads the latest at start-up. There is no local overlay, no import step and
 no GitHub CLI dependency.
 
@@ -317,7 +362,7 @@ no GitHub CLI dependency.
   cache is reported and skipped. The banner and the Settings screen show the source (GitHub, cached <time>,
   bundled).
 - **Settings screen (modern menu):** read-only panel with the config source, the current values of
-  `removeShortcuts`, `dryRunByDefault` and `autoInstallPwsh`, the number of package-ID fixes in use and the ones
+  `removeShortcuts`, `dryRunByDefault`, `autoInstallEssentials` and `elevateAtStart`, the number of package-ID fixes in use and the ones
   learned on this PC (with their file), and the line "To change config, edit config/*.json in the my-win-kit repo
   on GitHub." Its actions are local only: this PC's auto-install override (`local-settings.json`), the session
   dry-run toggle and opening the log folder. Smoke tests write the override only into their scratch state folder.
@@ -331,6 +376,36 @@ no GitHub CLI dependency.
   an app, move its line to `Removed` (hidden, Id kept); a new app takes an Id above every Id in Packages, Removed
   and `RetiredIds` (the next free one is in STATUS).
 - **Test hooks:** `MYWINKIT_REPO`, `MYWINKIT_BRANCH`, `MYWINKIT_CONFIG_URL` (another base, or a `file:///` folder).
+
+### Windows Terminal settings
+
+`config/terminal.json` (read like the other files; the loader reads the cached copy, then the bundled one, and the
+menus refresh the cache from GitHub at each start; `Get-KitTerminalConfig`). Fields: `startingDirectory.prefer`
+(folder with environment variables, `%OneDrive%\.playground`; used when it exists, else the kit's dev folder from
+`Get-KitDevFolderPath`, created if missing; `Resolve-KitTerminalStartDir`), `defaultProfile` (guid), `globals`
+(top-level Terminal settings), `profileDefaults` (= `profiles.defaults`), `profiles` (matched by `guid`) and
+`keybindings` (`{ id, keys }`). Public repo: no user names, host names or personal paths (`test-config.ps1` checks).
+
+`Merge-KitTerminalSettings` applies it to `Get-KitTerminalSettingsPath` (the package's
+`%LOCALAPPDATA%\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json`, or the unpackaged
+`%LOCALAPPDATA%\Microsoft\Windows Terminal\settings.json` when only that exists; `MYWINKIT_WT_SETTINGS` in tests):
+
+- **No file** (Terminal never started): writes a new one with `$help`, `$schema` and the desired settings;
+  Terminal adds its generated profiles (PowerShell, Command Prompt, WSL distros) at its first start, so the repo
+  lists none of them.
+- **Existing file:** read as JSON with comments (`ConvertFrom-KitJsoncText`: `//` and `/* */` comments and
+  trailing commas are stripped outside strings; plain files take a fast path). It sets `globals`, merges
+  `profileDefaults` into `profiles.defaults` key by key (objects such as `font` merge, so a font size stays), adds or
+  updates each profile by guid (keys of its own stay), sets `defaultProfile`, and sets each key binding (an entry
+  with the same id or the same keys is replaced). An old-style `profiles` list is wrapped into `{ defaults, list }`.
+  Everything else stays (other profiles, schemes, actions, themes). Comments in the file are not kept.
+- **Only when something changed:** the parsed file and the result are written with the same indented ASCII writer
+  (`ConvertTo-KitJsonPretty`) and compared; equal → `current`, no write. Otherwise a backup
+  `settings.json.bak-my-win-kit-<yyyy-MM-dd>` (a second one the same day gets the time), then the new file (UTF-8, no
+  BOM). A file that does not parse is never overwritten.
+- `-NoFont` leaves the font face out while CaskaydiaCove Nerd Font is missing (Terminal would warn on every start;
+  it is added at the next start after the font is in); `-NoDefaultProfile` keeps the PC's default profile while
+  PowerShell 7 is missing (the Claude Code profile runs `pwsh.exe`).
 
 ### Catalog fields
 
@@ -395,7 +470,7 @@ menu; updates come from `Get-KitUpdates`). Colour is 24-bit through VT escape co
 except POST), `0` (none). Commands use letters that aren't group letters: `Z` recommended, `N` only missing,
 `I` install, `L` update (a one-line submenu: `1` everything = `Get-KitUpdateAllPlan` with both groups listed and one
 [Y/n], `2` AI tools = `Get-KitAiUpdateSet`, installed ones only; Enter = back), `W` Windows tweaks, `K` this PC's
-auto-install of PowerShell 7 + Terminal on/off, `V` this PC's admin at start on/off (both shown on the command
+essentials on start on/off, `V` this PC's admin at start on/off (both shown on the command
 line with their source), `Q` quit. `ADMIN` on the subtitle when elevated. **`-Auto`** (from the loader's `/auto`):
 no menu and no questions: `Get-KitAutoPlan`, the same run loop without the "Press Enter" (`-Unattended`), a
 "Skipped (needs you)" line, the run log path and `exit 0|1`; `-Pause` waits for Enter at the end. Runs print one line per app using the same
@@ -435,10 +510,10 @@ All tests run the kit in dry-run mode; nothing installs.
 | Script | Engine | Covers |
 |---|---|---|
 | `tools/lint.ps1` | 5.1 (`-ParseOnly`) + pwsh | parser check of every `.ps1/.psm1/.psd1`; PSScriptAnalyzer (pwsh) |
-| `tools/test-core.ps1` | 5.1 + pwsh | per-PC `elevateAtStart`, NoAdmin set + routing (`Test-KitDeElevate`), the de-elevation helper (simulated) and its task script (run directly, no task), the `/auto` plan and exit code, the update-everything plan on sample `winget upgrade` output (kit IDs, pins, unknown versions left out; explicit-targeting table ignored), failure reasons; catalogue sanity (unique Ids/names, groups, methods, DEV/POST off, POST interactive), the 2026-11-26 catalogue changes (removed apps, Obsidian off, Cursor/Codex AI-flagged and off, the three new entries), `Get-KitAiUpdateSet` (installed only), dev-folder path choice (injected D: types), WSL distro picker on sample `wsl --list --online` text (plain and UTF-16-as-UTF-8), restart detection, per-PC `autoInstallPwsh` precedence, dry run of every package, version compare; `-Online` adds the installed scan and vendor-page resolution |
+| `tools/test-core.ps1` | 5.1 + pwsh | essentials: Terminal settings merge on scratch files (new file, existing file with comments + trailing comma + other profiles kept, backup, second run = no write, dry run, unparsable file left alone, `-NoFont` / `-NoDefaultProfile`, old-style profile list), starting-folder fallback, default terminal through a registry stub, Nerd Font detection + install from a local zip into a scratch folder, latest-release parsing from a sample GitHub API answer (digest, `SHA-256.txt` fallback), simulated steps; per-PC `autoInstallEssentials` (+ the older `autoInstallPwsh`), `elevateAtStart`, NoAdmin set + routing (`Test-KitDeElevate`), the de-elevation helper (simulated) and its task script (run directly, no task), the `/auto` plan and exit code, the update-everything plan on sample `winget upgrade` output (kit IDs, pins, unknown versions left out; explicit-targeting table ignored), failure reasons; catalogue sanity (unique Ids/names, groups, methods, DEV/POST off, POST interactive), the 2026-11-26 catalogue changes (removed apps, Obsidian off, Cursor/Codex AI-flagged and off, the three new entries), `Get-KitAiUpdateSet` (installed only), dev-folder path choice (injected D: types), WSL distro picker on sample `wsl --list --online` text (plain and UTF-16-as-UTF-8), restart detection, dry run of every package, version compare; `-Online` adds the installed scan and vendor-page resolution |
 | `tools/smoke-tui.ps1` | pwsh | the Spectre menu driven by scripted keys (`MYWINKIT_SIMULATE_ADMIN=0` unless a scenario sets it): Update submenu, Update everything review (+ a dry run when this PC has updates, local only), exactly one Back row on a results screen, the ADMIN badge, the admin-at-start Settings row, install flow, search, AI table (every AI tool listed, never "installs missing ones"), settings (read-only panel, a seeded local fix, the per-PC auto-install toggle; fails if removed screens reappear) + tweaks (+ "update all" and "pick installed" when an AI tool is installed, local only) |
-| `tools/smoke-loader.ps1` | 5.1 | elevation (simulated: relaunch / already admin / declined / standard account / other account handed back / setting off / `/noelevate`, arguments kept, classic `V`, ADMIN); `/auto` with stdin closed and a time limit (exit 0, no prompt, run log, with a simulated elevation; `autoInstallPwsh` off asks nothing); `install.cmd` argument pass-through; classic `L` submenu; loader decisions (pwsh/Terminal present / absent / forced classic); auto mode installs without the question (dry run, simulated ok and failed installs end in the classic menu; a failed Terminal install isn't retried the same day); auto off via `local-settings.json`: declining and dry-run accepting the PowerShell 7 install; classic `K` toggles the override; a classic-menu run |
-| `tools/test-config.ps1` | 5.1 + pwsh | config read chain (remote / cache / corrupt cache / bundled / defaults), JSON writer (ASCII, round trip) and canonical form of all three `config/*.json`, catalogue Ids (unique across Packages + Removed, no `RetiredIds` reuse), heals kept local, no config-write functions exported, publish, self-update (accept / reuse / decline / broken zip), `irm \| iex` bootstrap |
+| `tools/smoke-loader.ps1` | 5.1 | essentials (simulated): order PS7 → Terminal → Claude Code → font → Terminal settings → default terminal, all present = nothing runs, partly present, a failure carries on and is not retried the same day, dry run, `/auto`, setting off = none run, skipped in test mode without the simulation; elevation (simulated: relaunch / already admin / declined / standard account / other account handed back / setting off / `/noelevate`, arguments kept, classic `V`, ADMIN); `/auto` with stdin closed and a time limit (exit 0, no prompt, run log, with a simulated elevation; essentials off asks nothing); `install.cmd` argument pass-through; classic `L` submenu; loader decisions (pwsh/Terminal present / absent / forced classic); auto mode installs without the question (dry run, simulated ok and failed installs end in the classic menu; a failed Terminal install isn't retried the same day); essentials off via `local-settings.json` (older `autoInstallPwsh` name): declining and dry-run accepting the PowerShell 7 install; classic `K` toggles the override; a classic-menu run |
+| `tools/test-config.ps1` | 5.1 + pwsh | config read chain (remote / cache / corrupt cache / bundled / defaults; terminal.json cached too), JSON writer (ASCII, round trip) and canonical form of all four `config/*.json`, terminal.json ASCII + no personal data (user and host names, `C:\Users\` paths, IPs), catalogue Ids (unique across Packages + Removed, no `RetiredIds` reuse), heals kept local, no config-write functions exported, publish, self-update (accept / reuse / decline / broken zip), `irm \| iex` bootstrap |
 | `tools/render-screens.ps1 -OutDir <dir>` | pwsh (+5.1 for classic) | not a test: captures every screen as `.txt` (layout) and truecolor `.ans` (view with `Get-Content x.ans -Raw` in Windows Terminal) at 120 × 30, and prints the main-menu height |
 
 test-core, smoke-tui, smoke-loader and render-screens point `MYWINKIT_CONFIG_URL` at the repo's own `config/`

@@ -24,7 +24,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:KitVersion  = '2.6.0'   # bump with user-visible changes (shown in the menu banner)
+$script:KitVersion  = '2.7.0'   # bump with user-visible changes (shown in the menu banner)
 $script:KitRoot     = $null
 $script:BaseData    = $null
 $script:Catalog     = @()
@@ -76,7 +76,7 @@ function ConvertTo-KitPackage($h, [hashtable]$Order, [string]$Origin = 'config')
 
 $script:Repo = if ($env:MYWINKIT_REPO) { $env:MYWINKIT_REPO } else { '1nst4ll/my-win-kit' }
 $script:Branch = if ($env:MYWINKIT_BRANCH) { $env:MYWINKIT_BRANCH } else { 'main' }
-$script:ConfigFiles = @('catalog.json', 'settings.json', 'winget-id-overrides.json')
+$script:ConfigFiles = @('catalog.json', 'settings.json', 'winget-id-overrides.json', 'terminal.json')
 $script:Config = @{}          # file name -> parsed document (ordered hashtables)
 $script:ConfigSource = @{}    # file name -> @{ Kind = github|cache|bundled|default; Detail }
 $script:Warnings = [System.Collections.Generic.List[string]]::new()
@@ -104,6 +104,7 @@ function ConvertTo-KitJsonValue($v) {
     if ($v -is [int] -or $v -is [long] -or $v -is [int16] -or $v -is [byte]) { return [string]$v }
     if ($v -is [double] -or $v -is [decimal] -or $v -is [single]) { return $v.ToString([Globalization.CultureInfo]::InvariantCulture) }
     if ($v -is [string] -or $v -is [char]) {
+        if ([string]$v -match '^[\x20\x21\x23-\x5B\x5D-\x7E]*$') { return '"' + $v + '"' }   # plain ASCII: nothing to escape
         $sb = [Text.StringBuilder]::new('"')
         foreach ($ch in ([string]$v).ToCharArray()) {
             $n = [int]$ch
@@ -113,7 +114,7 @@ function ConvertTo-KitJsonValue($v) {
         return $sb.Append('"').ToString()
     }
     if ($v -is [System.Collections.IDictionary]) {
-        return '{ ' + ((@($v.Keys) | ForEach-Object { (ConvertTo-KitJsonValue ([string]$_)) + ': ' + (ConvertTo-KitJsonValue $v[$_]) }) -join ', ') + ' }'
+        return '{ ' + ((@($v.PSBase.Keys) | ForEach-Object { (ConvertTo-KitJsonValue ([string]$_)) + ': ' + (ConvertTo-KitJsonValue $v[$_]) }) -join ', ') + ' }'
     }
     if ($v -is [System.Collections.IEnumerable]) { return '[' + ((@($v) | ForEach-Object { ConvertTo-KitJsonValue $_ }) -join ', ') + ']' }
     return ConvertTo-KitJsonValue ([string]$v)
@@ -122,17 +123,17 @@ function ConvertTo-KitJsonValue($v) {
 function ConvertTo-KitJsonDocument($doc) {
     <# Top-level object, one array item / one map entry per line: small, readable git diffs. #>
     $lines = [System.Collections.Generic.List[string]]::new(); $lines.Add('{')
-    $keys = @($doc.Keys)
+    $keys = @($doc.PSBase.Keys)   # PSBase: a JSON key named "keys" must not hide the property
     for ($i = 0; $i -lt $keys.Count; $i++) {
         $k = $keys[$i]; $v = $doc[$k]; $comma = if ($i -lt $keys.Count - 1) { ',' } else { '' }
-        $isMapOfMaps = $v -is [System.Collections.IDictionary] -and @($v.Values | Where-Object { $_ -is [System.Collections.IDictionary] }).Count -gt 0
+        $isMapOfMaps = $v -is [System.Collections.IDictionary] -and @($v.PSBase.Values | Where-Object { $_ -is [System.Collections.IDictionary] }).Count -gt 0
         if ($v -is [System.Collections.IList] -and $v -isnot [string] -and @($v).Count -gt 0) {
             $lines.Add("  $(ConvertTo-KitJsonValue ([string]$k)): [")
             $arr = @($v); for ($j = 0; $j -lt $arr.Count; $j++) { $lines.Add("    $(ConvertTo-KitJsonValue $arr[$j])$(if ($j -lt $arr.Count - 1) { ',' })") }
             $lines.Add("  ]$comma")
-        } elseif ($isMapOfMaps -and $v.Count -gt 0) {
+        } elseif ($isMapOfMaps -and $v.PSBase.Count -gt 0) {
             $lines.Add("  $(ConvertTo-KitJsonValue ([string]$k)): {")
-            $mk = @($v.Keys); for ($j = 0; $j -lt $mk.Count; $j++) { $lines.Add("    $(ConvertTo-KitJsonValue ([string]$mk[$j])): $(ConvertTo-KitJsonValue $v[$mk[$j]])$(if ($j -lt $mk.Count - 1) { ',' })") }
+            $mk = @($v.PSBase.Keys); for ($j = 0; $j -lt $mk.Count; $j++) { $lines.Add("    $(ConvertTo-KitJsonValue ([string]$mk[$j])): $(ConvertTo-KitJsonValue $v[$mk[$j]])$(if ($j -lt $mk.Count - 1) { ',' })") }
             $lines.Add("  }$comma")
         } else {
             $lines.Add("  $(ConvertTo-KitJsonValue ([string]$k)): $(ConvertTo-KitJsonValue $v)$comma")
@@ -155,6 +156,7 @@ function Test-KitConfigDoc([string]$Name, $Doc) {
         if (-not $Doc.Contains('Groups') -or -not $Doc.Contains('Packages')) { throw 'catalog.json needs Groups and Packages' }
         if (@($Doc['Packages']).Count -lt 1) { throw 'catalog.json has no packages' }
     }
+    if ($Name -eq 'terminal.json' -and -not $Doc['defaultProfile']) { throw 'terminal.json needs defaultProfile' }
     return $true
 }
 
@@ -890,6 +892,13 @@ function Enable-KitConsoleVt {
     } catch { $script:VtUnavailable = $true; return $false }
 }
 
+function Get-KitRemoteScriptArgs {
+    <# Arguments for a child PowerShell that runs a vendor one-liner (irm URL | iex). #>
+    param([Parameter(Mandatory)][string]$Url)
+    $cmd = "[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072; irm '$Url' | iex"
+    return , @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $cmd)
+}
+
 function Invoke-KitRemoteScript {
     <#
     Run a vendor one-liner (irm URL | iex) in a CHILD Windows PowerShell (or
@@ -905,8 +914,8 @@ function Invoke-KitRemoteScript {
         $exe = Get-KitPwshPath
         if (-not $exe) { Write-KitLog "script: $Url needs PowerShell 7 (pwsh), not found"; return 1 }
     }
-    $cmd = "[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072; irm '$Url' | iex"
-    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $cmd)
+    $argList = Get-KitRemoteScriptArgs -Url $Url
+    $cmd = $argList[-1]
     Write-KitLog "script: irm $Url | iex  (child $exe$(if ($Elevated) { ', elevated' }))"
     if ($Elevated -and -not (Test-KitAdmin)) {
         # Own administrator window (one UAC prompt); it waits for Enter so its output can be read.
@@ -1240,21 +1249,23 @@ function Set-KitLocalPref {
 function Get-KitLocalSwitch {
     <#
     Effective value of an on/off setting a PC can override: this PC's
-    local-settings.json, else settings.json, else -Default.
+    local-settings.json, else settings.json, else -Default. -Legacy = older
+    names of the same setting, read after -Name at each level.
     @{ On; Source = 'this PC' | 'shared' | 'default' }. The loader (5.1, no
     module) applies the same order on its own copy of the files.
     #>
-    param([Parameter(Mandatory)][string]$Name, [bool]$Default = $true)
+    param([Parameter(Mandatory)][string]$Name, [bool]$Default = $true, [string[]]$Legacy = @())
+    $names = @($Name) + @($Legacy | Where-Object { $_ })
     $loc = Get-KitLocalPrefs
-    if ($loc.Contains($Name) -and $loc[$Name] -is [bool]) { return [pscustomobject]@{ On = [bool]$loc[$Name]; Source = 'this PC' } }
+    foreach ($n in $names) { if ($loc.Contains($n) -and $loc[$n] -is [bool]) { return [pscustomobject]@{ On = [bool]$loc[$n]; Source = 'this PC' } } }
     $s = $script:Config['settings.json']
-    if ($s -and $s.Contains($Name) -and $s[$Name] -is [bool]) { return [pscustomobject]@{ On = [bool]$s[$Name]; Source = 'shared' } }
+    foreach ($n in $names) { if ($s -and $s.Contains($n) -and $s[$n] -is [bool]) { return [pscustomobject]@{ On = [bool]$s[$n]; Source = 'shared' } } }
     return [pscustomobject]@{ On = $Default; Source = 'default' }
 }
 
 function Get-KitAutoInstallPwsh {
-    <# "Install PowerShell 7 + Windows Terminal at start without asking" (autoInstallPwsh). #>
-    return (Get-KitLocalSwitch -Name 'autoInstallPwsh' -Default $true)
+    <# Older name of Get-KitAutoInstallEssentials (autoInstallPwsh became autoInstallEssentials in kit 2.7.0). #>
+    return (Get-KitAutoInstallEssentials)
 }
 
 function Get-KitElevateAtStart {
@@ -1417,6 +1428,558 @@ function Invoke-KitChild {
     param([Parameter(Mandatory)][string]$FilePath, [string[]]$ArgumentList = @(), [switch]$DeElevate)
     if ($DeElevate) { return (Invoke-KitDeElevated -FilePath $FilePath -ArgumentList $ArgumentList) }
     return (Invoke-KitProcess -FilePath $FilePath -ArgumentList $ArgumentList)
+}
+
+# ================================================================ essentials (the loader sets these up at every start)
+# Order (install.ps1): PowerShell 7, Windows Terminal (both in the loader), then the steps here:
+# Claude Code CLI, CaskaydiaCove Nerd Font, Windows Terminal settings (config/terminal.json),
+# Windows Terminal as the default terminal app. Each step checks first and does nothing when it
+# is already done. One setting turns all of it off: autoInstallEssentials (legacy: autoInstallPwsh).
+# Testing: MYWINKIT_SIMULATE_ESSENTIALS = absent | present | <steps that are present, e.g. claude,font>
+# simulates detection and install (nothing on the PC is read or changed); MYWINKIT_SIMULATE_INSTALL=fail
+# fails every simulated install, MYWINKIT_SIMULATE_FAIL=<steps> only those.
+
+$script:EssentialSteps = @('claude', 'font', 'terminal-settings', 'default-terminal')
+$script:EssentialLabels = @{ 'claude' = 'Claude Code'; 'font' = 'CaskaydiaCove Nerd Font'; 'terminal-settings' = 'Terminal settings'; 'default-terminal' = 'Default terminal app' }
+# HKCU\Console\%%Startup values that make Windows Terminal (stable) the default terminal app
+# (learn.microsoft.com/windows/terminal/group-policy; Preview and "let Windows decide" use other GUIDs).
+$script:WtDelegationConsole  = '{2EACA947-7F5F-4CFA-BA87-8F7FBEEFBE69}'
+$script:WtDelegationTerminal = '{E12CFF52-A866-4C77-9A90-F570A7AA2C6B}'
+$script:ConsoleStartupKey = 'HKCU:\Console\%%Startup'
+$script:ClaudeInstallUrl = 'https://claude.ai/install.ps1'
+$script:ClaudeExe = '%USERPROFILE%\.local\bin\claude.exe'
+$script:NerdFontApi = 'https://api.github.com/repos/ryanoasis/nerd-fonts/releases/latest'
+$script:NerdFontAsset = 'CascadiaCode.zip'
+$script:NerdFontProbe = 'CaskaydiaCoveNerdFontMono-Regular.ttf'   # the face Terminal uses: "CaskaydiaCove Nerd Font Mono"
+$script:FontsRegPath = 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts'
+
+function Get-KitAutoInstallEssentials {
+    <# "Install essentials on start" (autoInstallEssentials; the older autoInstallPwsh still counts). #>
+    return (Get-KitLocalSwitch -Name 'autoInstallEssentials' -Legacy 'autoInstallPwsh' -Default $true)
+}
+
+function Get-KitEssentialSim {
+    <# '' = real run; 'present' | 'ok' | 'fail' = simulated (tests). #>
+    param([Parameter(Mandatory)][string]$Name)
+    $s = [string]$env:MYWINKIT_SIMULATE_ESSENTIALS
+    if (-not $s) { return '' }
+    $present = @()
+    if ($s -eq 'present') { $present = $script:EssentialSteps } elseif ($s -ne 'absent') { $present = @($s -split '[,; ]+' | Where-Object { $_ }) }
+    if ($present -contains $Name) { return 'present' }
+    $fails = @([string]$env:MYWINKIT_SIMULATE_FAIL -split '[,; ]+' | Where-Object { $_ })
+    if ($env:MYWINKIT_SIMULATE_INSTALL -eq 'fail' -or $fails -contains $Name) { return 'fail' }
+    return 'ok'
+}
+
+# ---------------------------------------------------------------- JSON with comments (Windows Terminal's settings.json)
+
+function Remove-KitJsonComments {
+    <# Strip // and /* */ comments and trailing commas outside strings, so ConvertFrom-Json (5.1 too) reads JSONC. #>
+    param([AllowEmptyString()][string]$Text)
+    $sb = New-Object System.Text.StringBuilder ($Text.Length)
+    $n = $Text.Length; $i = 0; $inStr = $false
+    while ($i -lt $n) {
+        $c = $Text[$i]
+        if ($inStr) {
+            [void]$sb.Append($c)
+            if ($c -eq [char]'\' -and $i + 1 -lt $n) { [void]$sb.Append($Text[$i + 1]); $i += 2; continue }
+            if ($c -eq [char]'"') { $inStr = $false }
+            $i++; continue
+        }
+        if ($c -eq [char]'"') { $inStr = $true; [void]$sb.Append($c); $i++; continue }
+        if ($c -eq [char]'/' -and $i + 1 -lt $n -and $Text[$i + 1] -eq [char]'/') { while ($i -lt $n -and $Text[$i] -ne [char]"`n") { $i++ }; continue }
+        if ($c -eq [char]'/' -and $i + 1 -lt $n -and $Text[$i + 1] -eq [char]'*') { $e = $Text.IndexOf('*/', $i + 2); if ($e -lt 0) { $i = $n } else { $i = $e + 2 }; continue }
+        if ($c -eq [char]',') {
+            # trailing comma: only whitespace before the next } or ]
+            $j = $i + 1; while ($j -lt $n -and [char]::IsWhiteSpace($Text[$j])) { $j++ }
+            if ($j -lt $n -and ($Text[$j] -eq [char]'}' -or $Text[$j] -eq [char]']')) { $i++; continue }
+        }
+        [void]$sb.Append($c); $i++
+    }
+    return $sb.ToString()
+}
+
+function ConvertFrom-KitJsoncText {
+    <# JSON with comments -> ordered hashtables / arrays. Throws when it does not parse. #>
+    param([AllowEmptyString()][string]$Text)
+    if (-not $Text.Trim()) { throw 'empty file' }
+    $t = $Text.TrimStart([char]0xFEFF)
+    # fast path: Terminal writes plain JSON itself; the character scan (slow in 5.1) only when needed
+    if ($t -notmatch '//|/\*|,\s*[}\]]') { try { return (ConvertFrom-KitJsonText $t) } catch {} }
+    return (ConvertFrom-KitJsonText (Remove-KitJsonComments $t))
+}
+
+function ConvertTo-KitJsonPretty {
+    <# Indented JSON (4 spaces, ASCII with \uXXXX escapes), the layout Windows Terminal writes itself. #>
+    param($Value, [int]$Level = 0)
+    $ind = '    ' * ($Level + 1); $end = '    ' * $Level
+    if ($Value -is [System.Collections.IDictionary]) {
+        if ($Value.PSBase.Count -eq 0) { return '{}' }
+        $parts = @(foreach ($k in @($Value.PSBase.Keys)) { $ind + (ConvertTo-KitJsonValue ([string]$k)) + ': ' + (ConvertTo-KitJsonPretty -Value $Value[$k] -Level ($Level + 1)) })
+        return "{`n" + ($parts -join ",`n") + "`n$end}"
+    }
+    if ($Value -is [System.Collections.IList] -and $Value -isnot [string]) {
+        if (@($Value).Count -eq 0) { return '[]' }
+        $parts = @(foreach ($x in @($Value)) { $ind + (ConvertTo-KitJsonPretty -Value $x -Level ($Level + 1)) })
+        return "[`n" + ($parts -join ",`n") + "`n$end]"
+    }
+    return (ConvertTo-KitJsonValue $Value)
+}
+
+function Copy-KitJsonValue($v) {
+    <# Deep copy of parsed JSON (ordered hashtables / arrays), so merging never changes the source. #>
+    if ($v -is [System.Collections.IDictionary]) { $h = [ordered]@{}; foreach ($k in @($v.PSBase.Keys)) { $h[$k] = Copy-KitJsonValue $v[$k] }; return $h }
+    if ($v -is [System.Collections.IList] -and $v -isnot [string]) { return , @(foreach ($x in @($v)) { Copy-KitJsonValue $x }) }
+    return $v
+}
+
+function Merge-KitJsonInto {
+    <# Set every key of -Source on -Target (objects merge key by key, anything else is replaced). Adds changed paths to -Changes. #>
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Target, [Parameter(Mandatory)][System.Collections.IDictionary]$Source, [string]$Prefix, [System.Collections.Generic.List[string]]$Changes)
+    foreach ($k in @($Source.PSBase.Keys)) {
+        $sv = $Source[$k]; $path = if ($Prefix) { "$Prefix.$k" } else { [string]$k }
+        if ($sv -is [System.Collections.IDictionary] -and $Target.Contains($k) -and $Target[$k] -is [System.Collections.IDictionary]) {
+            Merge-KitJsonInto -Target $Target[$k] -Source $sv -Prefix $path -Changes $Changes
+            continue
+        }
+        if (-not $Target.Contains($k) -or (ConvertTo-KitJsonValue $Target[$k]) -ne (ConvertTo-KitJsonValue $sv)) {
+            $Target[$k] = Copy-KitJsonValue $sv
+            if ($null -ne $Changes) { $Changes.Add($path) }
+        }
+    }
+}
+
+# ---------------------------------------------------------------- Windows Terminal settings
+
+function Get-KitTerminalSettingsPath {
+    <#
+    Windows Terminal's settings.json for this user: the Store/winget package
+    (LocalState), or the unpackaged copy when only that one exists.
+    Testing: MYWINKIT_WT_SETTINGS = another file.
+    #>
+    if ($env:MYWINKIT_WT_SETTINGS) { return $env:MYWINKIT_WT_SETTINGS }
+    $pkg = Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json'
+    $unp = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\settings.json'
+    if (-not (Test-Path -LiteralPath $pkg) -and (Test-Path -LiteralPath $unp)) { return $unp }
+    return $pkg
+}
+
+function Get-KitTerminalConfig {
+    <#
+    The desired Terminal settings (config/terminal.json): cache -> bundled copy
+    (-Online: GitHub first, like the other config files). $null when none.
+    #>
+    param([Parameter(Mandatory)][string]$KitRoot, [switch]$Online)
+    if ($Online -or -not $script:Config.ContainsKey('terminal.json')) { Read-KitConfigFile -Name 'terminal.json' -KitRoot $KitRoot -Offline:(-not $Online) }
+    $d = $script:Config['terminal.json']
+    if ($d -is [System.Collections.IDictionary] -and $d.Contains('defaultProfile')) { return $d }
+    return $null
+}
+
+function Resolve-KitTerminalStartDir {
+    <#
+    Starting folder for every Terminal profile: -Prefer (environment variables
+    expanded; default %OneDrive%\.playground) when that folder exists, else
+    -Fallback (default: the kit's dev folder, D:\dev\git or C:\dev\git), created
+    when missing unless -DryRun. @{ Path; Source = prefer|fallback|home; Created }.
+    #>
+    param([string]$Prefer = '%OneDrive%\.playground', [string]$Fallback, [switch]$DryRun)
+    if (-not $PSBoundParameters.ContainsKey('Fallback')) { $Fallback = Get-KitDevFolderPath }
+    $p = [Environment]::ExpandEnvironmentVariables($Prefer)
+    if ($p -and $p -notmatch '%' -and (Test-Path -LiteralPath $p -PathType Container)) { return @{ Path = $p; Source = 'prefer'; Created = $false } }
+    if ($Fallback) {
+        if (Test-Path -LiteralPath $Fallback -PathType Container) { return @{ Path = $Fallback; Source = 'fallback'; Created = $false } }
+        if ($DryRun) { return @{ Path = $Fallback; Source = 'fallback'; Created = $false } }
+        try { New-Item -ItemType Directory -Path $Fallback -Force -ErrorAction Stop | Out-Null; return @{ Path = $Fallback; Source = 'fallback'; Created = $true } } catch {}
+    }
+    return @{ Path = '%USERPROFILE%'; Source = 'home'; Created = $false }
+}
+
+function Merge-KitTerminalSettings {
+    <#
+    .SYNOPSIS
+        Merge the desired Terminal settings (config/terminal.json) into a
+        settings.json. Returns @{ Status = done|current|dryrun|failed; Detail;
+        Path; Backup; Changes }.
+    .DESCRIPTION
+        No file yet (Terminal never started): a new one with the desired
+        settings (Terminal adds its generated profiles at its first start).
+        Otherwise: sets the globals and profiles.defaults, adds or updates the
+        profiles by guid, sets defaultProfile and the key bindings (by id; an
+        entry with the same keys is replaced), and keeps everything else
+        (other profiles, schemes, actions). Comments are allowed when reading.
+        Writes only when something changes, after a backup to
+        settings.json.bak-my-win-kit-<date>. A file that does not parse is
+        never overwritten.
+        -StartingDirectory goes into profiles.defaults. -NoFont leaves the font
+        out (the Nerd Font is not installed yet, so Terminal would warn);
+        -NoDefaultProfile keeps the current default profile (no PowerShell 7).
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Desired,
+        [string]$StartingDirectory = '',
+        [switch]$NoFont,
+        [switch]$NoDefaultProfile,
+        [switch]$DryRun
+    )
+    $res = @{ Status = 'failed'; Detail = ''; Path = $Path; Backup = ''; Changes = @() }
+    $exists = Test-Path -LiteralPath $Path -PathType Leaf
+    $doc = $null
+    if ($exists) {
+        try { $doc = ConvertFrom-KitJsoncText ([IO.File]::ReadAllText($Path)) } catch { $res.Detail = "settings.json does not parse, left alone: $($_.Exception.Message)"; return $res }
+        if ($doc -isnot [System.Collections.IDictionary]) { $res.Detail = 'settings.json is not a JSON object, left alone'; return $res }
+    } else {
+        $doc = [ordered]@{ '$help' = 'https://aka.ms/terminal-documentation'; '$schema' = 'https://aka.ms/terminal-profiles-schema' }
+    }
+    $before = if ($exists) { ConvertTo-KitJsonPretty $doc } else { '' }
+    $changes = New-Object 'System.Collections.Generic.List[string]'
+
+    # globals
+    if ($Desired['globals'] -is [System.Collections.IDictionary]) { Merge-KitJsonInto -Target $doc -Source $Desired['globals'] -Changes $changes }
+    # profiles: { defaults, list } (an old-style plain list is wrapped)
+    $prof = $doc['profiles']
+    if ($prof -is [System.Collections.IList]) { $prof = [ordered]@{ defaults = [ordered]@{}; list = @($prof) }; $doc['profiles'] = $prof; $changes.Add('profiles') }
+    elseif ($prof -isnot [System.Collections.IDictionary]) { $prof = [ordered]@{ defaults = [ordered]@{}; list = @() }; $doc['profiles'] = $prof; $changes.Add('profiles') }
+    if ($prof['defaults'] -isnot [System.Collections.IDictionary]) { $prof['defaults'] = [ordered]@{} }
+    if ($prof['list'] -isnot [System.Collections.IList]) { $prof['list'] = @() }
+    $defs = [ordered]@{}
+    if ($Desired['profileDefaults'] -is [System.Collections.IDictionary]) { $defs = Copy-KitJsonValue $Desired['profileDefaults'] }
+    if ($NoFont -and $defs.Contains('font')) { $defs.Remove('font') }
+    if ($StartingDirectory) { $defs['startingDirectory'] = $StartingDirectory }
+    Merge-KitJsonInto -Target $prof['defaults'] -Source $defs -Prefix 'profiles.defaults' -Changes $changes
+    $list = New-Object System.Collections.ArrayList
+    foreach ($x in @($prof['list'])) { [void]$list.Add($x) }
+    foreach ($want in @($Desired['profiles'])) {
+        if ($want -isnot [System.Collections.IDictionary] -or -not $want['guid']) { continue }
+        $hit = $null
+        foreach ($x in $list) { if ($x -is [System.Collections.IDictionary] -and ([string]$x['guid']) -eq ([string]$want['guid'])) { $hit = $x; break } }
+        if ($hit) { Merge-KitJsonInto -Target $hit -Source $want -Prefix "profile '$($want['name'])'" -Changes $changes }
+        else { [void]$list.Insert(0, (Copy-KitJsonValue $want)); $changes.Add("profile '$($want['name'])' added") }
+    }
+    $prof['list'] = @($list.ToArray())
+    # default profile
+    if ($Desired['defaultProfile'] -and -not $NoDefaultProfile -and [string]$doc['defaultProfile'] -ne [string]$Desired['defaultProfile']) { $doc['defaultProfile'] = [string]$Desired['defaultProfile']; $changes.Add('defaultProfile') }
+    # key bindings: by id; an entry with the same keys but another id is replaced
+    $kbs = New-Object System.Collections.ArrayList
+    if ($doc['keybindings'] -is [System.Collections.IList]) { foreach ($x in @($doc['keybindings'])) { [void]$kbs.Add($x) } }
+    foreach ($want in @($Desired['keybindings'])) {
+        if ($want -isnot [System.Collections.IDictionary]) { continue }
+        $wantText = ConvertTo-KitJsonValue $want
+        $exact = $false; $drop = @()
+        foreach ($x in $kbs) {
+            if ($x -isnot [System.Collections.IDictionary]) { continue }
+            if ((ConvertTo-KitJsonValue $x) -eq $wantText) { $exact = $true; continue }
+            if (([string]$x['id'] -and [string]$x['id'] -eq [string]$want['id']) -or ([string]$x['keys'] -and [string]$x['keys'] -eq [string]$want['keys'])) { $drop += , $x }
+        }
+        foreach ($x in $drop) { $kbs.Remove($x) }
+        if (-not $exact) { [void]$kbs.Add((Copy-KitJsonValue $want)) }
+        if ($drop.Count -or -not $exact) { $changes.Add("keybinding $($want['keys'])") }
+    }
+    if ($kbs.Count -or $doc.Contains('keybindings')) { $doc['keybindings'] = @($kbs.ToArray()) }
+
+    $after = ConvertTo-KitJsonPretty $doc
+    $res.Changes = @($changes)
+    if ($exists -and $after -eq $before) { $res.Status = 'current'; $res.Detail = 'already as configured'; return $res }
+    $what = if ($exists) { ($changes | Select-Object -Unique) -join ', ' } else { 'new settings.json' }
+    if ($DryRun) { $res.Status = 'dryrun'; $res.Detail = "would update $($Path): $what"; return $res }
+    try {
+        $dir = Split-Path -Parent $Path
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        if ($exists) {
+            $bak = "$Path.bak-my-win-kit-$(Get-Date -Format 'yyyy-MM-dd')"
+            if (Test-Path -LiteralPath $bak) { $bak = "$Path.bak-my-win-kit-$(Get-Date -Format 'yyyy-MM-dd-HHmmss')" }
+            Copy-Item -LiteralPath $Path -Destination $bak -Force -ErrorAction Stop
+            $res.Backup = $bak
+        }
+        [IO.File]::WriteAllText($Path, $after + "`n", (New-Object System.Text.UTF8Encoding($false)))
+        $res.Status = 'done'; $res.Detail = $(if ($exists) { "updated: $what" } else { 'created settings.json' })
+    } catch { $res.Status = 'failed'; $res.Detail = "could not write $($Path): $($_.Exception.Message)" }
+    return $res
+}
+
+# ---------------------------------------------------------------- Windows Terminal as the default terminal app
+
+function Get-KitRegistryAccess {
+    <# Reader/writer for one registry key (PowerShell path); tests pass their own pair instead. #>
+    param([Parameter(Mandatory)][string]$Key)
+    $regKey = $Key   # captured by the closures below
+    return @{
+        Read = { param($Name) try { return [string](Get-ItemProperty -LiteralPath $regKey -Name $Name -ErrorAction Stop).$Name } catch { return '' } }.GetNewClosure()
+        Write = { param($Name, $Value) if (-not (Test-Path -LiteralPath $regKey)) { New-Item -Path $regKey -Force | Out-Null }; New-ItemProperty -LiteralPath $regKey -Name $Name -Value $Value -PropertyType String -Force | Out-Null }.GetNewClosure()
+    }
+}
+
+function Set-KitDefaultTerminal {
+    <#
+    Make Windows Terminal the default terminal app for this user
+    (HKCU\Console\%%Startup DelegationConsole + DelegationTerminal). Call it
+    only when Terminal is installed. -Registry = @{ Read; Write } scriptblocks
+    (tests). @{ Status = done|current|dryrun|failed; Detail }.
+    #>
+    param([switch]$DryRun, [hashtable]$Registry)
+    if (-not $Registry) { $Registry = Get-KitRegistryAccess -Key $script:ConsoleStartupKey }
+    $want = [ordered]@{ DelegationConsole = $script:WtDelegationConsole; DelegationTerminal = $script:WtDelegationTerminal }
+    $todo = @(foreach ($k in @($want.Keys)) { if ((& $Registry.Read $k) -ne $want[$k]) { $k } })
+    if (-not $todo.Count) { return @{ Status = 'current'; Detail = 'Windows Terminal is already the default terminal app' } }
+    if ($DryRun) { return @{ Status = 'dryrun'; Detail = "would set $($todo -join ' + ') under HKCU\Console\%%Startup (Windows Terminal)" } }
+    try {
+        foreach ($k in $todo) { & $Registry.Write $k $want[$k] }
+        return @{ Status = 'done'; Detail = 'Windows Terminal is now the default terminal app' }
+    } catch { return @{ Status = 'failed'; Detail = "could not set the default terminal: $($_.Exception.Message)" } }
+}
+
+# ---------------------------------------------------------------- CaskaydiaCove Nerd Font (Cascadia Code Nerd Font)
+
+function Test-KitNerdFont {
+    <#
+    The CaskaydiaCove Nerd Font Mono face is installed (machine or this user):
+    its file in a fonts folder, or a Fonts registry entry naming it. Returns
+    where ('' = not installed). -FontDirs / -RegistryNames inject both (tests).
+    #>
+    param([string[]]$FontDirs, [string[]]$RegistryNames)
+    if (-not $PSBoundParameters.ContainsKey('FontDirs')) { $FontDirs = @((Join-Path $env:windir 'Fonts'), (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Fonts')) }
+    foreach ($d in @($FontDirs)) { if ($d -and (Test-Path -LiteralPath (Join-Path $d $script:NerdFontProbe) -PathType Leaf)) { return (Join-Path $d $script:NerdFontProbe) } }
+    if (-not $PSBoundParameters.ContainsKey('RegistryNames')) {
+        $RegistryNames = @()
+        foreach ($hive in 'HKLM:', 'HKCU:') { try { $RegistryNames += @((Get-Item -LiteralPath "$hive\$($script:FontsRegPath)" -ErrorAction Stop).GetValueNames()) } catch {} }
+    }
+    foreach ($n in @($RegistryNames)) { if ("$n" -match '^CaskaydiaCove Nerd Font Mono\b') { return "registry: $n" } }
+    return ''
+}
+
+function Get-KitNerdFontRelease {
+    <#
+    From the GitHub API answer for ryanoasis/nerd-fonts releases/latest (JSON
+    text): @{ Tag; Url; Size; Sha256 (the asset's published digest, '' if
+    none); ChecksumUrl (the release's SHA-256.txt, '' if none) }. Throws when
+    the release has no CascadiaCode.zip.
+    #>
+    param([Parameter(Mandatory)][string]$Json)
+    $rel = $Json | ConvertFrom-Json
+    $asset = @($rel.assets | Where-Object { $_.name -eq $script:NerdFontAsset } | Select-Object -First 1)
+    if (-not $asset.Count) { throw "no $($script:NerdFontAsset) in release $($rel.tag_name)" }
+    $a = $asset[0]
+    $sha = ''
+    if ($a.PSObject.Properties['digest'] -and "$($a.digest)" -match '^sha256:([0-9a-fA-F]{64})$') { $sha = $Matches[1].ToLowerInvariant() }
+    $sum = @($rel.assets | Where-Object { $_.name -eq 'SHA-256.txt' } | Select-Object -First 1)
+    return @{ Tag = [string]$rel.tag_name; Url = [string]$a.browser_download_url; Size = [long]$a.size; Sha256 = $sha; ChecksumUrl = $(if ($sum.Count) { [string]$sum[0].browser_download_url } else { '' }) }
+}
+
+function Get-KitSha256FromList {
+    <# The hash for -Name in a sha256sum-style list ("<hash>  <file>" per line), or ''. #>
+    param([AllowEmptyString()][string]$Text, [Parameter(Mandatory)][string]$Name)
+    foreach ($l in (Split-KitOutputLines $Text)) { if ($l -match '^\s*([0-9a-fA-F]{64})\s+\*?(.+?)\s*$' -and $Matches[2] -eq $Name) { return $Matches[1].ToLowerInvariant() } }
+    return ''
+}
+
+function Get-KitFileSha256 {
+    <# SHA-256 of a file through .NET (Get-FileHash can fail to load in 5.1 under an inherited PowerShell 7 module path). #>
+    param([Parameter(Mandatory)][string]$Path)
+    $sha = [Security.Cryptography.SHA256]::Create(); $fs = [IO.File]::OpenRead($Path)
+    try { return (-join ($sha.ComputeHash($fs) | ForEach-Object { $_.ToString('x2') })) } finally { $fs.Dispose(); $sha.Dispose() }
+}
+
+function ConvertTo-KitFontRegName {
+    <# 'CaskaydiaCoveNerdFontMono-BoldItalic.ttf' -> 'CaskaydiaCove Nerd Font Mono Bold Italic (TrueType)'. #>
+    param([Parameter(Mandatory)][string]$FileName)
+    $base = [IO.Path]::GetFileNameWithoutExtension($FileName)
+    $fam, $style = $base -split '-', 2
+    $fam = ($fam -replace 'NerdFont', ' Nerd Font ').Trim() -replace '\s+', ' '
+    $style = ([regex]::Replace([string]$style, '(?<=[a-z])(?=[A-Z])', ' ')).Trim()
+    if ($style -eq 'Regular') { $style = '' }
+    return ("$fam $style".Trim() + ' (TrueType)')
+}
+
+function Install-KitNerdFont {
+    <#
+    .SYNOPSIS
+        Install CaskaydiaCove Nerd Font (Cascadia Code patched by Nerd Fonts)
+        unless it is already there. @{ Status = done|current|dryrun|failed; Detail }.
+    .DESCRIPTION
+        Source: CascadiaCode.zip from the latest ryanoasis/nerd-fonts GitHub
+        release (resolved through the GitHub API, never a fixed version). The
+        download must match the SHA-256 GitHub publishes for the asset
+        (`digest`), else the release's SHA-256.txt; without either it is not
+        installed. Installs the CaskaydiaCoveNerdFont and ...Mono TTFs: for all
+        users when elevated (C:\Windows\Fonts + HKLM Fonts), else for this user
+        (%LOCALAPPDATA%\Microsoft\Windows\Fonts + HKCU Fonts).
+        Tests: -ReleaseJson / -ZipPath skip the network, -FontDir and
+        -Registry (@{ Read; Write }) redirect the install.
+    #>
+    param([switch]$DryRun, [string]$ReleaseJson, [string]$ZipPath, [string]$FontDir, [hashtable]$Registry, $IsAdmin = $null, [scriptblock]$OnStatus)
+    $notify = $OnStatus
+    function Send-Note([string]$t) { if ($notify) { try { & $notify $t } catch {} } }
+    if ($null -eq $IsAdmin) { $IsAdmin = Test-KitAdmin }
+    $scope = if ($IsAdmin) { 'all users' } else { 'this user' }
+    $found = if ($FontDir) { Test-KitNerdFont -FontDirs @($FontDir) -RegistryNames @() } else { Test-KitNerdFont }
+    if ($found) { return @{ Status = 'current'; Detail = "already installed ($found)" } }
+    if ($DryRun) { return @{ Status = 'dryrun'; Detail = "would download $($script:NerdFontAsset) from the latest ryanoasis/nerd-fonts release, check its SHA-256 and install it for $scope" } }
+    $work = Join-Path $env:TEMP ('my-win-kit-font-' + [guid]::NewGuid().ToString('N'))
+    try {
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+        if (-not $ZipPath) {
+            Send-Note 'looking up the latest Nerd Fonts release'
+            if (-not $ReleaseJson) { $ReleaseJson = [string](Invoke-WebRequest -Uri $script:NerdFontApi -UseBasicParsing -TimeoutSec 20 -UserAgent $script:UA -Headers @{ Accept = 'application/vnd.github+json' }).Content }
+            $rel = Get-KitNerdFontRelease -Json $ReleaseJson
+            $want = $rel.Sha256
+            if (-not $want -and $rel.ChecksumUrl) { $want = Get-KitSha256FromList -Text ([string](Invoke-WebRequest -Uri $rel.ChecksumUrl -UseBasicParsing -TimeoutSec 20 -UserAgent $script:UA).Content) -Name $script:NerdFontAsset }
+            if (-not $want) { return @{ Status = 'failed'; Detail = "no SHA-256 published for $($script:NerdFontAsset) in $($rel.Tag) - not installed" } }
+            $ZipPath = Join-Path $work $script:NerdFontAsset
+            Send-Note "downloading $($script:NerdFontAsset) $($rel.Tag) ($([math]::Round($rel.Size / 1MB)) MB)"
+            Write-KitLog "font: $($rel.Url) (sha256 $want)"
+            $pp = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'
+            try { Invoke-WebRequest -Uri $rel.Url -OutFile $ZipPath -UseBasicParsing -TimeoutSec 600 -UserAgent $script:UA } finally { $ProgressPreference = $pp }
+            $got = Get-KitFileSha256 -Path $ZipPath
+            if ($got -ne $want) { return @{ Status = 'failed'; Detail = "download does not match the published SHA-256 (got $got) - not installed" } }
+        }
+        Send-Note "installing CaskaydiaCove Nerd Font for $scope"
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $files = @()
+        $zip = [IO.Compression.ZipFile]::OpenRead($ZipPath)
+        try {
+            foreach ($e in $zip.Entries) {
+                if ($e.Name -notmatch '^CaskaydiaCoveNerdFont(Mono)?-[A-Za-z]+\.ttf$') { continue }
+                $dest = Join-Path $work $e.Name   # leaf name only: no paths from the archive
+                [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $dest, $true)
+                $files += $dest
+            }
+        } finally { $zip.Dispose() }
+        if (-not $files.Count) { return @{ Status = 'failed'; Detail = "no CaskaydiaCove Nerd Font files in $($script:NerdFontAsset)" } }
+        $machine = [bool]$IsAdmin
+        $target = $FontDir
+        if (-not $target) { $target = if ($machine) { Join-Path $env:windir 'Fonts' } else { Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Fonts' } }
+        if (-not $Registry -and $FontDir) { $Registry = @{ Read = { '' }; Write = { } } }   # a test folder never registers in the real registry
+        if (-not $Registry) { $Registry = Get-KitRegistryAccess -Key $(if ($machine) { "HKLM:\$($script:FontsRegPath)" } else { "HKCU:\$($script:FontsRegPath)" }) }
+        if (-not (Test-Path -LiteralPath $target)) { New-Item -ItemType Directory -Path $target -Force | Out-Null }
+        $n = 0
+        foreach ($f in $files) {
+            $leaf = Split-Path -Leaf $f
+            $dest = Join-Path $target $leaf
+            if (-not (Test-Path -LiteralPath $dest)) { Copy-Item -LiteralPath $f -Destination $dest -ErrorAction Stop }
+            # machine fonts are registered by file name, per-user fonts by full path
+            & $Registry.Write (ConvertTo-KitFontRegName $leaf) $(if ($machine -and -not $FontDir) { $leaf } else { $dest })
+            $n++
+        }
+        if (-not $FontDir) {
+            # usable without signing out: load into this session and tell running apps
+            try {
+                if (-not ('MyWinKit.Fonts' -as [type])) {
+                    Add-Type -Namespace MyWinKit -Name Fonts -MemberDefinition @'
+[DllImport("gdi32.dll", CharSet = CharSet.Unicode)] public static extern int AddFontResource(string file);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, UIntPtr w, IntPtr l, uint flags, uint timeout, out UIntPtr result);
+'@
+                }
+                foreach ($f in $files) { [void][MyWinKit.Fonts]::AddFontResource((Join-Path $target (Split-Path -Leaf $f))) }
+                $r = [UIntPtr]::Zero
+                [void][MyWinKit.Fonts]::SendMessageTimeout([IntPtr]0xffff, 0x001D, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 1000, [ref]$r)
+            } catch {}
+        }
+        $ok = if ($FontDir) { Test-KitNerdFont -FontDirs @($FontDir) -RegistryNames @() } else { Test-KitNerdFont }
+        if (-not $ok) { return @{ Status = 'failed'; Detail = "copied $n font files, but $($script:NerdFontProbe) is still not found" } }
+        return @{ Status = 'done'; Detail = "installed $n font files for $scope" }
+    } catch {
+        return @{ Status = 'failed'; Detail = "font install failed: $($_.Exception.Message)" }
+    } finally { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+# ---------------------------------------------------------------- Claude Code CLI
+
+function Test-KitClaudeCode {
+    <# claude.exe (Claude Code's native installer: %USERPROFILE%\.local\bin) or claude on PATH. Path or ''. #>
+    $p = [Environment]::ExpandEnvironmentVariables($script:ClaudeExe)
+    if (Test-Path -LiteralPath $p -PathType Leaf) { return $p }
+    $c = Get-Command claude.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($c) { return $c.Path }
+    return ''
+}
+
+function Install-KitClaudeCode {
+    <#
+    Claude Code CLI with Anthropic's official installer (irm
+    https://claude.ai/install.ps1 | iex in a child PowerShell) unless claude is
+    already there. It installs into this user's profile (%USERPROFILE%\.local\bin)
+    and needs no administrator rights, so an elevated kit runs it at the
+    signed-in user's normal rights (Invoke-KitDeElevated); if that cannot start,
+    it runs in the kit's own (elevated, same user) context.
+    @{ Status = done|current|dryrun|failed; Detail }.
+    #>
+    param([switch]$DryRun, [scriptblock]$OnStatus)
+    $have = Test-KitClaudeCode
+    if ($have) { return @{ Status = 'current'; Detail = "already installed ($have)" } }
+    $de = Test-KitAdmin
+    if ($DryRun) { return @{ Status = 'dryrun'; Detail = "would run irm $($script:ClaudeInstallUrl) | iex in a child PowerShell$(if ($de) { ' at normal user rights' })" } }
+    if ($OnStatus) { try { & $OnStatus 'installing Claude Code (official installer, about a minute)' } catch {} }
+    $argList = Get-KitRemoteScriptArgs -Url $script:ClaudeInstallUrl
+    Write-KitLog "essentials: Claude Code: irm $($script:ClaudeInstallUrl) | iex$(if ($de) { '  (de-elevated)' })"
+    $r = Invoke-KitChild -FilePath 'powershell.exe' -ArgumentList $argList -DeElevate:$de
+    if ($de -and -not $r.Started) {
+        Write-KitLog "  could not drop administrator rights ($(@($r.Err) -join ' ')) - running the installer in this (same user) context"
+        $r = Invoke-KitProcess -FilePath 'powershell.exe' -ArgumentList $argList
+    }
+    $out = @(@($r.Out) + @($r.Err))
+    foreach ($l in ($out | Where-Object { "$_".Trim() } | Select-Object -Last 15)) { Write-KitLog "  | $l" }
+    Write-KitLog "  exit $($r.Ec)"
+    Update-KitPath
+    $have = Test-KitClaudeCode
+    if ($have) {
+        $v = ''
+        try { $vr = Invoke-KitProcess -FilePath $have -ArgumentList @('--version'); if ($vr.Started) { $v = Get-KitVersionText ((@($vr.Out) + @($vr.Err)) -join ' ') } } catch {}
+        return @{ Status = 'done'; Detail = $(if ($v) { "installed $v" } else { 'installed' }) }
+    }
+    $why = Get-KitFailLine -Out $out
+    if (-not $why) { $why = "installer exit $($r.Ec)" }
+    return @{ Status = 'failed'; Detail = $why }
+}
+
+# ---------------------------------------------------------------- one essentials step (the loader calls these in order)
+
+function Invoke-KitEssential {
+    <#
+    .SYNOPSIS
+        Run one essentials step: claude | font | terminal-settings | default-terminal.
+        Returns @{ Name; Label; Status = done|current|dryrun|failed|skipped; Detail }.
+        Never throws.
+    .PARAMETER TerminalPresent
+        Windows Terminal is installed (terminal-settings and default-terminal skip otherwise).
+    .PARAMETER PwshPresent
+        PowerShell 7 is installed (else the Claude Code profile is added but not made the default).
+    #>
+    param([Parameter(Mandatory)][ValidateSet('claude', 'font', 'terminal-settings', 'default-terminal')][string]$Name,
+        [string]$KitRoot, [switch]$DryRun, [bool]$TerminalPresent = $true, [bool]$PwshPresent = $true, [scriptblock]$OnStatus)
+    $label = $script:EssentialLabels[$Name]
+    $out = @{ Name = $Name; Label = $label; Status = 'failed'; Detail = '' }
+    $sim = Get-KitEssentialSim -Name $Name
+    try {
+        if ($Name -in 'terminal-settings', 'default-terminal' -and -not $TerminalPresent) { $out.Status = 'skipped'; $out.Detail = 'Windows Terminal is not installed'; return $out }
+        if ($sim) {
+            switch ($sim) {
+                'present' { $out.Status = 'current'; $out.Detail = 'already there (simulated)' }
+                'fail'    { $out.Status = 'failed'; $out.Detail = 'simulated failure' }
+                default   { if ($DryRun) { $out.Status = 'dryrun'; $out.Detail = 'would set it up (simulated)' } else { $out.Status = 'done'; $out.Detail = 'simulated' } }
+            }
+            return $out
+        }
+        $r = $null
+        switch ($Name) {
+            'claude' { $r = Install-KitClaudeCode -DryRun:$DryRun -OnStatus $OnStatus }
+            'font' { $r = Install-KitNerdFont -DryRun:$DryRun -OnStatus $OnStatus }
+            'default-terminal' { $r = Set-KitDefaultTerminal -DryRun:$DryRun }
+            'terminal-settings' {
+                $cfg = $null; if ($KitRoot) { $cfg = Get-KitTerminalConfig -KitRoot $KitRoot }
+                if (-not $cfg) { $r = @{ Status = 'skipped'; Detail = 'no config/terminal.json' }; break }
+                $sd = $cfg['startingDirectory']; $prefer = '%OneDrive%\.playground'
+                if ($sd -is [System.Collections.IDictionary] -and $sd['prefer']) { $prefer = [string]$sd['prefer'] }
+                $start = Resolve-KitTerminalStartDir -Prefer $prefer -DryRun:$DryRun
+                $m = Merge-KitTerminalSettings -Path (Get-KitTerminalSettingsPath) -Desired $cfg -StartingDirectory $start.Path -NoFont:(-not (Test-KitNerdFont)) -NoDefaultProfile:(-not $PwshPresent) -DryRun:$DryRun
+                $r = @{ Status = $m.Status; Detail = $m.Detail }
+                if ($m.Backup) { $r.Detail += " (backup: $($m.Backup))" }
+                Write-KitRunLog "essentials: Terminal starting folder $($start.Path) ($($start.Source)$(if ($start.Created) { ', created' }))"
+            }
+        }
+        $out.Status = [string]$r.Status; $out.Detail = [string]$r.Detail
+    } catch { $out.Status = 'failed'; $out.Detail = "$($_.Exception.Message)" }
+    return $out
 }
 
 # ---------------------------------------------------------------- update everything (kit apps + the rest of the PC)
@@ -1872,4 +2435,8 @@ Export-ModuleMember -Function Initialize-Kit, Get-KitVersion, Get-KitUpdates, Ge
     Get-KitDevFolderPath, Invoke-KitDevFolder, Get-KitDriveType, Select-KitUbuntuDistro, ConvertFrom-KitWslText, Get-KitWslDistros, Test-KitRebootNeeded,
     Get-KitDetect, Test-KitCttProfile, Get-KitPwshProfilePath, Get-KitPwshPath, Get-KitLocalPrefs, Get-KitLocalPrefsFile, Set-KitLocalPref, Get-KitAutoInstallPwsh, Get-KitAiUpdateSet,
     Get-KitLocalSwitch, Get-KitElevateAtStart, Get-KitSessionUser, Test-KitDeElevate, Get-KitDeElevatedCommand, Invoke-KitDeElevated, Get-KitAutoPlan, Get-KitAutoExitCode,
-    ConvertFrom-KitWingetUpgradeText, Get-KitWingetPins, Get-KitCatalogUpdateSet, Get-KitUpdateAllPlan
+    ConvertFrom-KitWingetUpgradeText, Get-KitWingetPins, Get-KitCatalogUpdateSet, Get-KitUpdateAllPlan,
+    Get-KitAutoInstallEssentials, Invoke-KitEssential, Remove-KitJsonComments, ConvertFrom-KitJsoncText, ConvertTo-KitJsonPretty,
+    Get-KitTerminalSettingsPath, Get-KitTerminalConfig, Resolve-KitTerminalStartDir, Merge-KitTerminalSettings, Set-KitDefaultTerminal,
+    Test-KitNerdFont, Get-KitNerdFontRelease, Get-KitSha256FromList, Get-KitFileSha256, ConvertTo-KitFontRegName, Install-KitNerdFont,
+    Test-KitClaudeCode, Install-KitClaudeCode

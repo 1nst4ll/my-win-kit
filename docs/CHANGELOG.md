@@ -2,6 +2,57 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-26: essentials at start: PowerShell 7, Terminal, Claude Code, Nerd Font, Terminal settings, default terminal (kit v2.7.0, branch `essentials`)
+
+- Daniel: "go to stacy and copy settings for terminal app then analyze and tidy up and add to auto install upon the
+  start script together with ps7 and terminal so terminal opens the same way. Add there also claude cli. These are
+  absolute essentials for me on a new system and should be installed without asking."
+- **Before this branch:** PR #3 (kit v2.6.0) was merged into `main` (6b9fcc5) and published on 2026-11-26 with
+  Daniel's go ("merge 3"); the post-merge publish copied 7 files to OneDrive.
+- **Essentials step (`install.ps1`):** v2.5's automatic PowerShell 7 + Terminal install became one step that runs at
+  every start, after the elevate-once, without asking, in this order: PowerShell 7, Windows Terminal, **Claude Code
+  CLI**, **CaskaydiaCove Nerd Font**, **Windows Terminal settings**, **Windows Terminal as the default terminal app**.
+  Each step checks first and does nothing when done (a set-up PC adds about 0.3 s to the start-up); a failure prints
+  one line and the start-up carries on; Terminal, Claude Code and the font aren't retried the same day after a
+  failure (`loader.json`). `/auto` runs it too. The loader now imports `src/core.psm1` for these steps, and winget
+  runs through `Invoke-KitProcess` instead of `& winget`.
+- **One setting:** `autoInstallPwsh` → `autoInstallEssentials` (`config/settings.json`, default true; Settings row
+  "Install essentials on start (PS7, Terminal, Claude Code, font, Terminal settings)", classic `K`). The older name is
+  still read, shared and per PC, so a PC that turned it off stays off.
+- **Terminal settings from Stacy, tidied (`config/terminal.json`, new):** copied from Stacy's Windows Terminal 1.25
+  `settings.json`. Kept: a *Claude Code* profile as the default (same guid, `pwsh.exe -NoExit -Command claude`, robot
+  icon as a `\u` escape), profile defaults *Dark+*, `CaskaydiaCove Nerd Font Mono`, opacity 90, no acrylic; acrylic
+  tab row, no copy-on-select, plain-text copy; Ctrl+C copy, Ctrl+V paste, Alt+Shift+D duplicate pane; the
+  remaining-profiles new-tab menu. Tidied: the starting folder is `%OneDrive%\.playground` resolved on each PC (Stacy's
+  `D:\OneDrive\.playground` only exists there; the kit's dev folder when it doesn't exist); dropped the hard-coded
+  Command Prompt / PowerShell / Ubuntu-26.04 entries (Terminal generates them itself), `startOnUserLogin` (only in
+  Stacy's older backup), the profile's own copy of the starting folder and the empty `actions` / `schemes` / `themes`.
+  The merge keeps everything else in a PC's file, backs it up first (`settings.json.bak-my-win-kit-<date>`), writes
+  only when something changes, never overwrites a file it can't read, leaves the font out until the Nerd Font is
+  installed and keeps the PC's default profile while PowerShell 7 is missing. Read like the other config files
+  (GitHub → cache → bundled; the loader uses the cache or bundled copy).
+- **Claude Code CLI:** the catalogue's official `irm https://claude.ai/install.ps1 | iex` in a child PowerShell. The
+  installer only writes into the user's profile and Anthropic's setup page says "You do not need to run as
+  Administrator"; Claude Code then updates itself as the user. So an elevated kit runs it at the user's normal rights
+  (`Invoke-KitDeElevated`, falling back to the kit's own context, the same account). Catalogue Id 46 gets `NoAdmin`
+  and a Desc saying the loader installs it; it stays in Update AI tools.
+- **CaskaydiaCove Nerd Font:** `CascadiaCode.zip` from the latest `ryanoasis/nerd-fonts` release (GitHub API, no fixed
+  version; v3.5.1 today), checked against the SHA-256 GitHub publishes for the asset (`digest`), falling back to the
+  release's `SHA-256.txt`; not installed without a checksum. Regular + Mono TTFs; all users (`%WINDIR%\Fonts` + HKLM)
+  when elevated, else this user; skipped when the Mono face is already there.
+- **Default terminal:** `HKCU\Console\%%Startup` `DelegationConsole` / `DelegationTerminal` = Windows Terminal's GUIDs
+  (checked against Microsoft's Terminal group-policy page; the same values Stacy has), only after Terminal is installed.
+- **Fix:** the JSON writer read a key named `keys` (Terminal key bindings) as the dictionary's own key list; it now
+  uses `PSBase.Keys` / `.Values` / `.Count`. Plain ASCII strings skip the character-by-character escape loop.
+- **Tests:** test-core (merge on scratch files: fresh, comments + trailing comma + other profiles kept, backup,
+  idempotent, dry run, unparsable file left alone, `-NoFont` / `-NoDefaultProfile`, old-style profile list;
+  starting-folder fallback; default terminal through a registry stub; Nerd Font detection, install from a local zip
+  into a scratch folder, latest-release parsing from a sample GitHub API answer; simulated steps; settings back-compat),
+  smoke-loader (order, all / partly present, a failure carries on and isn't retried the same day, dry run, `/auto`,
+  setting off = none run; new `MYWINKIT_SIMULATE_ESSENTIALS` / `MYWINKIT_SIMULATE_FAIL`; without them the new steps are
+  skipped in test mode), test-config (terminal.json canonical, ASCII, no personal data, cached), smoke-tui (new
+  Settings row). Nothing touched this PC's Terminal settings, fonts or registry.
+
 ## 2026-11-26: admin once at start, unattended `/auto`, Update menu (everything + AI tools), NoAdmin installs (kit v2.6.0, branch `elevate-auto`)
 
 - Daniel: "any way the script could work unattended and not show security prompts, start in admin mode?" He chose

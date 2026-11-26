@@ -120,29 +120,33 @@ Check (Test-KitRebootNeeded -ExitCode 3010 -Out @()) 'reboot: exit 3010'
 Check (Test-KitRebootNeeded -ExitCode 0 -Out @('The requested operation is successful. Changes will not be effective until the system is rebooted.')) 'reboot: "until the system is rebooted"'
 Check (-not (Test-KitRebootNeeded -ExitCode 0 -Out @('Checking for updates.', 'The most recent version of Windows Subsystem for Linux is already installed.'))) 'reboot: not for an up-to-date wsl --update'
 
-Write-Host 'per-PC preference: autoInstallPwsh (local override > settings.json > on):'
-$a = Get-KitAutoInstallPwsh
-# -Online reads settings.json from GitHub main, which may not have the key yet ('default')
+Write-Host 'per-PC preference: autoInstallEssentials (local override > settings.json > on; older name autoInstallPwsh still read):'
+$a = Get-KitAutoInstallEssentials
 Check ($a.On -and $a.Source -in 'shared', 'default') "no local choice -> settings.json value, else on ($($a.On), $($a.Source))"
-Set-KitLocalPref -Name 'autoInstallPwsh' -Value $false
-$a = Get-KitAutoInstallPwsh
+Set-KitLocalPref -Name 'autoInstallEssentials' -Value $false
+$a = Get-KitAutoInstallEssentials
 Check (-not $a.On -and $a.Source -eq 'this PC') "local choice off wins over the shared on ($($a.On), $($a.Source))"
 $lf = Get-KitLocalPrefsFile
-Check ($lf -like "$($env:MYWINKIT_STATE_DIR)*" -and ([IO.File]::ReadAllText($lf)) -eq "{`n  `"autoInstallPwsh`": false`n}`n") 'stored in the state folder (local-settings.json, canonical JSON), not in config/'
-Set-KitLocalPref -Name 'autoInstallPwsh' -Value $true
-Check ((Get-KitAutoInstallPwsh).On) 'local choice back on'
+Check ($lf -like "$($env:MYWINKIT_STATE_DIR)*" -and ([IO.File]::ReadAllText($lf)) -eq "{`n  `"autoInstallEssentials`": false`n}`n") 'stored in the state folder (local-settings.json, canonical JSON), not in config/'
+Remove-Item -LiteralPath $lf -Force
+Set-KitLocalPref -Name 'autoInstallPwsh' -Value $false
+Check (-not (Get-KitAutoInstallEssentials).On -and -not (Get-KitAutoInstallPwsh).On) 'back-compat: an older local autoInstallPwsh = false still turns the essentials off'
+Set-KitLocalPref -Name 'autoInstallEssentials' -Value $true
+Check ((Get-KitAutoInstallEssentials).On -and (Get-KitAutoInstallEssentials).Source -eq 'this PC') 'the new name wins over the older one (local choice back on)'
+$sj = ConvertFrom-KitJsonText ([IO.File]::ReadAllText((Join-Path $root 'config\settings.json')))
+Check ($sj.Contains('autoInstallEssentials') -and $sj['autoInstallEssentials'] -eq $true -and -not $sj.Contains('autoInstallPwsh')) 'config/settings.json: autoInstallEssentials = true (replaces autoInstallPwsh)'
 
 Write-Host 'per-PC preference: elevateAtStart (local override > settings.json > on):'
 $e = Get-KitElevateAtStart
 Check ($e.On -and $e.Source -in 'shared', 'default') "no local choice -> settings.json value, else on ($($e.On), $($e.Source))"
 Set-KitLocalPref -Name 'elevateAtStart' -Value $false
 $e = Get-KitElevateAtStart
-Check (-not $e.On -and $e.Source -eq 'this PC' -and (Get-KitAutoInstallPwsh).On) "local choice off wins, autoInstallPwsh untouched ($($e.On), $($e.Source))"
+Check (-not $e.On -and $e.Source -eq 'this PC' -and (Get-KitAutoInstallEssentials).On) "local choice off wins, autoInstallEssentials untouched ($($e.On), $($e.Source))"
 Set-KitLocalPref -Name 'elevateAtStart' -Value $true
 
 Write-Host 'NoAdmin: installers that must not run as administrator (de-elevated from an elevated kit):'
 $noAdmin = @($cat | Where-Object NoAdmin | ForEach-Object Id | Sort-Object)
-Check (($noAdmin -join ',') -eq '10,36,38,53') "NoAdmin set = OneDrive, VS Code, GitHub Desktop, Cursor ($(@($cat | Where-Object NoAdmin | ForEach-Object Name) -join ', '))"
+Check (($noAdmin -join ',') -eq '10,36,38,46,53') "NoAdmin set = OneDrive, VS Code, GitHub Desktop, Claude Code CLI, Cursor ($(@($cat | Where-Object NoAdmin | ForEach-Object Name) -join ', '))"
 Check (@($cat | Where-Object { $_.NoAdmin -and ($_.Interactive -or $_.Elevated) }).Count -eq 0) 'NoAdmin is never on an Interactive or Elevated item'
 $vs = $byId[36]; $np = $byId[2]
 Check (Test-KitDeElevate -Package $vs -IsAdmin $true) 'routing: NoAdmin + elevated kit -> de-elevated'
@@ -297,6 +301,156 @@ $m = [uint32]0; [void][T.C]::GetConsoleMode($h, [ref]$m); [void][T.C]::SetConsol
         Write-Host '  skip  console-mode checks (output is not a console; run in a console window to include them)' -ForegroundColor DarkGray
     }
 } finally { Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
+Write-Host 'essentials: Windows Terminal settings merge (scratch files only, never this PC''s Terminal):'
+$wt = Join-Path $env:MYWINKIT_STATE_DIR 'wt'
+New-Item -ItemType Directory -Path $wt -Force | Out-Null
+$claudeGuid = '{b7a91c2d-4e83-4f6a-9d25-1c3f8ae60b74}'
+$desired = ConvertFrom-KitJsonText ([IO.File]::ReadAllText((Join-Path $root 'config\terminal.json')))
+Check ($desired['defaultProfile'] -eq $claudeGuid -and @($desired['profiles'])[0]['guid'] -eq $claudeGuid) 'config/terminal.json: the Claude Code profile is the default profile'
+# a fresh PC: Terminal never started, no settings.json yet
+$f1 = Join-Path $wt 'fresh\settings.json'
+$r = Merge-KitTerminalSettings -Path $f1 -Desired $desired -StartingDirectory 'C:\dev\git'
+$d = ConvertFrom-KitJsoncText ([IO.File]::ReadAllText($f1))
+$list = @($d['profiles']['list'])
+Check ($r.Status -eq 'done' -and $d['defaultProfile'] -eq $claudeGuid -and $list.Count -eq 1 -and $list[0]['name'] -eq 'Claude Code' -and $list[0]['commandline'] -eq 'pwsh.exe -NoExit -Command claude') "fresh: settings.json created with the Claude Code profile as default ($($r.Detail))"
+Check ($d['profiles']['defaults']['font']['face'] -eq 'CaskaydiaCove Nerd Font Mono' -and $d['profiles']['defaults']['colorScheme'] -eq 'Dark+' -and $d['profiles']['defaults']['opacity'] -eq 90 -and $d['profiles']['defaults']['startingDirectory'] -eq 'C:\dev\git') 'fresh: profile defaults (font, Dark+, opacity 90, starting folder)'
+Check (@($d['keybindings']).Count -eq 3 -and $d['copyOnSelect'] -eq $false -and $d['useAcrylicInTabRow'] -eq $true -and @($d['newTabMenu'])[0]['type'] -eq 'remainingProfiles') 'fresh: globals + 3 key bindings'
+Check ($list[0]['icon'] -eq ([string][char]0xD83E + [char]0xDD16) -and -not ([IO.File]::ReadAllText($f1) -match '[^\x00-\x7F]')) 'fresh: robot icon kept, file stays ASCII (\u escapes)'
+Check (@(Get-ChildItem -LiteralPath (Split-Path $f1) -Filter '*.bak-my-win-kit-*').Count -eq 0) 'fresh: no backup for a new file'
+# an existing file with comments, a trailing comma, other profiles, schemes and actions
+$f2 = Join-Path $wt 'existing\settings.json'
+New-Item -ItemType Directory -Path (Split-Path $f2) -Force | Out-Null
+$sample = @'
+// Terminal settings with comments
+{
+    "$schema": "https://aka.ms/terminal-profiles-schema",
+    "defaultProfile": "{61c54bbd-c2c6-5271-96e7-009a87ff44bf}", // Windows PowerShell
+    /* a block comment */
+    "theme": "dark",
+    "actions": [ { "command": { "action": "copy", "singleLine": false }, "id": "User.copy.644BA8F2" } ],
+    "keybindings": [ { "id": "User.copy.644BA8F2", "keys": "ctrl+c" }, { "id": "Terminal.FindText", "keys": "ctrl+shift+f" } ],
+    "profiles": {
+        "defaults": { "font": { "size": 11 }, "opacity": 100 },
+        "list": [
+            { "guid": "{61c54bbd-c2c6-5271-96e7-009a87ff44bf}", "name": "Windows PowerShell", "commandline": "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "hidden": false },
+            { "guid": "{b7a91c2d-4e83-4f6a-9d25-1c3f8ae60b74}", "name": "Claude Code", "commandline": "old", "tabTitle": "mine" },
+        ]
+    },
+    "schemes": [ { "name": "Mine // not a comment", "background": "#000000" } ]
+}
+'@
+[IO.File]::WriteAllText($f2, $sample)
+$r = Merge-KitTerminalSettings -Path $f2 -Desired $desired -StartingDirectory 'D:\dev\git'
+$d = ConvertFrom-KitJsoncText ([IO.File]::ReadAllText($f2))
+$list = @($d['profiles']['list'])
+$cl = @($list | Where-Object { $_['guid'] -eq $claudeGuid })
+Check ($r.Status -eq 'done' -and $r.Backup -and ([IO.File]::ReadAllText($r.Backup)) -eq $sample -and (Split-Path -Leaf $r.Backup) -like 'settings.json.bak-my-win-kit-2*') "existing: backed up first ($(Split-Path -Leaf $r.Backup))"
+Check ($d['theme'] -eq 'dark' -and @($d['schemes'])[0]['name'] -eq 'Mine // not a comment' -and @($d['actions']).Count -eq 1 -and $list.Count -eq 2 -and @($list | Where-Object { $_['name'] -eq 'Windows PowerShell' }).Count -eq 1) 'existing: other profiles, schemes, actions, theme kept (comments and a trailing comma read fine)'
+Check ($cl.Count -eq 1 -and $cl[0]['commandline'] -eq 'pwsh.exe -NoExit -Command claude' -and $cl[0]['tabTitle'] -eq 'mine' -and $d['defaultProfile'] -eq $claudeGuid) 'existing: the Claude Code profile updated by guid (own keys kept), made the default'
+Check ($d['profiles']['defaults']['font']['size'] -eq 11 -and $d['profiles']['defaults']['font']['face'] -eq 'CaskaydiaCove Nerd Font Mono' -and $d['profiles']['defaults']['opacity'] -eq 90) 'existing: profile defaults merged (font size kept, face set, opacity 90)'
+$kb = @($d['keybindings'])
+Check ($kb.Count -eq 4 -and @($kb | Where-Object { $_['keys'] -eq 'ctrl+c' }).Count -eq 1 -and @($kb | Where-Object { $_['keys'] -eq 'ctrl+c' })[0]['id'] -eq 'Terminal.CopyToClipboard' -and @($kb | Where-Object { $_['id'] -eq 'Terminal.FindText' }).Count -eq 1) 'existing: key bindings merged by id (ctrl+c re-bound, others kept)'
+$t2 = [IO.File]::ReadAllText($f2); $baks = @(Get-ChildItem -LiteralPath (Split-Path $f2) -Filter '*.bak-my-win-kit-*').Count
+$r = Merge-KitTerminalSettings -Path $f2 -Desired $desired -StartingDirectory 'D:\dev\git'
+Check ($r.Status -eq 'current' -and [IO.File]::ReadAllText($f2) -eq $t2 -and @(Get-ChildItem -LiteralPath (Split-Path $f2) -Filter '*.bak-my-win-kit-*').Count -eq $baks) 'idempotent: second run = no write, no new backup'
+$r = Merge-KitTerminalSettings -Path $f2 -Desired $desired -StartingDirectory 'E:\elsewhere' -DryRun
+Check ($r.Status -eq 'dryrun' -and [IO.File]::ReadAllText($f2) -eq $t2 -and $r.Detail -like '*startingDirectory*') "dry run: says what would change, writes nothing ($($r.Detail))"
+$f3 = Join-Path $wt 'broken\settings.json'
+New-Item -ItemType Directory -Path (Split-Path $f3) -Force | Out-Null
+[IO.File]::WriteAllText($f3, '{ "profiles": [ broken')
+$r = Merge-KitTerminalSettings -Path $f3 -Desired $desired
+Check ($r.Status -eq 'failed' -and [IO.File]::ReadAllText($f3) -eq '{ "profiles": [ broken') "a file that does not parse is never overwritten ($($r.Detail))"
+$f4 = Join-Path $wt 'nofont\settings.json'
+$r = Merge-KitTerminalSettings -Path $f4 -Desired $desired -NoFont -NoDefaultProfile
+$d = ConvertFrom-KitJsoncText ([IO.File]::ReadAllText($f4))
+Check (-not $d['profiles']['defaults'].Contains('font') -and -not $d.Contains('defaultProfile') -and @($d['profiles']['list']).Count -eq 1) '-NoFont (Nerd Font missing) / -NoDefaultProfile (no PowerShell 7): left out'
+$legacy = Join-Path $wt 'legacy\settings.json'
+New-Item -ItemType Directory -Path (Split-Path $legacy) -Force | Out-Null
+[IO.File]::WriteAllText($legacy, '{ "profiles": [ { "guid": "{0caa0dad-35be-5f56-a8ff-afceeeaa6101}", "name": "cmd" } ] }')
+$r = Merge-KitTerminalSettings -Path $legacy -Desired $desired
+$d = ConvertFrom-KitJsoncText ([IO.File]::ReadAllText($legacy))
+Check ($r.Status -eq 'done' -and @($d['profiles']['list']).Count -eq 2 -and $d['profiles']['defaults'] -is [System.Collections.IDictionary]) 'old-style profiles list: wrapped into { defaults, list }, entries kept'
+
+Write-Host 'essentials: Terminal starting folder:'
+$od = Join-Path $wt 'od'
+$env:MYWINKIT_TEST_OD = $od
+$s1 = Resolve-KitTerminalStartDir -Prefer '%MYWINKIT_TEST_OD%\.playground' -Fallback (Join-Path $wt 'devgit') -DryRun
+Check ($s1.Source -eq 'fallback' -and $s1.Path -eq (Join-Path $wt 'devgit') -and -not (Test-Path -LiteralPath (Join-Path $wt 'devgit'))) "%OneDrive%\.playground missing -> the dev folder (dry run: not created)"
+$s1 = Resolve-KitTerminalStartDir -Prefer '%MYWINKIT_TEST_OD%\.playground' -Fallback (Join-Path $wt 'devgit')
+Check ($s1.Source -eq 'fallback' -and $s1.Created -and (Test-Path -LiteralPath (Join-Path $wt 'devgit'))) 'missing dev folder is created'
+New-Item -ItemType Directory -Path (Join-Path $od '.playground') -Force | Out-Null
+$s1 = Resolve-KitTerminalStartDir -Prefer '%MYWINKIT_TEST_OD%\.playground' -Fallback (Join-Path $wt 'devgit')
+Check ($s1.Source -eq 'prefer' -and $s1.Path -eq (Join-Path $od '.playground')) 'the playground folder wins when it exists'
+$s1 = Resolve-KitTerminalStartDir -Prefer '%MYWINKIT_NO_SUCH_VAR%\.playground' -Fallback (Join-Path $wt 'devgit')
+Check ($s1.Source -eq 'fallback') 'an unset variable (no OneDrive) -> the dev folder'
+Remove-Item Env:MYWINKIT_TEST_OD
+Check ((Get-KitDevFolderPath -DDriveType 'Fixed') -eq 'D:\dev\git') 'default fallback = the dev folder logic (Id 60)'
+
+Write-Host 'essentials: default terminal app (registry through a stub, never the real one):'
+$reg = @{}
+$stub = @{ Read = { param($n) [string]$reg[$n] }.GetNewClosure(); Write = { param($n, $v) $reg[$n] = $v }.GetNewClosure() }
+$r = Set-KitDefaultTerminal -Registry $stub -DryRun
+Check ($r.Status -eq 'dryrun' -and $reg.Count -eq 0) "dry run writes nothing ($($r.Detail))"
+$r = Set-KitDefaultTerminal -Registry $stub
+Check ($r.Status -eq 'done' -and $reg['DelegationConsole'] -eq '{2EACA947-7F5F-4CFA-BA87-8F7FBEEFBE69}' -and $reg['DelegationTerminal'] -eq '{E12CFF52-A866-4C77-9A90-F570A7AA2C6B}') 'sets DelegationConsole + DelegationTerminal to Windows Terminal (stable)'
+$reg['Touched'] = 'no'
+$r = Set-KitDefaultTerminal -Registry $stub
+Check ($r.Status -eq 'current' -and $reg.Count -eq 3) 'already set -> current, no write'
+$reg['DelegationTerminal'] = '{86633F1F-6454-40EC-89CE-DA4EBA977EE2}'
+$r = Set-KitDefaultTerminal -Registry $stub
+Check ($r.Status -eq 'done' -and $reg['DelegationTerminal'] -eq '{E12CFF52-A866-4C77-9A90-F570A7AA2C6B}') 'another terminal (Preview) -> switched to Windows Terminal'
+
+Write-Host 'essentials: CaskaydiaCove Nerd Font:'
+$fd = Join-Path $wt 'fonts'; New-Item -ItemType Directory -Path $fd -Force | Out-Null
+Check (-not (Test-KitNerdFont -FontDirs @($fd) -RegistryNames @())) 'not installed: empty fonts folder, no registry entry'
+Check ([bool](Test-KitNerdFont -FontDirs @($fd) -RegistryNames @('Consolas (TrueType)', 'CaskaydiaCove Nerd Font Mono Bold (TrueType)'))) 'installed: a Fonts registry entry names CaskaydiaCove Nerd Font Mono'
+Check (-not (Test-KitNerdFont -FontDirs @($fd) -RegistryNames @('CaskaydiaCove Nerd Font Propo (TrueType)'))) 'the Propo variant alone does not count'
+[IO.File]::WriteAllText((Join-Path $fd 'CaskaydiaCoveNerdFontMono-Regular.ttf'), 'x')
+Check ((Test-KitNerdFont -FontDirs @($fd) -RegistryNames @()) -like '*CaskaydiaCoveNerdFontMono-Regular.ttf') 'installed: the Mono file is in a fonts folder'
+Check ((ConvertTo-KitFontRegName 'CaskaydiaCoveNerdFontMono-BoldItalic.ttf') -eq 'CaskaydiaCove Nerd Font Mono Bold Italic (TrueType)' -and (ConvertTo-KitFontRegName 'CaskaydiaCoveNerdFont-Regular.ttf') -eq 'CaskaydiaCove Nerd Font (TrueType)') 'registry names from file names'
+$relJson = '{ "tag_name": "v3.5.1", "assets": [ { "name": "CascadiaCode.tar.xz", "size": 1, "browser_download_url": "https://github.com/ryanoasis/nerd-fonts/releases/download/v3.5.1/CascadiaCode.tar.xz", "digest": "sha256:ae598e9401e2846aa3ee364513715de0490b844a4b54f0768991f45f23aa8369" }, { "name": "CascadiaCode.zip", "size": 56585471, "browser_download_url": "https://github.com/ryanoasis/nerd-fonts/releases/download/v3.5.1/CascadiaCode.zip", "digest": "sha256:1298BF92698AFA06185CF1D05E6AE05F2D8A1E8C3CB45DDF4C3035168AB342A1" }, { "name": "SHA-256.txt", "size": 11898, "browser_download_url": "https://github.com/ryanoasis/nerd-fonts/releases/download/v3.5.1/SHA-256.txt" } ] }'
+$rel = Get-KitNerdFontRelease -Json $relJson
+Check ($rel.Tag -eq 'v3.5.1' -and $rel.Url -eq 'https://github.com/ryanoasis/nerd-fonts/releases/download/v3.5.1/CascadiaCode.zip' -and $rel.Sha256 -eq '1298bf92698afa06185cf1d05e6ae05f2d8a1e8c3cb45ddf4c3035168ab342a1' -and $rel.ChecksumUrl -like '*/SHA-256.txt' -and $rel.Size -eq 56585471) 'latest release: CascadiaCode.zip URL + published SHA-256 from the GitHub API answer'
+$rel = Get-KitNerdFontRelease -Json ($relJson -replace ', "digest": "sha256:1298[0-9A-F]+"', '')
+Check ($rel.Sha256 -eq '' -and $rel.ChecksumUrl) 'no digest on the asset -> falls back to the release''s SHA-256.txt'
+$threw = $false; try { [void](Get-KitNerdFontRelease -Json '{ "tag_name": "v9", "assets": [] }') } catch { $threw = $true }
+Check $threw 'a release without CascadiaCode.zip -> error (nothing installed)'
+Check ((Get-KitSha256FromList -Text "ae598e9401e2846aa3ee364513715de0490b844a4b54f0768991f45f23aa8369  CascadiaCode.tar.xz`n1298bf92698afa06185cf1d05e6ae05f2d8a1e8c3cb45ddf4c3035168ab342a1  CascadiaCode.zip`n" -Name 'CascadiaCode.zip') -eq '1298bf92698afa06185cf1d05e6ae05f2d8a1e8c3cb45ddf4c3035168ab342a1') 'SHA-256.txt: the line for CascadiaCode.zip'
+# install from a local zip into a scratch fonts folder (no network, no real registry)
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$zsrc = Join-Path $wt 'zipsrc'; New-Item -ItemType Directory -Path (Join-Path $zsrc 'sub') -Force | Out-Null
+foreach ($n in 'CaskaydiaCoveNerdFontMono-Regular.ttf', 'CaskaydiaCoveNerdFontMono-Bold.ttf', 'CaskaydiaCoveNerdFont-Regular.ttf', 'CaskaydiaCoveNerdFontPropo-Regular.ttf', 'README.md') { [IO.File]::WriteAllText((Join-Path $zsrc "sub\$n"), $n) }
+$zip = Join-Path $wt 'CascadiaCode.zip'
+[IO.Compression.ZipFile]::CreateFromDirectory($zsrc, $zip)
+$fd2 = Join-Path $wt 'fonts2'
+$freg = @{}
+$fstub = @{ Read = { param($n) [string]$freg[$n] }.GetNewClosure(); Write = { param($n, $v) $freg[$n] = $v }.GetNewClosure() }
+$r = Install-KitNerdFont -ZipPath $zip -FontDir $fd2 -Registry $fstub -IsAdmin $false -DryRun
+Check ($r.Status -eq 'dryrun' -and -not (Test-Path -LiteralPath $fd2)) "dry run: nothing copied ($($r.Detail))"
+$r = Install-KitNerdFont -ZipPath $zip -FontDir $fd2 -Registry $fstub -IsAdmin $false
+$copied = @(Get-ChildItem -LiteralPath $fd2 -File | ForEach-Object Name)
+Check ($r.Status -eq 'done' -and $copied.Count -eq 3 -and $copied -contains 'CaskaydiaCoveNerdFont-Regular.ttf' -and $copied -contains 'CaskaydiaCoveNerdFontMono-Bold.ttf' -and $copied -contains 'CaskaydiaCoveNerdFontMono-Regular.ttf' -and $freg.Count -eq 3 -and $freg['CaskaydiaCove Nerd Font Mono (TrueType)'] -eq (Join-Path $fd2 'CaskaydiaCoveNerdFontMono-Regular.ttf')) "install: Mono + regular TTFs copied and registered, Propo/README left out ($($r.Detail))"
+$r = Install-KitNerdFont -ZipPath $zip -FontDir $fd2 -Registry $fstub -IsAdmin $false
+Check ($r.Status -eq 'current') 'second run: already installed, skipped'
+
+Write-Host 'essentials: steps (simulated, nothing on this PC is read or changed):'
+$keepSim = @{}; foreach ($n in 'MYWINKIT_SIMULATE_ESSENTIALS', 'MYWINKIT_SIMULATE_FAIL', 'MYWINKIT_SIMULATE_INSTALL') { $keepSim[$n] = [Environment]::GetEnvironmentVariable($n) }
+$env:MYWINKIT_SIMULATE_INSTALL = ''; $env:MYWINKIT_SIMULATE_FAIL = ''
+$env:MYWINKIT_SIMULATE_ESSENTIALS = 'present'
+Check ((@('claude', 'font', 'terminal-settings', 'default-terminal' | ForEach-Object { (Invoke-KitEssential -Name $_ -KitRoot $root).Status }) -join ',') -eq 'current,current,current,current') 'all present -> every step current (skipped)'
+$env:MYWINKIT_SIMULATE_ESSENTIALS = 'claude'
+$env:MYWINKIT_SIMULATE_FAIL = 'font'
+Check ((@('claude', 'font', 'terminal-settings', 'default-terminal' | ForEach-Object { (Invoke-KitEssential -Name $_ -KitRoot $root).Status }) -join ',') -eq 'current,failed,done,done') 'claude present, font fails, the rest still run'
+Check ((Invoke-KitEssential -Name 'terminal-settings' -KitRoot $root -TerminalPresent $false).Status -eq 'skipped' -and (Invoke-KitEssential -Name 'default-terminal' -KitRoot $root -TerminalPresent $false).Status -eq 'skipped') 'no Windows Terminal -> its settings and the default-terminal step are skipped'
+Check ((Invoke-KitEssential -Name 'default-terminal' -KitRoot $root -DryRun).Status -eq 'dryrun') 'dry run -> dryrun (nothing simulated as done)'
+foreach ($n in $keepSim.Keys) { [Environment]::SetEnvironmentVariable($n, $keepSim[$n]) }
+$tc = Get-KitTerminalConfig -KitRoot $root
+Check ($tc -and $tc['defaultProfile'] -eq $claudeGuid) 'Get-KitTerminalConfig reads config/terminal.json (cache -> bundled)'
+$keepWt = $env:MYWINKIT_WT_SETTINGS; $env:MYWINKIT_WT_SETTINGS = Join-Path $wt 'x.json'
+Check ((Get-KitTerminalSettingsPath) -eq (Join-Path $wt 'x.json')) 'MYWINKIT_WT_SETTINGS redirects the Terminal settings file (tests)'
+$env:MYWINKIT_WT_SETTINGS = $keepWt
+Check ((Get-KitTerminalSettingsPath) -like '*Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json' -or (Get-KitTerminalSettingsPath) -like '*Microsoft\Windows Terminal\settings.json') 'default: the Terminal package''s LocalState\settings.json'
+
 Remove-Item -LiteralPath $env:MYWINKIT_STATE_DIR -Recurse -Force -ErrorAction SilentlyContinue
 $env:MYWINKIT_STATE_DIR = $keepState
 $env:MYWINKIT_CONFIG_URL = $keepCfg
