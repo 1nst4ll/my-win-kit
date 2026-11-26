@@ -604,6 +604,29 @@ $keepOut = $env:MYWINKIT_SIMULATE_OUTCOME; $env:MYWINKIT_SIMULATE_OUTCOME = '2=b
 $r1 = Invoke-KitPackage -Package $byId[2] -DryRun; $r2 = Invoke-KitPackage -Package $byId[3] -DryRun; $r3 = Invoke-KitPackage -Package $byId[1] -DryRun
 Check ($r1.Status -eq 'blocked' -and $r2.Status -eq 'restart' -and $r3.Status -eq 'dryrun') 'MYWINKIT_SIMULATE_OUTCOME (dry run only) gives the menus a blocked / restart result to show'
 $env:MYWINKIT_SIMULATE_OUTCOME = $keepOut
+Write-Host 'Process time limit + Hermes detect (scan hang fix):'
+$sw = [Diagnostics.Stopwatch]::StartNew()
+$tr = Invoke-KitProcess -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep 30') -TimeoutSec 2
+$tsec = $sw.Elapsed.TotalSeconds
+Check ($tr['TimedOut'] -and $tr.Started -and $tr.Ec -ne 0 -and $tsec -lt 12) ("-TimeoutSec 2 on a 30 s child: TimedOut after {0:N1} s" -f $tsec)
+Check ((@($tr.Err) -join ' ').Contains('timed out after 2 s')) 'the timeout is named in Err'
+$nr = Invoke-KitProcess -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-Command', 'exit 3') -TimeoutSec 30
+Check ($nr.Ec -eq 3 -and -not $nr['TimedOut']) "a child that exits in time keeps its exit code ($($nr.Ec))"
+Check ($byId[56].Detect -eq 'hermes') 'Hermes (56) uses Detect hermes, never hermes --version (that runs a git fetch that can hang)'
+$keepLad = $env:LOCALAPPDATA
+$fakeLad = Join-Path ([IO.Path]::GetTempPath()) ('mwk-lad-' + [guid]::NewGuid())
+try {
+    $env:LOCALAPPDATA = $fakeLad
+    Check ($null -eq (Get-KitDetect -Name 'hermes')) 'Hermes detect: no folder = not installed'
+    New-Item -ItemType Directory -Path (Join-Path $fakeLad 'hermes\hermes-agent') -Force | Out-Null
+    Check ('' -eq (Get-KitDetect -Name 'hermes')) 'Hermes detect: folder without package metadata = installed, version unknown'
+    New-Item -ItemType Directory -Path (Join-Path $fakeLad 'hermes\hermes-agent\venv\Lib\site-packages\hermes_agent-0.16.0.dist-info') -Force | Out-Null
+    $hv = Get-KitDetect -Name 'hermes'
+    Check ($hv -eq '0.16.0') "Hermes detect: version from hermes_agent-*.dist-info ($hv)"
+    $hv2 = Get-KitToolVersion -Package $byId[56]
+    Check ($hv2 -eq '0.16.0') "Get-KitToolVersion uses the detect, not hermes --version ($hv2)"
+} finally { $env:LOCALAPPDATA = $keepLad; Remove-Item -LiteralPath $fakeLad -Recurse -Force -ErrorAction SilentlyContinue }
+
 Check ((Split-Path -Leaf (Start-KitLog)) -match "^install-\d{8}-\d{6}-$PID\.log$") 'install log name carries the PID (two runs in one second get two files)'
 
 Remove-Item -LiteralPath $env:MYWINKIT_STATE_DIR -Recurse -Force -ErrorAction SilentlyContinue

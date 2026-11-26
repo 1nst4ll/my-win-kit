@@ -2,6 +2,21 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-26: v2.8.1 (branch `fix/scan-hang`): the scan no longer hangs on Hermes
+
+- Daniel: "the update is stuck on Checking what's installed" on a laptop. Cause, checked over ssh: the scan ran
+  `hermes --version`, which runs `git fetch origin` (its update check) with Python's `subprocess.run(timeout=10)`.
+  On Windows that timeout kills only `git.exe`; `git-remote-https`/`index-pack` keep the pipes open, so Hermes waits
+  for the whole fetch. The install is a shallow clone, so the fetch pulls ~690k objects and never finishes; each
+  abandoned try left a `tmp_pack_*` file behind (2.05 GB on that laptop). `Invoke-KitProcess` had no time limit.
+- `Invoke-KitProcess -TimeoutSec`: on timeout the process tree is killed (`taskkill /T /F`) and the result carries
+  `TimedOut`. Scans and read-only probes now pass limits (see architecture.md → Child processes); installs and
+  updates still wait without one.
+- New `Detect` key `hermes` (catalogue Id 56): reads the version from Hermes's `hermes_agent-*.dist-info` folder, no
+  child process. `Get-KitToolVersion` uses an entry's `Detect` first, so the post-update version check skips
+  `hermes --version` too.
+- Tests: test-core gains the time-limit and Hermes detect checks.
+
 ## 2026-11-26: session paused
 
 - Daniel: "commit and push and close this session". STATUS "Resume here" lists the open threads (Git upgrade blocked
