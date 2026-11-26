@@ -85,8 +85,16 @@ Front door: [README.md](README.md). Docs index and ownership map: [docs/architec
   dev/agent shells export to child windows. The kit's off switch is `MYWINKIT_NO_COLOR=1`.
 - **The TestConsole does not prove real-console rendering** (no cursor moves, no encoding, no colour detection).
   After changing the picker or console set-up, check a real 120 × 30 conhost window too (launch
-  `conhost.exe powershell.exe -File install.ps1 -DryRun`, drive it, screenshot). Any key-sending helper must find
-  the kit window by title and abort if it can't; never send keys blind.
+  `conhost.exe powershell.exe -File install.ps1 -DryRun`, drive it, screenshot).
+- **Key-sending targets only the window the helper started itself, never a title match.** Daniel often has his
+  own real kit window open on the same PC (a title match once sent Esc/q to it and quit his kit). A helper must:
+  1. start the window with `Start-Process -PassThru` and keep that PID;
+  2. resolve that process's own window handle: wait (with a timeout) for its `MainWindowHandle`, or find the
+     console window whose owner (`GetWindowThreadProcessId`) is that PID; abort if it can't;
+  3. before any key, check that window is in front (`GetForegroundWindow()` equals the saved handle) and
+     abort otherwise; never send keys blind or to "whatever has focus";
+  4. refuse to start if another window with the kit title exists and its own handle is not verified.
+  The title may confirm the handle; it never chooses it. Close only the window it started (by its PID).
 - **Config lives on GitHub, not in the deployed copies.** `config/catalog.json`, `settings.json` and
   `winget-id-overrides.json` on `main` are the single home; deployed copies only read them (raw URL → cache →
   bundled copy). Never write config into a deployed folder or OneDrive.

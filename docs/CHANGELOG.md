@@ -2,6 +2,32 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-25: failed winget upgrades are reported as failed, key-sending rule, kit v2.4.2 (branch `rebuild-tui`)
+
+- Daniel: "fix both and merge comit push to mainn".
+- **Bug (from Daniel's real run, `%TEMP%\my-win-kit\install-20261125-225808.log`):** Git 2.55.0.5 was
+  installed; `winget install --id Git.Git` found 2.56.1, the installer asked for admin and failed ("Installer
+  failed with exit code: 1"), winget exited `-1978335226` (`0x8A150006` SHELLEXEC_INSTALL_FAILED). The kit
+  counted it as ok/current because any non-zero exit on an installed app meant "up to date". Git stayed on
+  2.55.0.5.
+- **Fix (`src/core.psm1`):** new `Get-KitWingetOutcome` / `Get-KitWingetFailReason`. Only winget's "nothing to
+  do" codes count as current (named constants, codes from winget-cli `doc/windows/package-manager/winget/returnCodes.md`):
+  `0x8A15002B` UPDATE_NOT_APPLICABLE, `0x8A15004F` UPGRADE_VERSION_NOT_NEWER, `0x8A150061`
+  PACKAGE_ALREADY_INSTALLED, `0x8A15010E` INSTALL_DOWNGRADE. Every other non-zero exit is failed, with the output
+  line that names the problem plus the code ("Installer failed with exit code: 1 (winget 0x8A150006)").
+  Measured on this PC: `winget install` on an up-to-date app (GitHub CLI 2.106.0) exits `-1978335189`
+  (`0x8A15002B`), matching the "No available upgrade found" runs in earlier logs. An unknown ID on an installed
+  app (`0x8A150014` with no successor found) is now failed too, not current. A winget exit 0 whose version did
+  not move stays current but says so in `Detail` and the log.
+- Checked the other paths: script, direct (its winget fallback goes through the same code), npm and builtin
+  already report any non-zero exit as failed; the menus only display `Status`.
+- **Tests:** `test-core.ps1` unit-tests the classification without running winget (ok, the four current codes,
+  the Git failure output, ID not found, no output).
+- **CLAUDE.md:** a key-sending helper now targets only the window of the process it started itself (PID →
+  window handle, foreground check before every key), never a title match. A test driver had matched Daniel's own
+  kit window by title and sent it Esc/q. No helper exists under `tools/`.
+- Docs: architecture (winget exit classification), STATUS.
+
 ## 2026-11-25: child processes no longer garble the progress view, kit v2.4.1 (branch `rebuild-tui`)
 
 - Daniel, from a real run of the modern menu: "it display sone gibrish when downloading or checking sometimes does

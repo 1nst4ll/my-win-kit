@@ -77,7 +77,12 @@ No UI. Both menus call the same functions, so behaviour is identical in both.
 - **`Invoke-KitPackage -Package -Installed -Mode install|update -DryRun -OnStatus`** is the single entry point.
   It returns a result object (`Status` = installed | updated | current | done | failed | dryrun, `From`, `To`,
   `Detail`, `Healed`, `Seconds`) and writes everything to a log in `%TEMP%\my-win-kit\`. By method:
-  - **winget / msstore:** `winget install --exact --silent`. A non-zero exit on an installed app = up to date.
+  - **winget / msstore:** `winget install --exact --silent`. `Get-KitWingetOutcome` classifies the exit: 0 = ok
+    (then `winget list` reads the new version); only winget's "nothing to do" codes = up to date
+    (`0x8A15002B` UPDATE_NOT_APPLICABLE, `0x8A15004F` UPGRADE_VERSION_NOT_NEWER, `0x8A150061`
+    PACKAGE_ALREADY_INSTALLED, `0x8A15010E` INSTALL_DOWNGRADE; `$script:WG_NOTHING_TO_DO`). Any other non-zero
+    exit is **failed**, installed or not (e.g. an upgrade whose installer failed), with the output line that
+    names the problem plus the code as `Detail` ("Installer failed with exit code: 1 (winget 0x8A150006)").
     Self-healing: ID vanished (`0x8A150014`) → `Find-KitReplacementId` scores search hits (prefix/version
     split +6, same tail +4, exact name +3, pre-release −3; ≥ 3 wins) and retries; download dead (404, hash
     mismatch, nothing installed) → two previous versions, then the Store channel. Heals are saved on

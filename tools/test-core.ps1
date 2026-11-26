@@ -71,6 +71,28 @@ Check (Test-KitVersionCurrent -Installed '2.8.0' -Latest '2.8.0') 'version compa
 Check (-not (Test-KitVersionCurrent -Installed '2.5.5' -Latest '2.8.0')) 'version compare: older is not current'
 Check (Test-KitVersionCurrent -Installed '6.28899.6.0' -Latest '6.28899.6') 'version compare: trailing .0'
 
+Write-Host 'winget exit codes (Get-KitWingetOutcome, no winget run):'
+$o = Get-KitWingetOutcome -ExitCode 0 -Out @('Successfully installed')
+Check ($o.Status -eq 'ok') "exit 0 is ok ($($o.Status))"
+# Seen on this kit: `winget install` on an up-to-date app exits 0x8A15002B
+$o = Get-KitWingetOutcome -ExitCode -1978335189 -Out @('No available upgrade found.', 'No newer package versions are available from the configured sources.')
+Check ($o.Status -eq 'current') "0x8A15002B UPDATE_NOT_APPLICABLE is current ($($o.Status))"
+foreach ($c in @(-1978335153, -1978335135, -1978334962)) {
+    $o = Get-KitWingetOutcome -ExitCode $c
+    Check ($o.Status -eq 'current') ('0x{0:X8} (nothing to do) is current ({1})' -f $c, $o.Status)
+}
+# The real failure from 2026-11-25: Git upgrade, installer exit 1, winget 0x8A150006
+$gitOut = @('Found an existing package already installed. Trying to upgrade the installed package...', 'Found Git [Git.Git] Version 2.56.1',
+    'Downloading https://github.com/git-for-windows/git/releases/download/v2.56.1.windows.1/Git-2.56.1-64-bit.exe', 'Successfully verified installer hash',
+    'Starting package install...', 'The installer will request to run as administrator. Expect a prompt.', 'Installer failed with exit code: 1',
+    'Installer log is available at: C:\Temp\Git.Git.2.56.1.log')
+$o = Get-KitWingetOutcome -ExitCode -1978335226 -Out $gitOut
+Check ($o.Status -eq 'failed' -and $o.Reason -eq 'Installer failed with exit code: 1 (winget 0x8A150006)') "failed upgrade is failed, not current ($($o.Status): $($o.Reason))"
+$o = Get-KitWingetOutcome -ExitCode -1978335212 -Out @('No package found matching input criteria.')
+Check ($o.Status -eq 'failed' -and $o.Reason -like 'No package found*0x8A150014*') "ID not found is failed ($($o.Reason))"
+$o = Get-KitWingetOutcome -ExitCode 1 -Out $null
+Check ($o.Status -eq 'failed' -and $o.Reason -eq 'winget 0x00000001') "no output still gives a reason ($($o.Reason))"
+
 Write-Host 'child processes (Invoke-KitProcess):'
 $r = Invoke-KitProcess -FilePath 'cmd.exe' -ArgumentList @('/d', '/c', 'echo hello& echo oops 1>&2& exit 3')
 Check ($r.Started -and $r.Ec -eq 3 -and $r.Out[0] -eq 'hello' -and $r.Err[0].Trim() -eq 'oops') "returns stdout, stderr and exit code (ec=$($r.Ec))"

@@ -22,7 +22,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:KitVersion  = '2.4.1'   # bump with user-visible changes (shown in the menu banner)
+$script:KitVersion  = '2.4.2'   # bump with user-visible changes (shown in the menu banner)
 $script:KitRoot     = $null
 $script:BaseData    = $null
 $script:Catalog     = @()
@@ -33,6 +33,14 @@ $script:LogPath     = $null
 $script:VtUnavailable = $false   # set when console-mode calls fail (not a console): Enable-KitConsoleVt stops trying
 $script:StateDir    = if ($env:MYWINKIT_STATE_DIR) { $env:MYWINKIT_STATE_DIR } else { Join-Path $env:LOCALAPPDATA 'my-win-kit' }   # override: tests
 $script:WG_NOT_FOUND = -1978335212   # 0x8A150014 APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND
+# winget's "nothing to do" exits for `winget install` on an installed app (source: winget-cli
+# doc/windows/package-manager/winget/returnCodes.md). Only these mean 'current'; any other
+# non-zero exit is a failure, even when the app is installed (e.g. an upgrade whose installer failed).
+$script:WG_UPDATE_NOT_APPLICABLE     = -1978335189   # 0x8A15002B UPDATE_NOT_APPLICABLE: no applicable update found
+$script:WG_UPGRADE_VERSION_NOT_NEWER = -1978335153   # 0x8A15004F UPGRADE_VERSION_NOT_NEWER: available version not newer than installed
+$script:WG_PACKAGE_ALREADY_INSTALLED = -1978335135   # 0x8A150061 PACKAGE_ALREADY_INSTALLED: installed, upgrade not attempted
+$script:WG_INSTALL_DOWNGRADE         = -1978334962   # 0x8A15010E INSTALL_DOWNGRADE: a higher version is already installed
+$script:WG_NOTHING_TO_DO = @($script:WG_UPDATE_NOT_APPLICABLE, $script:WG_UPGRADE_VERSION_NOT_NEWER, $script:WG_PACKAGE_ALREADY_INSTALLED, $script:WG_INSTALL_DOWNGRADE)
 $script:UA          = 'my-win-kit (PowerShell)'
 
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
@@ -474,6 +482,36 @@ function Invoke-KitWinget {
     foreach ($l in ($clean | Select-Object -Last 15)) { Write-KitLog "  | $l" }
     Write-KitLog "  exit $ec"
     return @{ Ec = [int]$ec; Out = $clean }
+}
+
+function Get-KitWingetFailReason {
+    <#
+    One readable line for a failed winget run: the last output line that names the
+    problem ("Installer failed with exit code: 1"), else the last line, plus the code.
+    #>
+    param([int]$ExitCode, [string[]]$Out = @())
+    $code = 'winget 0x{0:X8}' -f $ExitCode
+    $lines = @($Out | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -notmatch '^(Installer log is available|Downloading\s|https?://)' })
+    $pick = $null
+    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+        if ($lines[$i] -match '(?i)fail|error|cancel|denied|blocked|unable|cannot|could not|not (found|applicable|supported|valid|newer)|no package|in use|restart') { $pick = $lines[$i]; break }
+    }
+    if (-not $pick -and $lines.Count -gt 0) { $pick = $lines[$lines.Count - 1] }
+    if ($pick) { return "$pick ($code)" }
+    return $code
+}
+
+function Get-KitWingetOutcome {
+    <#
+    Classify a `winget install` exit: @{ Status = ok | current | failed; Reason }.
+    current = one of winget's "nothing to do" codes ($script:WG_NOTHING_TO_DO).
+    Every other non-zero exit is failed, whether or not the app is installed.
+    #>
+    param([int]$ExitCode, [string[]]$Out = @())
+    if ($ExitCode -eq 0) { return @{ Status = 'ok'; Reason = '' } }
+    if ($script:WG_NOTHING_TO_DO -contains $ExitCode) { return @{ Status = 'current'; Reason = '' } }
+    return @{ Status = 'failed'; Reason = (Get-KitWingetFailReason -ExitCode $ExitCode -Out $Out) }
 }
 
 function Get-KitWingetRows {
@@ -983,19 +1021,25 @@ function Invoke-KitPackage {
                     }
                 }
 
-                if ($r.Ec -eq 0) {
+                $o = Get-KitWingetOutcome -ExitCode $r.Ec -Out $r.Out
+                if ($o.Status -eq 'ok') {
                     Step 'verifying'
                     $post = Get-KitPkgVersion -WId $p.Ref -Method $p.Method
                     $st = if ($isInst) { 'updated' } else { 'installed' }
-                    if ($isInst -and $post -and (Get-KitVersionText $post) -eq (Get-KitVersionText $from)) { $st = 'current' }
-                    return New-KitResult $p $st $from "$post" '' $healed $sw.Elapsed.TotalSeconds
+                    $det = ''
+                    if ($isInst -and $post -and (Get-KitVersionText $post) -eq (Get-KitVersionText $from)) {
+                        # winget ran an installer and exited 0, but the version did not move
+                        $st = 'current'; $det = "winget exit 0, but the installed version is still $from"
+                        Write-KitLog "  note: $det"
+                    }
+                    return New-KitResult $p $st $from "$post" $det $healed $sw.Elapsed.TotalSeconds
                 }
-                if ($isInst) {
-                    # winget exits non-zero when nothing newer exists
-                    return New-KitResult $p 'current' $from $from '' $healed $sw.Elapsed.TotalSeconds
+                if ($o.Status -eq 'current') {
+                    $det = ''; if (-not $isInst) { $det = 'winget: already installed, nothing newer' }
+                    return New-KitResult $p 'current' $from $from $det $healed $sw.Elapsed.TotalSeconds
                 }
-                $reason = $r.Out | Select-Object -Last 1
-                return New-KitResult $p 'failed' $from '' "$reason" $healed $sw.Elapsed.TotalSeconds
+                Write-KitLog "  failed: $($o.Reason)"
+                return New-KitResult $p 'failed' $from '' $o.Reason $healed $sw.Elapsed.TotalSeconds
             }
 
             'script' {
@@ -1129,4 +1173,4 @@ Export-ModuleMember -Function Initialize-Kit, Get-KitVersion, Get-KitUpdates, Ge
     Get-KitCatalog, Get-KitLogPath, Get-KitOverrideCount,
     Get-KitRunOrder, Test-KitAdmin, Test-KitWinget, Get-KitArch, Update-KitPath, Start-KitLog, Write-KitLog, Write-KitRunLog,
     Get-KitState, Save-KitState, Get-KitInstalled, Get-KitToolVersion, Get-KitVersionText, Resolve-KitDirect,
-    Test-KitVersionCurrent, Get-KitLatestVersion, Invoke-KitPackage, Invoke-KitProcess, Enable-KitConsoleVt, Get-KitDesktopShortcuts, Remove-KitNewShortcuts
+    Test-KitVersionCurrent, Get-KitLatestVersion, Get-KitWingetOutcome, Invoke-KitPackage, Invoke-KitProcess, Enable-KitConsoleVt, Get-KitDesktopShortcuts, Remove-KitNewShortcuts
