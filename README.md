@@ -24,7 +24,7 @@ At every start the kit checks these and sets up whatever is missing, **without a
 5. **Windows Terminal set up the same way on every PC** ([config/terminal.json](config/terminal.json)): a
    *Claude Code* profile (PowerShell 7 running `claude`) as the default tab, the Nerd Font, the *Dark+* colours at
    90% opacity, Ctrl+C / Ctrl+V copy and paste, Alt+Shift+D duplicate pane, and every tab starting in
-   `%OneDrive%\.playground` (the dev folder, `D:\dev\git` or `C:\dev\git`, when that folder doesn't exist). Your
+   the dev folder (`D:\dev\git`, or `C:\dev\git` when there is no D: drive). Your
    other profiles and settings stay; the old file is backed up first as `settings.json.bak-my-win-kit-<date>`.
 6. **Windows Terminal as the default terminal app** (console programs open in Terminal).
 

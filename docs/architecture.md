@@ -381,7 +381,7 @@ no GitHub CLI dependency.
 
 `config/terminal.json` (read like the other files; the loader reads the cached copy, then the bundled one, and the
 menus refresh the cache from GitHub at each start; `Get-KitTerminalConfig`). Fields: `startingDirectory.prefer`
-(folder with environment variables, `%OneDrive%\.playground`; used when it exists, else the kit's dev folder from
+(folder, environment variables allowed; `D:\dev\git` today; used when it exists, else the kit's dev folder from
 `Get-KitDevFolderPath`, created if missing; `Resolve-KitTerminalStartDir`), `defaultProfile` (guid), `globals`
 (top-level Terminal settings), `profileDefaults` (= `profiles.defaults`), `profiles` (matched by `guid`) and
 `keybindings` (`{ id, keys }`). Public repo: no user names, host names or personal paths (`test-config.ps1` checks).

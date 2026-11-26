@@ -2,6 +2,14 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-26: Terminal tabs start in the dev folder
+
+- Daniel: "change this starting to D:\dev\git or if no D: C:\dev\git". `config/terminal.json` `startingDirectory.prefer` is now
+  `D:\dev\git` (was `%OneDrive%\.playground`); when it doesn't exist the dev-folder fallback picks
+  `D:\dev\git` or `C:\dev\git` and creates it. Config-only, live at each PC's next start. A profile that already
+  carries its own `startingDirectory` (Stacy's Claude Code profile) keeps it until v2.8 sets the kit profile's
+  folder too.
+
 ## 2026-11-26: v2.7.0 merged to `main` and published
 
 - Daniel: "merge 4". PR #4 (`essentials`) merged as f28612d after review; CI green on both jobs. The post-merge

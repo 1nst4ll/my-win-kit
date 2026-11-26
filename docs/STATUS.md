@@ -18,7 +18,7 @@ _A new session can start from this line, no handover needed._
   menu (Update everything + Update AI tools), `NoAdmin` installs at normal user rights.
 - **Next on this PC:** run `install.cmd` once (one UAC prompt, then no others). Expect the essentials
   to add the Nerd Font and change this PC's Terminal (Claude Code profile as default, start folder
-  `%OneDrive%\.playground`, no acrylic; backup next to it as `settings.json.bak-my-win-kit-<date>`). Then try
+  `D:\dev\git` or `C:\dev\git`, no acrylic; backup next to it as `settings.json.bak-my-win-kit-<date>`). Then try
   `install.cmd /auto /dryrun`, then Update → Update everything for real.
 - **The rebuild is live (kit v2.4.2 on `main`).** PR #1 merged into `main` on 2026-11-25 with Daniel's go ("fix both and
   merge comit push to mainn"); the post-merge publish copied 8 files to OneDrive. Every PC now gets the modern

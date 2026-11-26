@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "_about": "Windows Terminal settings the loader applies at every start (essentials step, setting autoInstallEssentials). Merged into the PC's own settings.json after a backup: globals, profileDefaults (= profiles.defaults), the profiles here (matched by guid), defaultProfile and the key bindings (matched by id or keys) are set; everything else there is kept (other profiles, schemes, actions). startingDirectory.prefer is used when that folder exists, else the kit's dev folder (D:\\dev\\git or C:\\dev\\git). The font is set once CaskaydiaCove Nerd Font is installed. Field reference: docs/architecture.md#windows-terminal-settings",
-  "startingDirectory": { "prefer": "%OneDrive%\\.playground", "fallback": "dev-folder" },
+  "_about": "Windows Terminal settings the loader applies at every start (essentials step, setting autoInstallEssentials). Merged into the PC's own settings.json after a backup: globals, profileDefaults (= profiles.defaults), the profiles here (matched by guid), defaultProfile and the key bindings (matched by id or keys) are set; everything else there is kept (other profiles, schemes, actions). Every tab starts in the kit's dev folder: D:\\dev\\git, or C:\\dev\\git when there is no D: drive (created if missing). The font is set once CaskaydiaCove Nerd Font is installed. Field reference: docs/architecture.md#windows-terminal-settings",
+  "startingDirectory": { "prefer": "D:\\dev\\git", "fallback": "dev-folder" },
   "defaultProfile": "{b7a91c2d-4e83-4f6a-9d25-1c3f8ae60b74}",
   "globals": { "copyFormatting": "none", "copyOnSelect": false, "useAcrylicInTabRow": true, "newTabMenu": [{ "type": "remainingProfiles" }] },
   "profileDefaults": {

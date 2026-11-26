@@ -90,7 +90,7 @@ try {
     Check (-not $personal.Count -and -not $ip.Success) "terminal.json: no user names, host names, personal paths or IPs$(if ($personal.Count) { ': ' + ($personal -join ', ') })"
     $td = ConvertFrom-KitJsonText $tj
     $tp = @(@($td['profiles']) | Where-Object { $_['guid'] -eq $td['defaultProfile'] })
-    Check ($tp.Count -eq 1 -and $tp[0]['name'] -eq 'Claude Code' -and @($td['keybindings']).Count -eq 3 -and $td['startingDirectory']['prefer'] -eq '%OneDrive%\.playground' -and $td['profileDefaults']['font']['face'] -eq 'CaskaydiaCove Nerd Font Mono') 'terminal.json: Claude Code profile is the default, 3 key bindings, %OneDrive%\.playground, Nerd Font face'
+    Check ($tp.Count -eq 1 -and $tp[0]['name'] -eq 'Claude Code' -and @($td['keybindings']).Count -eq 3 -and $td['startingDirectory']['prefer'] -eq 'D:\dev\git' -and $td['profileDefaults']['font']['face'] -eq 'CaskaydiaCove Nerd Font Mono') 'terminal.json: Claude Code profile is the default, 3 key bindings, %OneDrive%\.playground, Nerd Font face'
     Check (Test-Path (Join-Path $state 'cache\terminal.json')) 'read: terminal.json fetched and cached like the other config files'
 
     # ---------------------------------------------------------------- hand-edited catalogue: Ids are permanent
