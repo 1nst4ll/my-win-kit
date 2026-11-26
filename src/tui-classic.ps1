@@ -50,6 +50,8 @@ if ($env:MYWINKIT_FORCE_VT -eq '1') { $script:VT = $true }
 elseif (-not [Console]::IsOutputRedirected) {
     try { $script:VT = [bool]$Host.UI.SupportsVirtualTerminal -or [bool]$env:WT_SESSION } catch {}
 }
+# A child process can leave the console with VT processing off; switch it back on (best effort).
+function Restore-Vt { if ($script:VT) { [void](Enable-KitConsoleVt) } }
 # gruvbox hex + the 16-colour fallback for each role
 $Pal = @{
     Orange = @('#fe8019', 'DarkYellow'); Yellow = @('#fabd2f', 'Yellow'); Green = @('#b8bb26', 'Green')
@@ -127,6 +129,7 @@ if (-not (Test-KitWinget)) {
 Write-C '  Checking what is installed on this PC and looking for updates...' $Pal.Gray
 $installed = Get-KitInstalled
 $updates = Get-KitUpdates -Installed $installed
+Restore-Vt
 
 function Show-Menu {
     Clear-Kit
@@ -184,6 +187,7 @@ function Invoke-ClassicRun([object[]]$Selection, [string]$Mode = 'install') {
         Write-C ('{0,-8} ' -f $p.Method) $Pal.Gray -NoNewline
         if ($p.Interactive -and -not $DryRun) { Write-C 'interactive - answer its prompts' $Pal.Purple }
         $r = Invoke-KitPackage -Package $p -Installed $inst -Mode $Mode -DryRun:$DryRun
+        Restore-Vt
         if ($p.Interactive -and -not $DryRun) { Write-Host (' ' * 43) -NoNewline }
         $badge, $role = switch ($r.Status) {
             'failed'  { $Gl.Fail, $Pal.Red }
@@ -219,6 +223,7 @@ function Invoke-ClassicRun([object[]]$Selection, [string]$Mode = 'install') {
     [void](Read-Answer 'Press Enter to continue')
     $script:installed = Get-KitInstalled
     $script:updates = Get-KitUpdates -Installed $script:installed
+    Restore-Vt
 }
 
 $letters = @{}; foreach ($g in $groups) { $letters[$g.Letter] = $g.Key }

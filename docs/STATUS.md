@@ -17,8 +17,10 @@ _A new session can start from this line, no handover needed._
   The pre-rewrite repo (`my-win-kit-old`) was deleted on 2026-11-25. GitHub account: "Keep my email private"
   and "Block command line pushes that expose my email" are both on.
   Raw-URL config reads, self-update and `irm | iex` read from `main`, so they go live at the merge.
-- **Next session:** Daniel tests v2.4.0 by hand, then says "merge". Untested so far: real keyboard on the app
-  search (`/`), real installs, PS7 install on a PC without it.
+- **Next session:** Daniel tests v2.4.1 by hand, then says "merge". v2.4.1 fixes the raw escape text in the
+  progress view and scan spinner (conhost + pwsh). Daniel's own v2.4.0 session on 2026-11-25 ran a real install of
+  21 apps (21 ok) and an Update AI tools run. Untested so far: real keyboard on the app search (`/`), PS7 install
+  on a PC without it.
 - Before merging, Daniel tries it by hand (steps in the PR). If anything looks wrong, read the newest
   `%LOCALAPPDATA%\my-win-kit\logs\run-*.log` first.
 - After the merge: the post-merge publish copies `src/`, `config/` and the kit files; check its output.
@@ -35,7 +37,7 @@ _A new session can start from this line, no handover needed._
 | Apps in `config/catalog.json` (branch) | 58 total: 35 in the recommended set, 20 DEV (off), 3 POST (off); 0 removed |
 | By method (branch) | 45 winget, 4 Store, 5 script, 2 direct, 1 npm, 1 builtin. AI-flagged (Update AI tools): 5 |
 | Next free app Id | 59 (above every Id in Packages, Removed, RetiredIds; use it when adding an app to `config/catalog.json` by hand) |
-| Kit version (branch) | 2.4.0 (`$script:KitVersion` in src/core.psm1) |
+| Kit version (branch) | 2.4.1 (`$script:KitVersion` in src/core.psm1) |
 | Modern menu needs | PowerShell 7.4+, PwshSpectreConsole ≥ 2.3 (tested with 2.6.3 on pwsh 7.7.0); no GitHub CLI or sign-in |
 | Startup (this PC) | ~750 ms launch → banner → quit, plus the config fetch (3 small files) |
 | Screen heights (120 × 30) | main 17, start 14, app picker 29, review ≤ 29, results ≤ 28, AI 22, tweaks ≤ 27, settings 22 (24 with local fixes), classic 26 |

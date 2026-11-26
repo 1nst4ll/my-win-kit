@@ -22,7 +22,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:KitVersion  = '2.4.0'   # bump with user-visible changes (shown in the menu banner)
+$script:KitVersion  = '2.4.1'   # bump with user-visible changes (shown in the menu banner)
 $script:KitRoot     = $null
 $script:BaseData    = $null
 $script:Catalog     = @()
@@ -30,6 +30,7 @@ $script:Groups      = @()
 $script:Direct      = @{}
 $script:Overrides   = @{}
 $script:LogPath     = $null
+$script:VtUnavailable = $false   # set when console-mode calls fail (not a console): Enable-KitConsoleVt stops trying
 $script:StateDir    = if ($env:MYWINKIT_STATE_DIR) { $env:MYWINKIT_STATE_DIR } else { Join-Path $env:LOCALAPPDATA 'my-win-kit' }   # override: tests
 $script:WG_NOT_FOUND = -1978335212   # 0x8A150014 APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND
 $script:UA          = 'my-win-kit (PowerShell)'
@@ -391,8 +392,9 @@ function Get-KitToolVersion {
     }
     if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) { return $null }
     try {
-        $out = & $exe @($parts | Select-Object -Skip 1) 2>&1 | Out-String
-        return (Get-KitVersionText $out)
+        $r = Invoke-KitProcess -FilePath $exe -ArgumentList @($parts | Select-Object -Skip 1)
+        if (-not $r.Started) { return $null }
+        return (Get-KitVersionText ((@($r.Out) + @($r.Err)) -join "`n"))
     } catch { return $null }
 }
 
@@ -412,7 +414,7 @@ function Get-KitInstalled {
     if (Test-KitWinget) {
         $tmp = Join-Path $env:TEMP ('my-win-kit-export-{0}.json' -f [guid]::NewGuid())
         try {
-            $null = & winget export -o $tmp --include-versions --accept-source-agreements --disable-interactivity 2>&1
+            $null = Invoke-KitProcess -FilePath 'winget' -ArgumentList @('export', '-o', $tmp, '--include-versions', '--accept-source-agreements', '--disable-interactivity')
             if (Test-Path -LiteralPath $tmp) {
                 $j = Get-Content -LiteralPath $tmp -Raw | ConvertFrom-Json
                 foreach ($src in @($j.Sources)) {
@@ -465,10 +467,9 @@ function Invoke-KitWinget {
     <# Run winget, return @{ Ec; Out }. #>
     param([string[]]$WingetArgs)
     Write-KitLog ("winget " + ($WingetArgs -join ' '))
-    $out = @()
-    try { $out = @(& winget @WingetArgs 2>&1 | ForEach-Object { "$_" }) } catch { $out = @("$_") }
-    $ec = $LASTEXITCODE
-    if ($null -eq $ec) { $ec = 1 }
+    $r = Invoke-KitProcess -FilePath 'winget' -ArgumentList $WingetArgs
+    $out = @(@($r.Out) + @($r.Err))
+    $ec = $r.Ec
     $clean = @($out | Where-Object { $_.Trim() -and $_ -match '[A-Za-z]' -and $_ -notmatch '^\s*[\\|/\-]+\s*$' })
     foreach ($l in ($clean | Select-Object -Last 15)) { Write-KitLog "  | $l" }
     Write-KitLog "  exit $ec"
@@ -496,9 +497,9 @@ function Get-KitWingetRows {
 
 function Get-KitWingetRaw {
     param([string[]]$WingetArgs)
-    try { $raw = @(& winget @WingetArgs 2>$null | ForEach-Object { "$_" }) } catch { return @() }
-    if ($LASTEXITCODE -ne 0) { return @() }
-    return $raw
+    $r = Invoke-KitProcess -FilePath 'winget' -ArgumentList $WingetArgs
+    if ($r.Ec -ne 0) { return @() }
+    return @($r.Out)
 }
 
 function Get-KitPkgVersion {
@@ -722,11 +723,110 @@ function Get-KitLatestVersion {
 
 # ---------------------------------------------------------------- child processes
 
+function ConvertTo-KitArgLine {
+    <# Join arguments into one Windows command line (CommandLineToArgvW quoting rules). #>
+    param([string[]]$Arguments)
+    $parts = @()
+    foreach ($a in @($Arguments)) {
+        if ($null -eq $a) { continue }
+        if ($a -ne '' -and $a -notmatch '[\s"]') { $parts += $a; continue }
+        $s = [regex]::Replace($a, '(\\*)"', '$1$1\"')
+        $s = [regex]::Replace($s, '(\\+)$', '$1$1')
+        $parts += '"' + $s + '"'
+    }
+    return ($parts -join ' ')
+}
+
+function Split-KitOutputLines([string]$Text) {
+    <# Lines the way PowerShell reads native output (CRLF, LF or a lone CR ends a line). #>
+    if (-not $Text) { return @() }
+    $l = @($Text -split "`r`n|`n|`r")
+    if ($l.Count -and $l[-1] -eq '') { $l = @($l | Select-Object -First ($l.Count - 1)) }
+    return $l
+}
+
+function Invoke-KitProcess {
+    <#
+    .SYNOPSIS
+        Run a native program away from the menu's console. Returns
+        @{ Ec; Out; Err; Started } (Out/Err = lines of stdout/stderr, UTF-8).
+    .DESCRIPTION
+        Every non-interactive child goes through here, never `& exe`: under
+        PowerShell 7 in a conhost window, `& exe` switches the console's
+        VT processing off until the program exits, so Spectre's live progress
+        and spinners print raw escape codes. This process gets its own hidden
+        console (CreateNoWindow) and redirected stdin/stdout/stderr, so the
+        menu's console mode is never touched. .cmd/.bat files run via cmd.exe.
+    #>
+    param([Parameter(Mandatory)][string]$FilePath, [string[]]$ArgumentList = @())
+    $file = $FilePath
+    if (-not [IO.Path]::IsPathRooted($file)) {
+        $cmd = Get-Command $file -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($cmd) { $file = $cmd.Path }
+    }
+    $argLine = ConvertTo-KitArgLine $ArgumentList
+    if ($file -match '\.(cmd|bat)$') {
+        $argLine = '/d /s /c "' + (ConvertTo-KitArgLine @($file)) + ' ' + $argLine + '"'
+        $file = $env:ComSpec; if (-not $file) { $file = 'cmd.exe' }
+    }
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $file
+    $psi.Arguments = $argLine
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $enc = New-Object System.Text.UTF8Encoding($false)
+    $psi.StandardOutputEncoding = $enc
+    $psi.StandardErrorEncoding = $enc
+    try { $proc = [Diagnostics.Process]::Start($psi) } catch {
+        $msg = $_.Exception.Message; if ($_.Exception.InnerException) { $msg = $_.Exception.InnerException.Message }
+        return @{ Ec = 1; Out = @(); Err = @("$msg"); Started = $false }
+    }
+    try {
+        try { $proc.StandardInput.Close() } catch {}
+        # Read both streams at once so a full stderr pipe cannot deadlock stdout.
+        $so = $proc.StandardOutput.ReadToEndAsync()
+        $se = $proc.StandardError.ReadToEndAsync()
+        $proc.WaitForExit()
+        # A grandchild that inherited the pipes can keep them open: don't wait forever.
+        $outText = ''; if ($so.Wait(15000)) { $outText = $so.Result }
+        $errText = ''; if ($se.Wait(5000)) { $errText = $se.Result }
+        return @{ Ec = [int]$proc.ExitCode; Out = @(Split-KitOutputLines $outText); Err = @(Split-KitOutputLines $errText); Started = $true }
+    } finally { $proc.Dispose() }
+}
+
+function Enable-KitConsoleVt {
+    <#
+    Best-effort: switch VT processing back on for this process's console
+    output, in case a child process left it off. $true when it is on;
+    $false (and nothing changed) when output is not a console.
+    #>
+    if ($script:VtUnavailable) { return $false }
+    try {
+        if (-not ('MyWinKit.ConsoleMode' -as [type])) {
+            Add-Type -Namespace MyWinKit -Name ConsoleMode -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int n);
+[DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr h, out uint m);
+[DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr h, uint m);
+'@
+        }
+        $h = [MyWinKit.ConsoleMode]::GetStdHandle(-11)
+        $m = [uint32]0
+        if (-not [MyWinKit.ConsoleMode]::GetConsoleMode($h, [ref]$m)) { return $false }
+        if (($m -band 4) -ne 0) { return $true }
+        # 0x1 processed output + 0x4 virtual terminal processing
+        return [MyWinKit.ConsoleMode]::SetConsoleMode($h, [uint32]($m -bor 5))
+    } catch { $script:VtUnavailable = $true; return $false }
+}
+
 function Invoke-KitRemoteScript {
     <#
     Run a vendor one-liner (irm URL | iex) in a CHILD Windows PowerShell so
     a vendor `exit` or `throw` cannot close the menu. -Attached = shares the
-    console (interactive menus); otherwise output is captured to the log.
+    console (interactive menus); otherwise it runs through Invoke-KitProcess
+    (own hidden console) and its output is captured to the log.
     #>
     param([string]$Url, [switch]$Attached)
     $cmd = "[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072; irm '$Url' | iex"
@@ -736,8 +836,9 @@ function Invoke-KitRemoteScript {
         & powershell.exe @argList
         $ec = $LASTEXITCODE
     } else {
-        $out = @(& powershell.exe @argList 2>&1 | ForEach-Object { "$_" })
-        $ec = $LASTEXITCODE
+        $r = Invoke-KitProcess -FilePath 'powershell.exe' -ArgumentList $argList
+        $out = @(@($r.Out) + @($r.Err))
+        $ec = $r.Ec
         foreach ($l in ($out | Where-Object { $_.Trim() } | Select-Object -Last 20)) { Write-KitLog "  | $l" }
     }
     if ($null -eq $ec) { $ec = 1 }
@@ -746,18 +847,16 @@ function Invoke-KitRemoteScript {
 }
 
 function Invoke-KitCommandLine {
-    <# Run a native command line like "claude update", captured to the log. #>
+    <# Run a native command line like "claude update" (Invoke-KitProcess), captured to the log. #>
     param([string]$CommandLine, [string]$Exe)
     $parts = $CommandLine -split '\s+'
     $file = $parts[0]
     if ($Exe) { $full = [Environment]::ExpandEnvironmentVariables($Exe); if (Test-Path -LiteralPath $full) { $file = $full } }
     Write-KitLog "run: $CommandLine"
-    try {
-        $out = @(& $file @($parts | Select-Object -Skip 1) 2>&1 | ForEach-Object { "$_" })
-        $ec = $LASTEXITCODE
-    } catch { $out = @("$_"); $ec = 1 }
+    $r = Invoke-KitProcess -FilePath $file -ArgumentList @($parts | Select-Object -Skip 1)
+    $out = @(@($r.Out) + @($r.Err))
+    $ec = $r.Ec
     foreach ($l in ($out | Where-Object { $_.Trim() } | Select-Object -Last 15)) { Write-KitLog "  | $l" }
-    if ($null -eq $ec) { $ec = 0 }
     Write-KitLog "  exit $ec"
     return [int]$ec
 }
@@ -779,8 +878,7 @@ try {
     Set-Content -LiteralPath $tmp -Value $body -Encoding UTF8
     try {
         if (Test-KitAdmin) {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $tmp
-            $ec = $LASTEXITCODE
+            $ec = (Invoke-KitProcess -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $tmp)).Ec
         } else {
             try {
                 $proc = Start-Process powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$tmp`"" -Verb RunAs -PassThru
@@ -791,7 +889,7 @@ try {
     $detail = 'RDP enabled (NLA on)'
     $ts = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
     if ($ec -eq 0 -and (Test-Path -LiteralPath $ts)) {
-        $ip = & $ts ip -4 2>$null | Select-Object -First 1
+        $ip = @((Invoke-KitProcess -FilePath $ts -ArgumentList @('ip', '-4')).Out) | Select-Object -First 1
         if ($ip) { $detail += ", Tailscale IP $ip" }
     }
     return @{ Ec = [int]$ec; Detail = $detail }
@@ -978,7 +1076,8 @@ function Invoke-KitPackage {
                 if ($DryRun) { return New-KitResult $p 'dryrun' $from '' ("npm " + ($a -join ' ')) '' $sw.Elapsed.TotalSeconds }
                 Step 'installing with npm'
                 Write-KitLog ("npm " + ($a -join ' '))
-                $out = @(& npm @a 2>&1 | ForEach-Object { "$_" }); $ec = $LASTEXITCODE
+                $nr = Invoke-KitProcess -FilePath 'npm' -ArgumentList $a
+                $out = @(@($nr.Out) + @($nr.Err)); $ec = $nr.Ec
                 foreach ($l in ($out | Select-Object -Last 10)) { Write-KitLog "  | $l" }
                 if ($ec -ne 0) { return New-KitResult $p 'failed' $from '' "npm exit code $ec" '' $sw.Elapsed.TotalSeconds }
                 $st = if ($isInst) { 'updated' } else { 'installed' }
@@ -1030,4 +1129,4 @@ Export-ModuleMember -Function Initialize-Kit, Get-KitVersion, Get-KitUpdates, Ge
     Get-KitCatalog, Get-KitLogPath, Get-KitOverrideCount,
     Get-KitRunOrder, Test-KitAdmin, Test-KitWinget, Get-KitArch, Update-KitPath, Start-KitLog, Write-KitLog, Write-KitRunLog,
     Get-KitState, Save-KitState, Get-KitInstalled, Get-KitToolVersion, Get-KitVersionText, Resolve-KitDirect,
-    Test-KitVersionCurrent, Get-KitLatestVersion, Invoke-KitPackage, Get-KitDesktopShortcuts, Remove-KitNewShortcuts
+    Test-KitVersionCurrent, Get-KitLatestVersion, Invoke-KitPackage, Invoke-KitProcess, Enable-KitConsoleVt, Get-KitDesktopShortcuts, Remove-KitNewShortcuts

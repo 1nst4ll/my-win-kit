@@ -94,6 +94,15 @@ No UI. Both menus call the same functions, so behaviour is identical in both.
     elevated via UAC when needed; prints the Tailscale IP if present).
   - `Requires` (git, npm) is checked after reloading PATH from the registry, so a tool installed earlier in the
     same run is found.
+- **Child processes: `Invoke-KitProcess`.** Every non-interactive native program (winget, `claude`/`agy`
+  version and update, npm, the non-interactive `irm | iex` child, the RDP helper) runs through it, never through
+  `& exe`. It starts the program with `ProcessStartInfo` (`CreateNoWindow`, stdin/stdout/stderr redirected, both
+  streams read at once, UTF-8), so the child gets its own hidden console and returns `Ec`, `Out`, `Err` and
+  `Started`. `.cmd`/`.bat` files run via `cmd.exe /d /s /c`. Reason: PowerShell 7 in a conhost window switches
+  the console's VT processing off for as long as a `&`-started program runs, and Spectre's live progress and
+  spinners then print raw escape codes. Only `Interactive` scripts (MAS, WinUtil) and the tweaks menu ("Open
+  here") still share the console; nothing live is drawn while they run. `Enable-KitConsoleVt` switches VT back on (best effort, no-op when output is not a
+  console); both menus call it after the scan and after each package.
 - **`Get-KitRunOrder`** sorts by catalogue group order, then Id, with POST always last.
 - **`Get-KitLatestVersion`** (direct = vendor page, winget = `winget show`) feeds the "Update AI tools" table.
 - **State** (`%LOCALAPPDATA%\my-win-kit\state.json`, per PC, never synced): last selection, last failures,

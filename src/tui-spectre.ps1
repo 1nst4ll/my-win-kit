@@ -581,6 +581,7 @@ function Get-LegendMarkup {
 
 function Invoke-Scan([switch]$Updates) {
     $script:Installed = @{}; $script:Updates = @{}
+    [void](Enable-KitConsoleVt)   # before the live spinner: a child (or the host) may have left VT off
     $st = [Spectre.Console.AnsiConsole]::Status()
     $st.Spinner = [Spectre.Console.Spinner+Known]::Point
     $st.SpinnerStyle = St $Hex.Orange
@@ -592,6 +593,7 @@ function Invoke-Scan([switch]$Updates) {
             $script:Updates = Get-KitUpdates -Installed $script:Installed
         }
     })
+    [void](Enable-KitConsoleVt)   # in case a child left VT processing off
     $script:ScanDone = $true
 }
 
@@ -709,6 +711,9 @@ function Invoke-Run {
     $script:runResults = [System.Collections.Generic.List[object]]::new()
 
     if ($live.Count) {
+        # Children run through Invoke-KitProcess (core) so they cannot switch the
+        # console's VT processing off under the live view; this re-enables it anyway.
+        [void](Enable-KitConsoleVt)
         $pr = [Spectre.Console.AnsiConsole]::Progress()
         $pr.AutoClear = $true
         $pr.HideCompleted = $true
@@ -734,8 +739,9 @@ function Invoke-Run {
                 $task = $ctx.AddTask("$name [$($Hex.Gray)]$(Get-MethodLabel $p)[/]")
                 $task.IsIndeterminate = $true
                 $inst = $null; if ($script:Installed.ContainsKey($p.Id)) { $inst = $script:Installed[$p.Id] }
-                $onStatus = { param($m) $task.Description = "$name [$($Hex.Gray)]$(E $m)...[/]" }
+                $onStatus = { param($m) [void](Enable-KitConsoleVt); $task.Description = "$name [$($Hex.Gray)]$(E $m)...[/]" }
                 $res = Invoke-KitPackage -Package $p -Installed $inst -Mode $Mode -DryRun:$script:DryRunOn -OnStatus $onStatus
+                [void](Enable-KitConsoleVt)
                 $task.IsIndeterminate = $false
                 $task.Value = $task.MaxValue
                 $task.StopTask()
@@ -751,6 +757,7 @@ function Invoke-Run {
         $r.Justification = [Spectre.Console.Justify]::Left; $r.Style = St $Hex.Purple; Out-Render $r
         $inst = $null; if ($script:Installed.ContainsKey($p.Id)) { $inst = $script:Installed[$p.Id] }
         $res = Invoke-KitPackage -Package $p -Installed $inst -Mode $Mode
+        [void](Enable-KitConsoleVt)   # interactive children share the console
         $script:runResults.Add($res)
         Write-ResultLine $res
     }
@@ -865,6 +872,7 @@ function Show-UpdateAI {
     Show-Header 'Update AI tools'
     $ai = @($script:Catalog | Where-Object AI | Sort-Object GroupOrder, Id)
     $script:latest = @{}
+    [void](Enable-KitConsoleVt)   # before the live spinner: a child (or the host) may have left VT off
     $st = [Spectre.Console.AnsiConsole]::Status()
     $st.Spinner = [Spectre.Console.Spinner+Known]::Point
     $st.SpinnerStyle = St $Hex.Orange
@@ -879,6 +887,7 @@ function Show-UpdateAI {
             if ($lt -and $script:Installed.ContainsKey($p.Id) -and -not (Test-KitVersionCurrent -Installed $script:Installed[$p.Id] -Latest $lt)) { $script:Updates[$p.Id] = $lt }
         }
     })
+    [void](Enable-KitConsoleVt)
     $script:ScanDone = $false   # updates map here is AI-only; the install screen rescans
 
     while ($true) {

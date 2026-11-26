@@ -2,6 +2,35 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-25: child processes no longer garble the progress view, kit v2.4.1 (branch `rebuild-tui`)
+
+- Daniel, from a real run of the modern menu: "it display sone gibrish when downloading or checking sometimes does
+  very preaty progress bars". The progress view and the scan spinner printed raw escape text
+  (`[38;2;254;128;25m...`, `[2A`/`[3A`) frame after frame while winget, `claude update` or `agy update` ran, and
+  drew cleanly during direct downloads.
+- **Root cause (measured in a real console):** PowerShell 7 in a **conhost** window switches the console's
+  `ENABLE_VIRTUAL_TERMINAL_PROCESSING` off (mode 0x7 → 0x3) for as long as any `&`-started native program runs,
+  even `cmd /c ver`, and switches it back on when the program exits. Spectre draws on a background thread, so
+  every frame during a child run printed literally. Windows PowerShell 5.1 and Windows Terminal keep the mode;
+  `Start-Process`, `Invoke-WebRequest` and `ProcessStartInfo` children don't touch it. That's why direct
+  downloads looked fine.
+- **Fix (`src/core.psm1`):** new `Invoke-KitProcess` starts non-interactive programs with `ProcessStartInfo`
+  (own hidden console, redirected stdin/stdout/stderr read together, UTF-8, `.cmd` via `cmd.exe`) and returns
+  `Ec`/`Out`/`Err`/`Started`. winget (install, list, show, upgrade, export, search), tool `--version` checks,
+  `claude update`/`agy update`, npm, the non-interactive `irm | iex` child and the RDP helper all use it. Scan and
+  update results are identical to before (compared under pwsh and 5.1). `Interactive` scripts still share the
+  console.
+- **Guard:** `Enable-KitConsoleVt` (best effort, no-op when output is not a console) switches VT back on. The modern
+  menu calls it before each scan spinner and the progress view, on every status change and after each package.
+  The classic menu calls it after the scan and after each package.
+- **Tests:** `test-core.ps1` checks `Invoke-KitProcess` output, exit code, argument quoting, `.cmd` files and a
+  missing program. In a console window it also checks that a child which clears VT on its console leaves the
+  kit's console on, and that `Enable-KitConsoleVt` restores it (skipped when output is redirected, as in CI).
+- Real-console check: conhost + pwsh, "Update AI tools → Update all installed" (winget, `claude update`,
+  `agy update` on current tools) and the Install scan both draw clean bars and spinners. The previous commit
+  printed raw escapes under the same scan.
+- Docs: architecture (child processes), CLAUDE.md constraint, STATUS.
+
 ## 2026-11-25: read-only config, menu no longer writes to GitHub, kit v2.4.0 (branch `rebuild-tui`)
 
 - Daniel: "we cannot guarantee this can we at least do github download for deployed version and i will change

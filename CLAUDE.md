@@ -63,6 +63,10 @@ Front door: [README.md](README.md). Docs index and ownership map: [docs/architec
   menus need goes into core, so behaviour stays identical.
 - **Remote scripts always run in a child process** (`Invoke-KitRemoteScript`). Never `iex` a vendor script
   inside the menu process: a vendor `exit` would close the menu.
+- **Child console programs run through `Invoke-KitProcess`, never `& exe`** (unless `Interactive`). PowerShell 7
+  in a conhost window switches the shared console's VT processing off while an `&`-started program runs, so
+  Spectre's live progress/spinners print raw escape text (`[38;2;254;128;25m`, `[3A`). Windows PowerShell 5.1
+  and Windows Terminal don't; test in conhost under pwsh.
 - **Direct downloads must be signature-checked** (`Signer` in the catalogue's `Direct` entry) and resolved from
   the vendor's official page. Never hard-code a versioned URL.
 - **Don't work around bot protection.** Claude Desktop's "latest" link returns 403 to scripts; it stays on winget.
