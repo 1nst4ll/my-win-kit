@@ -96,7 +96,7 @@ function Write-Gradient([string]$Text, [int]$Width) {
 }
 
 function C([int]$cp) { return [string][char]$cp }
-$Gl = @{ Ok = C 0x221A; Up = C 0x2191; Not = C 0x00B7; Fail = C 0x00D7; Heal = C 0x2194; Dry = C 0x25CB; Dot = C 0x00B7; Arrow = C 0x2192; Ell = C 0x2026; Line = C 0x2500 }
+$Gl = @{ Ok = C 0x221A; Up = C 0x2191; Not = C 0x00B7; Fail = C 0x00D7; Heal = C 0x2194; Dry = C 0x25CB; Warn = C 0x25B2; Dot = C 0x00B7; Arrow = C 0x2192; Ell = C 0x2026; Line = C 0x2500 }
 $GroupIcon = @{ UTIL = 0x2261; OFCE = 0x00B6; BROW = 0x25BA; CLOU = 0x221E; PDF = 0x00A7; COMM = 0x263A; REMO = 0x2194; SECU = 0x2666; MEDI = 0x266B; MAIN = 0x2302; DSGN = 0x2660; OTHR = 0x2022; DEV = 0x00BB; POST = 0x25B2 }
 $GroupRole = @{ UTIL = 'Yellow'; OFCE = 'Blue'; BROW = 'Aqua'; CLOU = 'Blue'; PDF = 'Red'; COMM = 'Green'; REMO = 'Aqua'; SECU = 'Purple'; MEDI = 'Orange'; MAIN = 'Yellow'; DSGN = 'Purple'; OTHR = 'Fg'; DEV = 'Orange'; POST = 'Red' }
 
@@ -189,6 +189,7 @@ function Show-Menu {
 }
 
 function Invoke-ClassicRun([object[]]$Selection, [string]$Mode = 'install', [switch]$Unattended) {
+  while ($true) {
     $order = @(Get-KitRunOrder $Selection)
     if (-not $Unattended) { Clear-Kit }
     $log = Start-KitLog
@@ -206,11 +207,15 @@ function Invoke-ClassicRun([object[]]$Selection, [string]$Mode = 'install', [swi
         if ($p.Interactive -and -not $DryRun) { Write-C 'interactive - answer its prompts' $Pal.Purple }
         $onStatus = $null
         if ($p.Interactive -and -not $DryRun) { $onStatus = { param($m) Write-C "         $m" $Pal.Gray } }
-        $r = Invoke-KitPackage -Package $p -Installed $inst -Mode $Mode -DryRun:$DryRun -OnStatus $onStatus
+        $avail = ''; if ($updates.ContainsKey($p.Id)) { $avail = [string]$updates[$p.Id] }
+        $r = Invoke-KitPackage -Package $p -Installed $inst -Mode $Mode -DryRun:$DryRun -OnStatus $onStatus -Available $avail
         Restore-Vt
         if ($p.Interactive -and -not $DryRun) { Write-Host (' ' * 43) -NoNewline }
         $badge, $role = switch ($r.Status) {
             'failed'  { $Gl.Fail, $Pal.Red }
+            'blocked' { $Gl.Warn, $Pal.Orange }
+            'restart' { $Gl.Ok, $Pal.Yellow }
+            'skipped' { '-', $Pal.Gray }
             'dryrun'  { $Gl.Dry, $Pal.Purple }
             'current' { '=', $Pal.Aqua }
             'updated' { $Gl.Up, $Pal.Green }
@@ -219,33 +224,43 @@ function Invoke-ClassicRun([object[]]$Selection, [string]$Mode = 'install', [swi
         $ver = if ($r.From -and $r.To -and $r.From -ne $r.To) { "$($r.From) $($Gl.Arrow) $($r.To)" } elseif ($r.To) { $r.To } else { $r.From }
         Write-C ("{0} {1,-9} {2} ({3}s)" -f $badge, $r.Status.ToUpper(), $ver, $r.Seconds) $role
         if ($r.Healed) { Write-C "         $($Gl.Heal) healed: $($r.Healed)" $Pal.Aqua }
-        if ($r.Detail -and $r.Status -in 'failed', 'dryrun') { Write-C "         $($r.Detail)" $Pal.Gray }
+        if ($r.Detail -and $r.Status -in 'failed', 'dryrun', 'blocked', 'restart', 'skipped') { Write-C "         $($r.Detail)" $Pal.Gray }
         $results += $r
-        if ($r.Status -ne 'failed') { $p.On = $false }
+        if (Test-KitResultOk $r) { $p.On = $false }   # failed and blocked apps stay selected for a retry
     }
     if ((Get-KitSetting 'removeShortcuts' $true) -and -not $DryRun) {
         $rm = @(Remove-KitNewShortcuts -Before $before)
         if ($rm.Count) { Write-C "  Removed $($rm.Count) new desktop shortcut(s): $($rm -join ', ')" $Pal.Gray }
     }
     $fl = @($results | Where-Object Status -eq 'failed').Count
+    $bl = @($results | Where-Object Status -eq 'blocked').Count
     $hl = @($results | Where-Object Healed).Count
     Write-Rule
     Write-C ('  Done: ') $Pal.Fg -NoNewline
-    Write-C "$($Gl.Ok) $($results.Count - $fl) ok   " $Pal.Green -NoNewline
+    Write-C "$($Gl.Ok) $($results.Count - $fl - $bl) ok   " $Pal.Green -NoNewline
     Write-C "$($Gl.Heal) $hl healed   " $Pal.Aqua -NoNewline
+    if ($bl) { Write-C "$($Gl.Warn) $bl blocked   " $Pal.Orange -NoNewline }
     Write-C "$($Gl.Fail) $fl failed   " $Pal.Red -NoNewline
     Write-C ('{0:0.0}s' -f $sw.Elapsed.TotalSeconds) $Pal.Fg
     Write-C "  Log: $log" $Pal.Gray
+    $rs = @($results | Where-Object { $_.Status -eq 'restart' } | ForEach-Object Name)
+    if ($rs.Count) { Write-C "  Restart Windows to finish: $($rs -join ', ')" $Pal.Yellow }
     $script:LastResults = @($results)
-    if ($fl -and -not $Unattended) { Write-C '  Failed apps stay selected - press I to retry.' $Pal.Yellow }
     $state.LastSelection = @($Selection | Where-Object { $_.Id -gt 0 } | ForEach-Object Id)   # rest-of-PC upgrades have negative Ids
-    $state.LastFailed = @($results | Where-Object { $_.Status -eq 'failed' -and $_.Id -gt 0 } | ForEach-Object Id)
+    $state.LastFailed = @($results | Where-Object { -not (Test-KitResultOk $_) -and $_.Id -gt 0 } | ForEach-Object Id)
     if (-not $DryRun) { Save-KitState $state }
     if ($Unattended) { return }
-    [void](Read-Answer 'Press Enter to continue')
+    if ($fl + $bl) {
+        # Retry failed: close the apps that were in use, then R runs just those again
+        $badIds = @($results | Where-Object { -not (Test-KitResultOk $_) } | ForEach-Object Id)
+        $ans = Read-Answer "R = retry the $($fl + $bl) failed/blocked now (close the apps in use first), Enter = continue"
+        if ($ans -match '^[Rr]') { $Selection = @($order | Where-Object { $badIds -contains $_.Id }); continue }
+    } else { [void](Read-Answer 'Press Enter to continue') }
     $script:installed = Get-KitInstalled
     $script:updates = Get-KitUpdates -Installed $script:installed
     Restore-Vt
+    return
+  }
 }
 
 if ($Auto) {
@@ -255,7 +270,7 @@ if ($Auto) {
     Write-Gradient '  my-win-kit - unattended run' 30
     $adm = if ($script:Admin) { 'as administrator (nothing else will ask)' } else { 'without administrator rights (installers may ask)' }
     Write-C "  v$(Get-KitVersion) $($Gl.Dot) $adm $($Gl.Dot) $($plan.Install.Count) to install, $($plan.Update.Count) kit apps + $($plan.Other.Count) other apps to update" $Pal.Gray
-    Write-KitRunLog "auto: elevated=$(if ($script:Admin) { 'yes' } else { 'no' }); install [$(@($plan.Install | ForEach-Object Name) -join ', ')]; update [$(@($plan.Update | ForEach-Object Name) -join ', ')]; other PC apps [$(@($plan.Other | ForEach-Object Ref) -join ', ')]; skipped [$(@($plan.Skipped | ForEach-Object Name) -join ', ')]"
+    Write-KitRunLog "auto: elevated=$(if ($script:Admin) { 'yes' } else { 'no' }); install [$(@($plan.Install | ForEach-Object Name) -join ', ')]; update [$(@($plan.Update | ForEach-Object Name) -join ', ')]; other PC apps [$(@($plan.Other | ForEach-Object Ref) -join ', ')]; skipped [$(@($plan.Skipped | ForEach-Object Name) -join ', ')]; updates itself [$(@($plan.SelfUpdating | ForEach-Object Name) -join ', ')]"
     $results = @()
     if ($plan.Run.Count) {
         Invoke-ClassicRun $plan.Run 'install' -Unattended
@@ -268,10 +283,17 @@ if ($Auto) {
         Write-C "  Skipped (needs you): $(@($plan.Skipped | ForEach-Object Name) -join ', ')" $Pal.Yellow
         Write-C '  Run install.cmd without /auto to do these.' $Pal.Gray
     }
+    if ($plan.SelfUpdating.Count) { Write-C "  Updates itself (left alone): $(@($plan.SelfUpdating | ForEach-Object Name) -join ', ')" $Pal.Gray }
+    $blk = @($results | Where-Object Status -eq 'blocked')
+    if ($blk.Count) {
+        Write-C '  Blocked (needs you):' $Pal.Orange
+        foreach ($b in $blk) { Write-C "    $($Gl.Warn) $($b.Name): $($b.Detail)" $Pal.Orange }
+    }
     $code = Get-KitAutoExitCode -Results $results
     if ($env:MYWINKIT_RUNLOG) { Write-C "  Run log: $env:MYWINKIT_RUNLOG" $Pal.Gray }
-    Write-C "  Exit code $code ($(if ($code) { 'something failed' } else { 'all ok' }))" $(if ($code) { $Pal.Red } else { $Pal.Green })
-    Write-KitRunLog "auto: finished, $(@($results | Where-Object Status -eq 'failed').Count) failed of $($results.Count), exit $code"
+    $codeText = switch ($code) { 1 { 'something failed' } 2 { 'something is blocked and needs you' } default { 'all ok' } }
+    Write-C "  Exit code $code ($codeText)" $(if ($code -eq 1) { $Pal.Red } elseif ($code -eq 2) { $Pal.Orange } else { $Pal.Green })
+    Write-KitRunLog "auto: finished, $(@($results | Where-Object Status -eq 'failed').Count) failed, $($blk.Count) blocked of $($results.Count), exit $code"
     if ($Pause -and -not $script:Testing) { [void](Read-Host '  Press Enter to close') }
     exit $code
 }
@@ -311,9 +333,12 @@ while ($true) {
             $cut = { param($list) $n = @($list | ForEach-Object Name); if ($n.Count -gt 8) { (($n | Select-Object -First 8) -join ', ') + " $($Gl.Ell) +$($n.Count - 8)" } else { $n -join ', ' } }
             Write-C "  Kit apps ($($plan.Kit.Count)): $(& $cut $plan.Kit)" $Pal.Fg
             Write-C "  Other apps on this PC ($($plan.Other.Count)): $(& $cut $plan.Other)" $Pal.Fg
-            if ($plan.Run.Count) {
-                $ok = Read-Answer "Update all $($plan.Run.Count)? [Y/n]"
-                if ($ok -notmatch '^[Nn]') { Invoke-ClassicRun $plan.Run 'update' }
+            if ($plan.SelfUpdating.Count) { Write-C "  Updates itself, left out ($($plan.SelfUpdating.Count)): $(& $cut $plan.SelfUpdating)" $Pal.Gray }
+            if ($plan.Run.Count -or $plan.SelfUpdating.Count) {
+                $q = if ($plan.SelfUpdating.Count) { "Update all $($plan.Run.Count)? [Y/n, s = also the $($plan.SelfUpdating.Count) that update themselves]" } else { "Update all $($plan.Run.Count)? [Y/n]" }
+                $ok = Read-Answer $q
+                if ($ok -match '^[Ss]') { Invoke-ClassicRun (@($plan.Run) + @($plan.SelfUpdating)) 'update' }
+                elseif ($ok -notmatch '^[Nn]' -and $plan.Run.Count) { Invoke-ClassicRun $plan.Run 'update' }
             } else { [void](Read-Answer 'Everything is up to date. Press Enter') }
         } elseif ($sub -eq '2') {
             $ai = @(Get-KitAiUpdateSet -Installed $installed -Packages $cat)   # installed AI tools only, never new ones

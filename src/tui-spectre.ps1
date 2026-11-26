@@ -559,6 +559,9 @@ function Get-ResultBadge($r) {
         'updated'   { "[$($Hex.Green) bold]$($Glyph.Up)[/]" }
         'current'   { "[$($Hex.Aqua)]$($Glyph.Same)[/]" }
         'done'      { "[$($Hex.Green) bold]$($Glyph.Ok)[/]" }
+        'restart'   { "[$($Hex.Yellow) bold]$($Glyph.Ok)[/]" }
+        'skipped'   { "[$($Hex.Gray)]-[/]" }
+        'blocked'   { "[$($Hex.Orange) bold]$($Glyph.Warn)[/]" }
         'dryrun'    { "[$($Hex.Purple)]$($Glyph.Dry)[/]" }
         default     { "[$($Hex.Red) bold]$($Glyph.Fail)[/]" }
     }
@@ -569,6 +572,9 @@ function Get-ResultText($r) {
         'updated'   { "[$($Hex.Green)]updated[/]" }
         'current'   { "[$($Hex.Aqua)]up to date[/]" }
         'done'      { "[$($Hex.Green)]done[/]" }
+        'restart'   { "[$($Hex.Yellow)]restart needed[/]" }
+        'skipped'   { "[$($Hex.Gray)]skipped[/]" }
+        'blocked'   { "[$($Hex.Orange)]blocked[/]" }
         'dryrun'    { "[$($Hex.Purple)]would run[/]" }
         default     { "[$($Hex.Red)]failed[/]" }
     }
@@ -697,7 +703,7 @@ function Show-Review {
 function Write-ResultLine($res) {
     $line = "  $(Get-ResultBadge $res) [$($Hex.Fg)]$(E $res.Name)[/]  $(Get-ResultText $res)  $(Get-VersionMarkup $res)  [$($Hex.Gray)]$($res.Seconds)s[/]"
     if ($res.Healed) { $line += "  [$($Hex.Aqua)]$($Glyph.Heal) $(E $res.Healed)[/]" }
-    if ($res.Status -eq 'failed' -and $res.Detail) { $line += "  [$($Hex.Gray)]$(E $res.Detail)[/]" }
+    if ($res.Status -in 'failed', 'blocked', 'restart', 'skipped' -and $res.Detail) { $line += "  [$($Hex.Gray)]$(E $res.Detail)[/]" }
     Say (Limit-Markup $line ((Get-WindowWidth) - 1))
 }
 
@@ -744,7 +750,8 @@ function Invoke-Run {
                 $task.IsIndeterminate = $true
                 $inst = $null; if ($script:Installed.ContainsKey($p.Id)) { $inst = $script:Installed[$p.Id] }
                 $onStatus = { param($m) [void](Enable-KitConsoleVt); $task.Description = "$name [$($Hex.Gray)]$(E $m)...[/]" }
-                $res = Invoke-KitPackage -Package $p -Installed $inst -Mode $Mode -DryRun:$script:DryRunOn -OnStatus $onStatus
+                $avail = ''; if ($script:Updates.ContainsKey($p.Id)) { $avail = [string]$script:Updates[$p.Id] }
+                $res = Invoke-KitPackage -Package $p -Installed $inst -Mode $Mode -DryRun:$script:DryRunOn -OnStatus $onStatus -Available $avail
                 [void](Enable-KitConsoleVt)
                 $task.IsIndeterminate = $false
                 $task.Value = $task.MaxValue
@@ -769,37 +776,63 @@ function Invoke-Run {
     $removed = @()
     if ((Get-KitSetting 'removeShortcuts' $true) -and -not $script:DryRunOn) { $removed = @(Remove-KitNewShortcuts -Before $before) }
     $fl = @($results | Where-Object Status -eq 'failed').Count
-    $ok = @($results | Where-Object Status -in 'installed', 'updated', 'current', 'done', 'dryrun').Count
+    $bl = @($results | Where-Object Status -eq 'blocked').Count
+    $ok = @($results | Where-Object { Test-KitResultOk $_ }).Count
     $hl = @($results | Where-Object Healed).Count
-    Write-KitRunLog "run: done - $ok ok, $hl healed, $fl failed in $(Format-Duration $total.Elapsed)"
+    Write-KitRunLog "run: done - $ok ok, $hl healed, $bl blocked, $fl failed in $(Format-Duration $total.Elapsed)"
 
     # Results screen (fresh, so the summary and the back item are always on screen)
     Show-Header "$Title $($Glyph.Dot) results"
-    $max = [Math]::Max(4, (Get-WindowHeight) - 21)
-    $trim = Get-TrimmedRows $results $max { switch ($_.Status) { 'failed' { 0 } default { if ($_.Healed) { 1 } elseif ($_.Status -in 'installed', 'updated') { 2 } else { 3 } } } }
-    $t = New-KitTable @(' ', 'App', 'Result', 'Version', 'Time', 'Note') $(if ($fl) { $Hex.Red } else { $Hex.Green })
+    # a Retry row below (failures or blocks) takes 3 more rows than the lone Back row
+    $max = [Math]::Max(4, (Get-WindowHeight) - $(if ($fl + $bl) { 24 } else { 21 }))
+    $trim = Get-TrimmedRows $results $max { switch ($_.Status) { 'failed' { 0 } 'blocked' { 0 } default { if ($_.Healed) { 1 } elseif ($_.Status -in 'installed', 'updated', 'restart') { 2 } else { 3 } } } }
+    $t = New-KitTable @(' ', 'App', 'Result', 'Version', 'Time', 'Note') $(if ($fl) { $Hex.Red } elseif ($bl) { $Hex.Orange } else { $Hex.Green })
     foreach ($r in $trim.Rows) {
         $note = ''
         if ($r.Healed) { $note = "[$($Hex.Aqua)]$($Glyph.Heal) $(E $r.Healed)[/]" }
-        elseif ($r.Status -in 'failed', 'dryrun' -and $r.Detail) { $note = "[$($Hex.Gray)]$(E $r.Detail)[/]" }
+        elseif ($r.Status -in 'failed', 'dryrun', 'blocked', 'restart', 'skipped' -and $r.Detail) { $note = "[$($Hex.Gray)]$(E $r.Detail)[/]" }
         # one line per row, so the screen height stays predictable (details are in the log)
         Add-KitRow $t @((Get-ResultBadge $r), (Limit-Markup "[$($Hex.Fg)]$(E $r.Name)[/]" 26), (Get-ResultText $r), (Limit-Markup (Get-VersionMarkup $r) 22), "[$($Hex.Gray)]$($r.Seconds)s[/]", (Limit-Markup $note 34))
     }
     if ($trim.Hidden) { $t.Caption = [Spectre.Console.TableTitle]::new("[$($Hex.Gray)]$($trim.Hidden) more not shown (failures and changes first) - full list in the log[/]") }
     Out-Render $t
-    $sum = "[$($Hex.Green) bold]$($Glyph.Ok) $ok ok[/]   [$($Hex.Aqua) bold]$($Glyph.Heal) $hl healed[/]   [$($Hex.Red) bold]$($Glyph.Fail) $fl failed[/]   [$($Hex.Fg)]total $(Format-Duration $total.Elapsed)[/]"
+    $sum = "[$($Hex.Green) bold]$($Glyph.Ok) $ok ok[/]   [$($Hex.Aqua) bold]$($Glyph.Heal) $hl healed[/]   "
+    if ($bl) { $sum += "[$($Hex.Orange) bold]$($Glyph.Warn) $bl blocked[/]   " }
+    $sum += "[$($Hex.Red) bold]$($Glyph.Fail) $fl failed[/]   [$($Hex.Fg)]total $(Format-Duration $total.Elapsed)[/]"
     if ($script:DryRunOn) { $sum += "   [$($Hex.Purple) bold]$($Glyph.Dry) DRY RUN - nothing was installed or changed[/]" }
     if ($removed.Count) { $sum += "`n[$($Hex.Gray)]Removed $($removed.Count) new desktop shortcut(s): $(E ($removed -join ', '))[/]" }
     if ($hl) { $sum += "`n[$($Hex.Aqua)]Healed package IDs saved to winget-id-overrides.json - every PC starts healed.[/]" }
     $sum += "`n[$($Hex.Gray)]Log: $(E $log)[/]"
-    $border = if ($script:DryRunOn) { $Hex.Purple } elseif ($fl) { $Hex.Red } else { $Hex.Green }
+    $rs = @($results | Where-Object Status -eq 'restart')
+    if ($rs.Count) { $sum += "`n[$($Hex.Yellow)]Restart Windows to finish: $(E (@($rs | ForEach-Object Name) -join ', '))[/]" }
+    $border = if ($script:DryRunOn) { $Hex.Purple } elseif ($fl) { $Hex.Red } elseif ($bl) { $Hex.Orange } else { $Hex.Green }
     Out-Render (New-KitPanel $sum " [$border bold]Summary[/] " $border)
 
     # rest-of-PC upgrades (negative Ids) are not catalogue apps: never remembered as a selection
     $script:State.LastSelection = @($Selection | Where-Object { $_.Id -gt 0 } | ForEach-Object Id)
-    $script:State.LastFailed = @($results | Where-Object { $_.Status -eq 'failed' -and $_.Id -gt 0 } | ForEach-Object Id)
+    $script:State.LastFailed = @($results | Where-Object { -not (Test-KitResultOk $_) -and $_.Id -gt 0 } | ForEach-Object Id)
     if (-not $script:DryRunOn) { Save-KitState $script:State }
+    $script:LastRunOrder = $order
     return $results
+}
+
+function Invoke-RunWithRetry {
+    <#
+    Invoke-Run, then the results screen's actions: "Retry the failed / blocked"
+    (after closing the apps that were in use) runs just those again, as often as
+    needed; Back returns. One pinned Back row when nothing failed.
+    #>
+    param([object[]]$Selection, [ValidateSet('install', 'update')][string]$Mode = 'install', [string]$Title = 'Installing', [string]$BackLabel = 'Back to main menu')
+    $results = @(Invoke-Run -Selection $Selection -Mode $Mode -Title $Title)
+    while ($true) {
+        $bad = @($results | Where-Object { -not (Test-KitResultOk $_) })
+        if (-not $bad.Count) { Wait-Back $BackLabel; return }
+        $ids = @($bad | ForEach-Object Id)
+        $items = @(@{ Key = 'retry'; Label = "[$($Hex.Orange) bold]$($Glyph.Pointer) Retry the failed / blocked[/] [$($Hex.Gray)]($(Get-Plural $bad.Count 'app'); close the apps in use first)[/]" })
+        if ((Select-One -Title @() -Items $items -BackLabel $BackLabel) -ne 'retry') { return }
+        $again = @($script:LastRunOrder | Where-Object { $ids -contains $_.Id })
+        $results = @(Invoke-Run -Selection $again -Mode $Mode -Title "$Title (retry)")
+    }
 }
 
 # ---------------------------------------------------------------- screens
@@ -862,7 +895,7 @@ function Show-Install {
                 $acts += @{ Key = 'edit';   Label = "[$($Hex.Fg)]Change the selection (full list)[/]" }
                 $acts += @{ Key = 'menu';   Label = "[$($Hex.Gray)]Main menu[/]" }
                 switch (Select-One -Title "[$($Hex.Fg) bold]Next[/]" -Items $acts -BackLabel 'Back to the app list') {
-                    'go'     { [void](Invoke-Run -Selection $sel); $script:ScanDone = $false; Wait-Back; return }
+                    'go'     { Invoke-RunWithRetry -Selection $sel; $script:ScanDone = $false; return }
                     'search' { $step = 'search' }
                     'edit'   { $step = 'pick' }
                     'menu'   { return }
@@ -945,8 +978,7 @@ function Show-UpdateAI {
             default { return }
         }
         if (-not $sel -or $sel.Count -eq 0) { continue }
-        [void](Invoke-Run -Selection $sel -Mode 'update' -Title 'Updating AI tools')
-        Wait-Back
+        Invoke-RunWithRetry -Selection $sel -Mode 'update' -Title 'Updating AI tools'
         return 'ran'
     }
 }
@@ -971,22 +1003,24 @@ function Show-UpdateAll {
     $plan = $script:plan
     while ($true) {
         Show-Header 'Update everything'
-        if ($plan.Run.Count) {
+        if ($plan.Run.Count -or $plan.SelfUpdating.Count) {
             # rows that fit: window - header(3) - table frame + caption(5) - blank(1) - action list(~9) - spare(2)
-            $rows = @(@($plan.Kit | ForEach-Object { @{ Kind = 'kit'; P = $_ } }) + @($plan.Other | ForEach-Object { @{ Kind = 'pc'; P = $_ } }))
-            $trim = Get-TrimmedRows $rows ([Math]::Max(4, (Get-WindowHeight) - 20)) { if ($_.Kind -eq 'kit') { 0 } else { 1 } }
+            $rows = @(@($plan.Kit | ForEach-Object { @{ Kind = 'kit'; P = $_ } }) + @($plan.SelfUpdating | ForEach-Object { @{ Kind = 'self'; P = $_ } }) + @($plan.Other | ForEach-Object { @{ Kind = 'pc'; P = $_ } }))
+            $trim = Get-TrimmedRows $rows ([Math]::Max(4, (Get-WindowHeight) - $(if ($plan.SelfUpdating.Count) { 21 } else { 20 }))) { switch ($_.Kind) { 'kit' { 0 } 'self' { 1 } default { 2 } } }
             $t = New-KitTable @(' ', 'App', 'From', 'To', 'Where', 'How') $Hex.Aqua
             foreach ($r in $trim.Rows) {
                 $p = $r.P
-                if ($r.Kind -eq 'kit') {
+                if ($r.Kind -in 'kit', 'self') {
                     $from = $script:Installed[$p.Id]; if (-not $from) { $from = 'installed' }
                     $to = if ($script:Updates.ContainsKey($p.Id)) { "[$($Hex.Yellow)]$(E $script:Updates[$p.Id])[/]" } elseif ($p.Update) { "[$($Hex.Gray)]its own updater[/]" } else { "[$($Hex.Gray)]latest[/]" }
-                    Add-KitRow $t @("[$($Hex.Yellow) bold]$($Glyph.Up)[/]", (Limit-Markup "[$($Hex.Fg)]$(E $p.Name)[/]" 30), (Limit-Markup (E $from) 18), $to, "[$($Hex.Orange)]kit app[/]", (Get-MethodLabel $p))
+                    if ($r.Kind -eq 'self') { Add-KitRow $t @("[$($Hex.Gray)]-[/]", (Limit-Markup "[$($Hex.Gray)]$(E $p.Name)[/]" 30), (Limit-Markup (E $from) 18), $to, "[$($Hex.Gray)]updates itself[/]", "[$($Hex.Gray)]left out[/]") }
+                    else { Add-KitRow $t @("[$($Hex.Yellow) bold]$($Glyph.Up)[/]", (Limit-Markup "[$($Hex.Fg)]$(E $p.Name)[/]" 30), (Limit-Markup (E $from) 18), $to, "[$($Hex.Orange)]kit app[/]", (Get-MethodLabel $p)) }
                 } else {
                     Add-KitRow $t @("[$($Hex.Yellow) bold]$($Glyph.Up)[/]", (Limit-Markup "[$($Hex.Fg)]$(E $p.Name)[/]" 30), (Limit-Markup (E $p.Current) 18), (Limit-Markup "[$($Hex.Yellow)]$(E $p.Latest)[/]" 18), "[$($Hex.Blue)]other on this PC[/]", 'winget upgrade')
                 }
             }
             $cap = "[$($Hex.Orange)]$(Get-Plural $plan.Kit.Count 'kit app')[/] [$($Hex.Gray)]$($Glyph.Dot)[/] [$($Hex.Blue)]$(Get-Plural $plan.Other.Count 'other app') on this PC[/]"
+            if ($plan.SelfUpdating.Count) { $cap += " [$($Hex.Gray)]$($Glyph.Dot) $($plan.SelfUpdating.Count) update themselves (left out)[/]" }
             if ($plan.Excluded.Count) { $cap += " [$($Hex.Gray)]$($Glyph.Dot) $(@($plan.Excluded | Where-Object Why -ne 'in the catalogue').Count) skipped (pinned / unknown version)[/]" }
             if ($trim.Hidden) { $cap += " [$($Hex.Gray)]$($Glyph.Dot) $($trim.Hidden) more not shown[/]" }
             $t.Caption = [Spectre.Console.TableTitle]::new($cap)
@@ -1000,11 +1034,34 @@ function Show-UpdateAll {
             $verb = if ($script:DryRunOn) { 'Simulate' } else { 'Update' }
             $items += @{ Key = 'go'; Label = "[$($Hex.Orange) bold]$($Glyph.Pointer) $verb all now[/] [$($Hex.Gray)]($(Get-Plural $plan.Run.Count 'app'): $($plan.Kit.Count) kit + $($plan.Other.Count) other)[/]" }
         }
+        if ($plan.SelfUpdating.Count) {
+            $items += @{ Key = 'pick'; Label = "[$($Hex.Fg)]Choose which to update[/] [$($Hex.Gray)](apps that update themselves start unticked)[/]" }
+        }
         switch (Select-One -Title "[$($Hex.Fg) bold]Review[/] [$($Hex.Gray)](interactive and post-install items are never part of this)[/]" -Items $items -BackLabel 'Back') {
             'go' {
-                [void](Invoke-Run -Selection $plan.Run -Mode 'update' -Title 'Updating everything')
+                Invoke-RunWithRetry -Selection $plan.Run -Mode 'update' -Title 'Updating everything'
                 $script:ScanDone = $false
-                Wait-Back
+                return 'ran'
+            }
+            'pick' {
+                Show-Header 'Choose updates'
+                $pitems = @()
+                foreach ($grp in @(@{ K = 'kit'; L = 'KIT APPS'; C = $Hex.Orange; P = @($plan.Kit); On = $true }, @{ K = 'self'; L = 'UPDATES ITSELF'; C = $Hex.Gray; P = @($plan.SelfUpdating); On = $false }, @{ K = 'pc'; L = 'OTHER ON THIS PC'; C = $Hex.Blue; P = @($plan.Other); On = $true })) {
+                    if (-not $grp.P.Count) { continue }
+                    $pitems += New-PickItem "g:$($grp.K)" "[$($grp.C) bold]$($grp.L)[/]" -Group $grp.K -Header
+                    foreach ($x in $grp.P) { $pitems += New-PickItem "$($x.Id)" "[$($Hex.Fg)]$(E $x.Name)[/]" -Group $grp.K -On:$grp.On }
+                }
+                $pinned = @(
+                    New-PickItem 'done' "[$($Hex.Orange) bold]$($Glyph.Pointer) Continue[/] [$($Hex.Gray)](enter)[/]"
+                    New-PickItem 'back' "[$($Hex.Gray)]$($Glyph.Left) Back[/]"
+                )
+                $r = Show-Picker -Title @("[$($Hex.Fg) bold]Choose updates[/]") -Items $pitems -Pinned $pinned -Multi
+                if ($r.Action -eq 'back' -or ($r.Action -eq 'pinned' -and $r.Key -eq 'back')) { continue }
+                $ids = @($r.Selected | Where-Object { $_ -notlike 'g:*' } | ForEach-Object { [int]$_ })
+                $sel = @(@($plan.Kit) + @($plan.SelfUpdating) + @($plan.Other) | Where-Object { $ids -contains $_.Id })
+                if (-not $sel.Count) { continue }
+                Invoke-RunWithRetry -Selection @(@(Get-KitRunOrder @($sel | Where-Object { $_.Id -gt 0 })) + @($sel | Where-Object { $_.Id -lt 0 })) -Mode 'update' -Title 'Updating'
+                $script:ScanDone = $false
                 return 'ran'
             }
             default { return }

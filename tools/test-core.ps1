@@ -83,7 +83,8 @@ if ($Online) {
 foreach ($p in $order) {
     if ($p.Method -eq 'direct' -and -not $Online) { continue }
     $r = Invoke-KitPackage -Package $p -Installed $installed[$p.Id] -DryRun
-    $okStatus = $r.Status -in 'dryrun', 'current'
+    # blocked: Smart App Control is on here and the tool is unsigned (Hermes) - reported, not run
+    $okStatus = $r.Status -in 'dryrun', 'current' -or ($r.Status -eq 'blocked' -and $r.Detail -like '*Smart App Control*')
     Check $okStatus ("{0,-22} {1,-7} {2}" -f $p.Name, $r.Status, $r.Detail)
 }
 if ($Online) {
@@ -97,12 +98,31 @@ Check (Test-KitVersionCurrent -Installed '2.8.0' -Latest '2.8.0') 'version compa
 Check (-not (Test-KitVersionCurrent -Installed '2.5.5' -Latest '2.8.0')) 'version compare: older is not current'
 Check (Test-KitVersionCurrent -Installed '6.28899.6.0' -Latest '6.28899.6') 'version compare: trailing .0'
 
-Write-Host 'dev folder (Get-KitDevFolderPath, injected D: check):'
+Write-Host 'dev folder (Get-KitDevFolderPath, injected D: check + folder checks, every combination):'
 $sys = if ($env:SystemDrive) { $env:SystemDrive } else { 'C:' }
-Check ((Get-KitDevFolderPath -DDriveType 'Fixed') -eq 'D:\dev\git') 'D: is a fixed disk -> D:\dev\git'
-foreach ($t in '', 'CDRom', 'Removable', 'Network') { Check ((Get-KitDevFolderPath -DDriveType $t) -eq "$sys\dev\git") "D: '$t' -> $sys\dev\git" }
-$r = Invoke-KitDevFolder -DryRun -DDriveType ''
-Check (($r.Status -eq 'dryrun' -and $r.Detail -eq "would create $sys\dev\git") -or ($r.Status -eq 'current' -and $r.Detail -like '*already exists')) "dry run creates nothing: $($r.Status) - $($r.Detail)"
+$devCands = @('D:\dev\github', "$sys\dev\github", 'D:\dev\git', "$sys\dev\git")
+$devBad = @()
+foreach ($dt in 'Fixed', '', 'CDRom', 'Removable', 'Network') {
+    $hasD = $dt -eq 'Fixed'
+    for ($mask = 0; $mask -lt 16; $mask++) {
+        $present = @(for ($b = 0; $b -lt 4; $b++) { if ($mask -band (1 -shl $b)) { $devCands[$b] } })
+        $ex = { param($p) $present -contains $p }.GetNewClosure()
+        # expected: the first existing candidate in order (D: ones only with a fixed D:), else a new dev\github
+        $want = $null
+        foreach ($c in $devCands) { if ($present -contains $c -and ($hasD -or $c -notlike 'D:*')) { $want = $c; break } }
+        if (-not $want) { $want = if ($hasD) { 'D:\dev\github' } else { "$sys\dev\github" } }
+        $got = Get-KitDevFolderPath -DDriveType $dt -Exists $ex
+        if ($got -ne $want) { $devBad += "D:'$dt' present=[$($present -join ',')] got $got want $want" }
+    }
+}
+Check (-not $devBad.Count) "80 combinations (D: fixed / none / CD / USB / network x 16 sets of existing folders): existing dev\github before dev\git, D: before C:, else a new dev\github$(if ($devBad.Count) { ': ' + ($devBad | Select-Object -First 3) -join '; ' })"
+Check ((Get-KitDevFolderPath -DDriveType 'Fixed' -Exists { param($p) $p -eq "$sys\dev\github" }) -eq "$sys\dev\github") 'athena-style: C:\dev\github exists, D: present -> C:\dev\github (nothing new on D:)'
+Check ((Get-KitDevFolderPath -DDriveType 'Fixed' -Exists { param($p) $p -in 'D:\dev\github', "$sys\dev\git" }) -eq 'D:\dev\github') 'stacy-style: D:\dev\github wins over an old dev\git'
+Check ((Get-KitDevFolderPath -DDriveType '' -Exists { param($p) $p -eq "$sys\dev\git" }) -eq "$sys\dev\git") 'joanna/ninja-style: only C:\dev\git -> reused, never moved or renamed'
+$r = Invoke-KitDevFolder -DryRun -DDriveType '' -Exists { param($p) [void]$p; $false }
+Check ($r.Status -eq 'dryrun' -and $r.Detail -eq "would create $sys\dev\github") "nothing there, no D: -> would create $sys\dev\github (dry run creates nothing)"
+$r = Invoke-KitDevFolder -DryRun -DDriveType '' -Exists { param($p) $p -eq "$sys\dev\git" }
+Check ($r.Status -eq 'current' -and $r.To -eq "$sys\dev\git") "an existing dev\git -> current, nothing created ($($r.Detail))"
 
 Write-Host 'WSL (Select-KitUbuntuDistro on sample wsl --list --online output):'
 $wslOnline = @('The following is a list of valid distributions that can be installed.', "Install using 'wsl.exe --install <Distro>'.", '',
@@ -146,7 +166,7 @@ Set-KitLocalPref -Name 'elevateAtStart' -Value $true
 
 Write-Host 'NoAdmin: installers that must not run as administrator (de-elevated from an elevated kit):'
 $noAdmin = @($cat | Where-Object NoAdmin | ForEach-Object Id | Sort-Object)
-Check (($noAdmin -join ',') -eq '10,36,38,46,53') "NoAdmin set = OneDrive, VS Code, GitHub Desktop, Claude Code CLI, Cursor ($(@($cat | Where-Object NoAdmin | ForEach-Object Name) -join ', '))"
+Check (($noAdmin -join ',') -eq '10,36,38,46,53,55') "NoAdmin set = OneDrive, VS Code, GitHub Desktop, Claude Code CLI, Cursor, Antigravity IDE ($(@($cat | Where-Object NoAdmin | ForEach-Object Name) -join ', '))"
 Check (@($cat | Where-Object { $_.NoAdmin -and ($_.Interactive -or $_.Elevated) }).Count -eq 0) 'NoAdmin is never on an Interactive or Elevated item'
 $vs = $byId[36]; $np = $byId[2]
 Check (Test-KitDeElevate -Package $vs -IsAdmin $true) 'routing: NoAdmin + elevated kit -> de-elevated'
@@ -222,11 +242,12 @@ $rows = @(ConvertFrom-KitWingetUpgradeText -Lines $wu)
 Check ($rows.Count -eq 8 -and $rows[2].Id -eq 'Gyan.FFmpeg' -and $rows[2].Version -eq '9.0.2' -and $rows[2].Available -eq '9.1' -and $rows[2].Source -eq 'winget') "parses the first table only ($($rows.Count) rows; footer and explicit-targeting table left out)"
 $ap = Get-KitUpdateAllPlan -Installed @{ 37 = '2.55.0.5'; 36 = '1.140.0'; 18 = '2.2540.1.0'; 46 = '2.0.1'; 59 = '' } -Updates @{ 37 = '2.56.1'; 36 = '1.148.0'; 18 = '2.2546.3.0' } -UpgradeLines $wu -Pinned @('Some.Pinned') -Packages $cat
 $kitIds = @($ap.Kit | ForEach-Object Id | Sort-Object); $oth = @($ap.Other | ForEach-Object Ref)
-Check (($kitIds -join ',') -eq '18,36,37,46') "kit half: catalogue apps with updates + native updater, not the Interactive Chris Titus prompt -> [$($kitIds -join ',')]"
+Check (($kitIds -join ',') -eq '36,37,46') "kit half: catalogue apps with updates + native updater, not the Interactive Chris Titus prompt -> [$($kitIds -join ',')]"
+Check ((@($ap.SelfUpdating | ForEach-Object Id) -join ',') -eq '18' -and @($ap.Run | Where-Object Id -eq 18).Count -eq 0) "SelfUpdates: WhatsApp (18, updates itself) listed apart and left out of Run -> [$(@($ap.SelfUpdating | ForEach-Object Name) -join ', ')]"
 Check (($oth -join ',') -eq 'Gyan.FFmpeg,OpenJS.NodeJS') "rest of PC: only rows outside the catalogue -> [$($oth -join ', ')]"
 $exc = @{}; foreach ($x in $ap.Excluded) { $exc[$x.Id] = $x.Why }
 Check ($exc['Git.Git'] -eq 'in the catalogue' -and $exc['9NKSQGP7F2NH'] -eq 'in the catalogue' -and $exc['Some.Pinned'] -eq 'pinned' -and $exc['Odd.Unknown'] -eq 'unknown version' -and $exc['Range.App'] -eq 'unknown version') 'left out: catalogue IDs (winget + Store), pinned, unknown and ranged versions'
-Check (@($ap.Other | Where-Object { $_.Id -ge 0 -or $_.Method -ne 'winget-upgrade' }).Count -eq 0 -and @($ap.Run).Count -eq 6 -and $ap.Run[-1].Method -eq 'winget-upgrade') 'other apps: negative Ids, Method winget-upgrade, run after the kit apps'
+Check (@($ap.Other | Where-Object { $_.Id -ge 0 -or $_.Method -ne 'winget-upgrade' }).Count -eq 0 -and @($ap.Run).Count -eq 5 -and $ap.Run[-1].Method -eq 'winget-upgrade') 'other apps: negative Ids, Method winget-upgrade, run after the kit apps'
 $ff = $ap.Other[0]
 $r = Invoke-KitPackage -Package $ff -DryRun
 Check ($r.Status -eq 'dryrun' -and $r.From -eq '9.0.2' -and $r.To -eq '9.1' -and $r.Detail -eq 'winget upgrade Gyan.FFmpeg') "dry run of an other app: $($r.Detail) ($($r.From) -> $($r.To))"
@@ -312,7 +333,7 @@ $f1 = Join-Path $wt 'fresh\settings.json'
 $r = Merge-KitTerminalSettings -Path $f1 -Desired $desired -StartingDirectory 'C:\dev\git'
 $d = ConvertFrom-KitJsoncText ([IO.File]::ReadAllText($f1))
 $list = @($d['profiles']['list'])
-Check ($r.Status -eq 'done' -and $d['defaultProfile'] -eq $claudeGuid -and $list.Count -eq 1 -and $list[0]['name'] -eq 'Claude Code' -and $list[0]['commandline'] -eq 'pwsh.exe -NoExit -Command claude') "fresh: settings.json created with the Claude Code profile as default ($($r.Detail))"
+Check ($r.Status -eq 'done' -and $d['defaultProfile'] -eq $claudeGuid -and $list.Count -eq 2 -and $list[1]['name'] -eq 'my-win-kit' -and $list[0]['name'] -eq 'Claude Code' -and $list[0]['commandline'] -eq 'pwsh.exe -NoExit -Command claude') "fresh: settings.json created with the Claude Code profile as default ($($r.Detail))"
 Check ($d['profiles']['defaults']['font']['face'] -eq 'CaskaydiaCove Nerd Font Mono' -and $d['profiles']['defaults']['colorScheme'] -eq 'Dark+' -and $d['profiles']['defaults']['opacity'] -eq 90 -and $d['profiles']['defaults']['startingDirectory'] -eq 'C:\dev\git') 'fresh: profile defaults (font, Dark+, opacity 90, starting folder)'
 Check (@($d['keybindings']).Count -eq 3 -and $d['copyOnSelect'] -eq $false -and $d['useAcrylicInTabRow'] -eq $true -and @($d['newTabMenu'])[0]['type'] -eq 'remainingProfiles') 'fresh: globals + 3 key bindings'
 Check ($list[0]['icon'] -eq ([string][char]0xD83E + [char]0xDD16) -and -not ([IO.File]::ReadAllText($f1) -match '[^\x00-\x7F]')) 'fresh: robot icon kept, file stays ASCII (\u escapes)'
@@ -345,7 +366,7 @@ $d = ConvertFrom-KitJsoncText ([IO.File]::ReadAllText($f2))
 $list = @($d['profiles']['list'])
 $cl = @($list | Where-Object { $_['guid'] -eq $claudeGuid })
 Check ($r.Status -eq 'done' -and $r.Backup -and ([IO.File]::ReadAllText($r.Backup)) -eq $sample -and (Split-Path -Leaf $r.Backup) -like 'settings.json.bak-my-win-kit-2*') "existing: backed up first ($(Split-Path -Leaf $r.Backup))"
-Check ($d['theme'] -eq 'dark' -and @($d['schemes'])[0]['name'] -eq 'Mine // not a comment' -and @($d['actions']).Count -eq 1 -and $list.Count -eq 2 -and @($list | Where-Object { $_['name'] -eq 'Windows PowerShell' }).Count -eq 1) 'existing: other profiles, schemes, actions, theme kept (comments and a trailing comma read fine)'
+Check ($d['theme'] -eq 'dark' -and @($d['schemes'])[0]['name'] -eq 'Mine // not a comment' -and @($d['actions']).Count -eq 1 -and $list.Count -eq 3 -and @($list | Where-Object { $_['name'] -eq 'Windows PowerShell' }).Count -eq 1) 'existing: other profiles, schemes, actions, theme kept (comments and a trailing comma read fine)'
 Check ($cl.Count -eq 1 -and $cl[0]['commandline'] -eq 'pwsh.exe -NoExit -Command claude' -and $cl[0]['tabTitle'] -eq 'mine' -and $d['defaultProfile'] -eq $claudeGuid) 'existing: the Claude Code profile updated by guid (own keys kept), made the default'
 Check ($d['profiles']['defaults']['font']['size'] -eq 11 -and $d['profiles']['defaults']['font']['face'] -eq 'CaskaydiaCove Nerd Font Mono' -and $d['profiles']['defaults']['opacity'] -eq 90) 'existing: profile defaults merged (font size kept, face set, opacity 90)'
 $kb = @($d['keybindings'])
@@ -363,13 +384,13 @@ Check ($r.Status -eq 'failed' -and [IO.File]::ReadAllText($f3) -eq '{ "profiles"
 $f4 = Join-Path $wt 'nofont\settings.json'
 $r = Merge-KitTerminalSettings -Path $f4 -Desired $desired -NoFont -NoDefaultProfile
 $d = ConvertFrom-KitJsoncText ([IO.File]::ReadAllText($f4))
-Check (-not $d['profiles']['defaults'].Contains('font') -and -not $d.Contains('defaultProfile') -and @($d['profiles']['list']).Count -eq 1) '-NoFont (Nerd Font missing) / -NoDefaultProfile (no PowerShell 7): left out'
+Check (-not $d['profiles']['defaults'].Contains('font') -and -not $d.Contains('defaultProfile') -and @($d['profiles']['list']).Count -eq 2) '-NoFont (Nerd Font missing) / -NoDefaultProfile (no PowerShell 7): left out'
 $legacy = Join-Path $wt 'legacy\settings.json'
 New-Item -ItemType Directory -Path (Split-Path $legacy) -Force | Out-Null
 [IO.File]::WriteAllText($legacy, '{ "profiles": [ { "guid": "{0caa0dad-35be-5f56-a8ff-afceeeaa6101}", "name": "cmd" } ] }')
 $r = Merge-KitTerminalSettings -Path $legacy -Desired $desired
 $d = ConvertFrom-KitJsoncText ([IO.File]::ReadAllText($legacy))
-Check ($r.Status -eq 'done' -and @($d['profiles']['list']).Count -eq 2 -and $d['profiles']['defaults'] -is [System.Collections.IDictionary]) 'old-style profiles list: wrapped into { defaults, list }, entries kept'
+Check ($r.Status -eq 'done' -and @($d['profiles']['list']).Count -eq 3 -and $d['profiles']['defaults'] -is [System.Collections.IDictionary]) 'old-style profiles list: wrapped into { defaults, list }, entries kept'
 
 Write-Host 'essentials: Terminal starting folder:'
 $od = Join-Path $wt 'od'
@@ -384,7 +405,19 @@ Check ($s1.Source -eq 'prefer' -and $s1.Path -eq (Join-Path $od '.playground')) 
 $s1 = Resolve-KitTerminalStartDir -Prefer '%MYWINKIT_NO_SUCH_VAR%\.playground' -Fallback (Join-Path $wt 'devgit')
 Check ($s1.Source -eq 'fallback') 'an unset variable (no OneDrive) -> the dev folder'
 Remove-Item Env:MYWINKIT_TEST_OD
-Check ((Get-KitDevFolderPath -DDriveType 'Fixed') -eq 'D:\dev\git') 'default fallback = the dev folder logic (Id 60)'
+Check ((Get-KitDevFolderPath -DDriveType 'Fixed' -Exists { param($p) [void]$p; $false }) -eq 'D:\dev\github') 'default fallback = the dev folder logic (Id 60)'
+$s1 = Resolve-KitTerminalStartDir -Prefer 'dev-folder' -DryRun
+Check ($s1.Path -eq (Get-KitDevFolderPath)) "prefer 'dev-folder' (the keyword in config/terminal.json) = the dev folder: $($s1.Path)"
+$tjd = ConvertFrom-KitJsonText ([IO.File]::ReadAllText((Join-Path $root 'config\terminal.json')))
+Check ($tjd['startingDirectory']['prefer'] -eq 'dev-folder') 'config/terminal.json: startingDirectory.prefer = dev-folder'
+# a kit-managed profile that carries its own folder (a PC's Claude Code profile) is moved to the dev folder; other profiles keep theirs
+$f5 = Join-Path $wt 'ownfolder\settings.json'
+New-Item -ItemType Directory -Path (Split-Path $f5) -Force | Out-Null
+[IO.File]::WriteAllText($f5, '{ "profiles": { "defaults": {}, "list": [ { "guid": "{b7a91c2d-4e83-4f6a-9d25-1c3f8ae60b74}", "name": "Claude Code", "startingDirectory": "E:\\old\\.playground" }, { "guid": "{61c54bbd-c2c6-5271-96e7-009a87ff44bf}", "name": "Windows PowerShell", "startingDirectory": "E:\\mine" } ] } }')
+$r = Merge-KitTerminalSettings -Path $f5 -Desired $desired -StartingDirectory 'D:\dev\git'
+$d = ConvertFrom-KitJsoncText ([IO.File]::ReadAllText($f5))
+$cl = @(@($d['profiles']['list']) | Where-Object { $_['guid'] -eq $claudeGuid }); $wp = @(@($d['profiles']['list']) | Where-Object { $_['name'] -eq 'Windows PowerShell' })
+Check ($r.Status -eq 'done' -and $cl[0]['startingDirectory'] -eq 'D:\dev\git' -and $wp[0]['startingDirectory'] -eq 'E:\mine' -and $d['profiles']['defaults']['startingDirectory'] -eq 'D:\dev\git') 'kit profile with its own folder -> the dev folder; a non-kit profile keeps its own; defaults set'
 
 Write-Host 'essentials: default terminal app (registry through a stub, never the real one):'
 $reg = @{}
@@ -450,6 +483,128 @@ $keepWt = $env:MYWINKIT_WT_SETTINGS; $env:MYWINKIT_WT_SETTINGS = Join-Path $wt '
 Check ((Get-KitTerminalSettingsPath) -eq (Join-Path $wt 'x.json')) 'MYWINKIT_WT_SETTINGS redirects the Terminal settings file (tests)'
 $env:MYWINKIT_WT_SETTINGS = $keepWt
 Check ((Get-KitTerminalSettingsPath) -like '*Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json' -or (Get-KitTerminalSettingsPath) -like '*Microsoft\Windows Terminal\settings.json') 'default: the Terminal package''s LocalState\settings.json'
+
+Write-Host 'catalogue changes 2026-11-26 (kit 2.8.0):'
+$removedNow = @(@($data['Removed']) | ForEach-Object { [int]$_['Id'] })
+Check (-not $byId.ContainsKey(41) -and $removedNow -contains 41 -and $byId[62].Ref -eq 'Python.Python.3.14' -and $byId[62].Group -eq 'DEV' -and -not $byId[62].Default) 'Python 3.13 (41) moved to Removed; Python 3.14 (62, Python.Python.3.14) in DEV, off'
+Check ($byId[3].Uninstall -eq '^PowerToys' -and 'PowerToys (Preview)' -match $byId[3].Uninstall) 'PowerToys (3): Uninstall ^PowerToys matches its ARP name "PowerToys (Preview)"'
+Check ($byId[40].Uninstall -and 'Node.js' -match $byId[40].Uninstall -and 'Node.js LTS helper' -notmatch '^Nodejs') 'Node.js LTS (40): Uninstall ^Node\.js matches "Node.js"'
+Check (-not $byId[56].Requires -and $byId[56].Unsigned -and $byId[56].Desc -like '*fetches its own Git*') 'Hermes (56): no Requires git, Unsigned (Smart App Control), new Desc'
+Check ($byId[55].NoAdmin -and $data['Direct']['antigravity-ide']['Args'] -like '*/mergetasks=!runcode*') 'Antigravity IDE (55): NoAdmin + /mergetasks=!runcode'
+Check ($byId[13].Name -eq 'Adobe Acrobat Reader' -and $byId[13].Desc -eq 'Free Adobe PDF reader') 'Adobe Acrobat Reader (13): renamed, Id kept'
+Check ($byId[2].InstallerType -eq 'nullsoft') 'Notepad++ (2): InstallerType nullsoft'
+$selfIds = @($cat | Where-Object SelfUpdates | ForEach-Object Id | Sort-Object)
+Check (($selfIds -join ',') -eq '5,7,10,11,13,16,18,20') "SelfUpdates = Office, Chrome, OneDrive, Dropbox, Acrobat Reader, Teams, WhatsApp, AnyDesk ($($selfIds -join ','))"
+Check ($byId[5].HashNote -like '*setup.exe*') 'Office (5): a friendly hash-mismatch note'
+
+Write-Host 'winget outcome buckets (Get-KitWingetOutcome on sample exit codes, no winget run):'
+$buckets = [ordered]@{ '8A15002B' = 'current'; '8A15004F' = 'current'; '8A150061' = 'current'; '8A15010E' = 'current'; '80073D06' = 'current'
+    '8A150109' = 'restart'; '8A15010B' = 'restart'; '8A150101' = 'busy'; '8A150103' = 'busy'; '8A150111' = 'busy'
+    '8A150008' = 'transient'; '8A15006D' = 'transient'; '8A150102' = 'transient'; '8A150107' = 'transient'; '8A15007F' = 'transient'
+    '8A15008E' = 'reinstall'; '8A150068' = 'pinned'; '8A15001B' = 'policy'; '8A15001C' = 'policy'; '8A15010D' = 'otherver'; '8A150011' = 'hash'
+    '8A15010A' = 'failed'; '8A150006' = 'failed' }
+$bad = @(foreach ($hx in $buckets.Keys) { $o = Get-KitWingetOutcome -ExitCode ([Convert]::ToInt32($hx, 16)) -Out @('x'); if ($o.Status -ne $buckets[$hx]) { "0x$hx=$($o.Status)" } })
+Check (-not $bad.Count) "every code lands in its bucket (23 codes; 0x8A15010A reboot-before-install stays failed)$(if ($bad.Count) { ': ' + ($bad -join ', ') })"
+$pk = [pscustomobject]@{ Name = 'Demo'; SelfUpdates = $false; HashNote = $null }
+$res = @{}
+foreach ($b in 'restart', 'busy', 'reinstall', 'policy', 'otherver', 'pinned', 'hash', 'failed') { $res[$b] = (Get-KitWingetResult -Package $pk -Outcome @{ Status = $b; Reason = "r (winget 0x8A150101)" } -IsInstalled $true).Status }
+Check ($res['restart'] -eq 'restart' -and $res['busy'] -eq 'blocked' -and $res['reinstall'] -eq 'blocked' -and $res['policy'] -eq 'blocked' -and $res['otherver'] -eq 'blocked' -and $res['pinned'] -eq 'skipped' -and $res['hash'] -eq 'failed' -and $res['failed'] -eq 'failed') "result status per bucket: restart / blocked / skipped / failed ($(($res.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ' '))"
+$busy = Get-KitWingetResult -Package $pk -Outcome (Get-KitWingetOutcome -ExitCode ([Convert]::ToInt32('8A150101', 16))) -IsInstalled $true
+Check ($busy.Detail -eq 'Demo is in use - close it, then Retry (winget 0x8A150101)') "busy -> '$($busy.Detail)'"
+$re = Get-KitWingetOutcome -ExitCode ([Convert]::ToInt32('8A15008E', 16))
+Check ($re.Reason -like 'installer type changed: uninstall + install needed*') "installer type changed -> '$($re.Reason)' (never done silently)"
+$selfPk = [pscustomobject]@{ Name = 'Office'; SelfUpdates = $true; HashNote = 'Microsoft changed setup.exe; try tomorrow' }
+$hashO = Get-KitWingetOutcome -ExitCode -1978335215
+$h1 = Get-KitWingetResult -Package $selfPk -Outcome $hashO -IsInstalled $true; $h2 = Get-KitWingetResult -Package $selfPk -Outcome $hashO -IsInstalled $false
+Check ($h1.Status -eq 'skipped' -and $h1.Detail -like 'updates itself; Microsoft changed setup.exe; try tomorrow*' -and $h2.Status -eq 'blocked') "SelfUpdates + hash mismatch is never failed: installed -> $($h1.Status), missing -> $($h2.Status) ($($h2.Detail))"
+$h3 = Get-KitWingetResult -Package $pk -Outcome $hashO -IsInstalled $true
+Check ($h3.Detail -like "*winget's catalogue is behind the vendor, try later*") "hash mismatch elsewhere: $($h3.Detail)"
+Check ((Get-KitAutoExitCode -Results @([pscustomobject]@{ Status = 'restart' }, [pscustomobject]@{ Status = 'skipped' })) -eq 0 -and (Get-KitAutoExitCode -Results @([pscustomobject]@{ Status = 'blocked' }, [pscustomobject]@{ Status = 'installed' })) -eq 2 -and (Get-KitAutoExitCode -Results @([pscustomobject]@{ Status = 'blocked' }, [pscustomobject]@{ Status = 'failed' })) -eq 1) '/auto exit: restart needed + skipped = 0, blocked = 2, failed = 1'
+
+Write-Host 'winget arguments (installer type / scope only on a fresh install; source always named):'
+$ia = Get-KitWingetInstallArgs -WId 'Notepad++.Notepad++' -Method 'winget' -InstallerType 'nullsoft' -Scope 'user'
+Check (($ia -join ' ') -like '*--source winget --installer-type nullsoft --scope user' -and ($ia -join ' ') -notmatch '--force|--ignore-security-hash|--include-unknown|--all') "fresh: $($ia -join ' ')"
+Check (((Get-KitWingetInstallArgs -WId '9NKSQGP7F2NH' -Method 'msstore') -join ' ') -like '*--source msstore' -and ((Get-KitWingetInstallArgs -WId 'A.B' -Method 'winget') -join ' ') -notlike '*--installer-type*') 'Store items: --source msstore; no type when none is set'
+$r = Invoke-KitPackage -Package $byId[2] -Installed $null -DryRun
+Check ($r.Detail -like '*--installer-type nullsoft*') "Notepad++ not installed (dry run): $($r.Detail)"
+$r = Invoke-KitPackage -Package $byId[2] -Installed '8.9' -DryRun
+Check ($r.Detail -notlike '*--installer-type*') "Notepad++ installed (dry run): the upgrade keeps its type ($($r.Detail))"
+
+Write-Host 'in use (install folder from Add/Remove Programs + a fake process list, nothing killed):'
+$arp = @([pscustomobject]@{ Name = 'Git'; Version = '2.55'; InstallLocation = 'C:\Program Files\Git\'; DisplayIcon = '' },
+    [pscustomobject]@{ Name = 'GitHub Desktop'; Version = '3.7'; InstallLocation = ''; DisplayIcon = 'C:\Users\x\AppData\Local\GitHubDesktop\GitHubDesktop.exe,0' },
+    [pscustomobject]@{ Name = 'Notepad++ (64-bit x64)'; Version = '8.9'; InstallLocation = ''; DisplayIcon = '"C:\Program Files\Notepad++\notepad++.exe"' },
+    [pscustomobject]@{ Name = 'Broad App'; Version = '1'; InstallLocation = 'C:\Program Files\'; DisplayIcon = 'C:\Windows\Installer\{X}\icon.exe' })
+$procs = @([pscustomobject]@{ Id = 900001; Name = 'bash'; Path = 'C:\Program Files\Git\usr\bin\bash.exe' }, [pscustomobject]@{ Id = 900002; Name = 'ssh'; Path = 'C:\Program Files\Git\usr\bin\ssh.exe' },
+    [pscustomobject]@{ Id = 900003; Name = 'bash'; Path = 'C:\Program Files\Git\usr\bin\bash.exe' }, [pscustomobject]@{ Id = 900004; Name = 'GitHubDesktop'; Path = 'C:\Users\x\AppData\Local\GitHubDesktop\app-3.7\GitHubDesktop.exe' },
+    [pscustomobject]@{ Id = $PID; Name = 'self'; Path = 'C:\Program Files\Git\self.exe' })
+$gitIn = @(Get-KitInUse -Package $byId[37] -Entries $arp -Processes $procs)
+Check (($gitIn -join ',') -eq 'bash.exe,ssh.exe') "Git (InstallLocation) in use by: $($gitIn -join ', ') (the kit's own process never counts)"
+Check ((Get-KitInstallFolder -Package $byId[38] -Entries $arp) -eq 'C:\Users\x\AppData\Local\GitHubDesktop') 'GitHub Desktop: folder from DisplayIcon; "Git" does not match "GitHub Desktop"'
+Check ((Get-KitInstallFolder -Package $byId[2] -Entries $arp) -eq 'C:\Program Files\Notepad++') 'Notepad++: name prefix + quoted DisplayIcon'
+Check ((Get-KitInstallFolder -Package ([pscustomobject]@{ Name = 'Broad App'; Uninstall = $null }) -Entries $arp) -eq '' -and @(Get-KitInUse -Package $byId[2] -Entries $arp -Processes $procs).Count -eq 0) 'Program Files itself or a Windows folder is never an install folder; no process -> not in use'
+
+Write-Host 'hash mismatch + transient retry (Invoke-KitPackage with winget mocked, nothing runs):'
+$core = Get-Module core
+$saved = & $core { @{ W = ${function:Invoke-KitWinget}; V = ${function:Get-KitPkgVersion}; S = ${function:Invoke-KitProcess}; D = $script:RetryDelaySec } }
+& $core {
+    $script:RetryDelaySec = 0
+    $script:MockCalls = [System.Collections.Generic.List[string]]::new()
+    $script:MockExits = [System.Collections.Generic.Queue[int]]::new()
+    function script:Invoke-KitWinget { param([string[]]$WingetArgs, [switch]$DeElevate) [void]$DeElevate; $script:MockCalls.Add('winget ' + ($WingetArgs -join ' ')); $ec = $script:MockExits.Dequeue(); return @{ Ec = $ec; Out = @("mock exit $ec") } }
+    function script:Get-KitPkgVersion { param([string]$WId, [string]$Method) [void]$WId; [void]$Method; return '2.0' }
+    function script:Invoke-KitProcess { param([string]$FilePath, [string[]]$ArgumentList) $script:MockCalls.Add("$FilePath " + ($ArgumentList -join ' ')); return @{ Ec = 0; Out = @(); Err = @(); Started = $true } }
+}
+$keepAdm2 = $env:MYWINKIT_SIMULATE_ADMIN; $env:MYWINKIT_SIMULATE_ADMIN = '0'
+$mockPk = [pscustomobject]@{ Id = 991; Name = 'Mock App'; Group = 'UTIL'; GroupOrder = 0; Method = 'winget'; Ref = 'Mock.App'; Update = $null; Exe = $null; Requires = $null; Interactive = $false; Elevated = $false; Shell = $null; NoAdmin = $false; Version = $null; Detect = $null; Uninstall = $null; SelfUpdates = $false; Unsigned = $false; InstallerType = $null; Scope = $null; HashNote = $null; AI = $false; Appx = $null; Fallback = $null }
+[void](Start-KitLog)
+& $core { $script:MockExits.Enqueue(-1978335215); $script:MockExits.Enqueue(0); $script:MockCalls.Clear() }
+$r = Invoke-KitPackage -Package $mockPk -Installed '1.0'
+$calls = @(& $core { $script:MockCalls })
+Check ($r.Status -eq 'updated' -and $calls.Count -eq 3 -and $calls[1] -like 'winget source update*' -and $r.Healed -like '*source update*') "hash mismatch -> winget source update -> retry -> updated ($($calls.Count) calls; $($r.Healed))"
+& $core { $script:MockExits.Enqueue(-1978335215); $script:MockCalls.Clear() }
+$r = Invoke-KitPackage -Package $mockPk -Installed '1.0'
+$calls = @(& $core { $script:MockCalls })
+Check ($r.Status -eq 'failed' -and $calls.Count -eq 1 -and $r.Detail -like "*catalogue is behind the vendor*") "second mismatch in the same run: no second source update, reported ($($r.Detail))"
+& $core { $script:MockExits.Enqueue([Convert]::ToInt32('8A150008', 16)); $script:MockExits.Enqueue(0); $script:MockCalls.Clear() }
+$r = Invoke-KitPackage -Package $mockPk -Installed '1.0'
+Check ($r.Status -eq 'updated' -and @(& $core { $script:MockCalls }).Count -eq 2) "transient (download failed) -> one automatic retry -> updated"
+& $core { $script:MockExits.Enqueue([Convert]::ToInt32('8A150008', 16)); $script:MockExits.Enqueue([Convert]::ToInt32('8A150008', 16)); $script:MockCalls.Clear() }
+$r = Invoke-KitPackage -Package $mockPk -Installed '1.0'
+Check ($r.Status -eq 'failed' -and @(& $core { $script:MockCalls }).Count -eq 2) 'transient twice -> failed after one retry (no loop)'
+& $core { $script:MockExits.Enqueue([Convert]::ToInt32('8A150109', 16)); $script:MockCalls.Clear() }
+$r = Invoke-KitPackage -Package $mockPk -Installed '1.0'
+Check ($r.Status -eq 'restart' -and $r.Detail -like '*restart Windows*') "0x8A150109 -> restart needed ($($r.Detail))"
+& $core { $script:MockExits.Enqueue([Convert]::ToInt32('8A150068', 16)); $script:MockCalls.Clear() }
+$r = Invoke-KitPackage -Package $mockPk -Installed '1.0'
+Check ($r.Status -eq 'skipped') "0x8A150068 pinned -> skipped ($($r.Detail))"
+& $core { param($s) Set-Item function:script:Invoke-KitWinget $s.W; Set-Item function:script:Get-KitPkgVersion $s.V; Set-Item function:script:Invoke-KitProcess $s.S; $script:RetryDelaySec = $s.D } $saved
+$env:MYWINKIT_SIMULATE_ADMIN = $keepAdm2
+
+Write-Host 'Smart App Control:'
+$keepSac = $env:MYWINKIT_SIMULATE_SAC
+$env:MYWINKIT_SIMULATE_SAC = 'on'
+$r = Invoke-KitPackage -Package $byId[56] -Installed '0.9' -Mode update
+Check ($r.Status -eq 'blocked' -and $r.Detail -like 'blocked by Smart App Control*') "Hermes on a Smart App Control PC: skipped without running ($($r.Status): $($r.Detail))"
+Check (Test-KitAppControlBlock -Out @("Program 'hermes.exe' failed to run: An Application Control policy has blocked this file.")) 'the Application Control message is recognised'
+$env:MYWINKIT_SIMULATE_SAC = 'off'
+$r = Invoke-KitPackage -Package $byId[56] -Installed '0.9' -Mode update -DryRun
+Check ($r.Status -eq 'dryrun') "Smart App Control off: Hermes runs as usual ($($r.Status))"
+$env:MYWINKIT_SIMULATE_SAC = $keepSac
+
+Write-Host 'Enable RDP + PowerShell 7 fallback + test hooks:'
+$rdp = Get-KitEnableRdpScript
+Check ($rdp.Contains("Enable-NetFirewallRule -Group '@FirewallAPI.dll,-28752'") -and -not $rdp.Contains('-DisplayGroup')) 'RDP firewall group by its resource string (works on Polish Windows), no localized -DisplayGroup'
+$psRel = '{ "tag_name": "v7.7.0", "assets": [ { "name": "PowerShell-7.7.0-win-x64.zip", "size": 1, "browser_download_url": "https://github.com/PowerShell/PowerShell/releases/download/v7.7.0/PowerShell-7.7.0-win-x64.zip" }, { "name": "PowerShell-7.7.0.msixbundle", "size": 120000000, "browser_download_url": "https://github.com/PowerShell/PowerShell/releases/download/v7.7.0/PowerShell-7.7.0.msixbundle" }, { "name": "PowerShellPreview-7.8.0-preview.1.msixbundle", "size": 1, "browser_download_url": "https://example.invalid/p.msixbundle" } ] }'
+$ms = Get-KitPwshMsixAsset -Json $psRel
+Check ($ms.Tag -eq 'v7.7.0' -and $ms.Name -eq 'PowerShell-7.7.0.msixbundle' -and $ms.Url -eq 'https://github.com/PowerShell/PowerShell/releases/download/v7.7.0/PowerShell-7.7.0.msixbundle') "PowerShell 7: the .msixbundle from the GitHub API answer ($($ms.Name))"
+$threw = $false; try { [void](Get-KitPwshMsixAsset -Json '{ "tag_name": "v7.7.0", "assets": [ { "name": "PowerShell-7.7.0-win-x64.msi", "browser_download_url": "x" } ] }') } catch { $threw = $true }
+Check $threw 'no .msixbundle in the release -> error (the loader then tries the Store package)'
+$keepOut = $env:MYWINKIT_SIMULATE_OUTCOME; $env:MYWINKIT_SIMULATE_OUTCOME = '2=blocked,3=restart'
+$r1 = Invoke-KitPackage -Package $byId[2] -DryRun; $r2 = Invoke-KitPackage -Package $byId[3] -DryRun; $r3 = Invoke-KitPackage -Package $byId[1] -DryRun
+Check ($r1.Status -eq 'blocked' -and $r2.Status -eq 'restart' -and $r3.Status -eq 'dryrun') 'MYWINKIT_SIMULATE_OUTCOME (dry run only) gives the menus a blocked / restart result to show'
+$env:MYWINKIT_SIMULATE_OUTCOME = $keepOut
+Check ((Split-Path -Leaf (Start-KitLog)) -match "^install-\d{8}-\d{6}-$PID\.log$") 'install log name carries the PID (two runs in one second get two files)'
 
 Remove-Item -LiteralPath $env:MYWINKIT_STATE_DIR -Recurse -Force -ErrorAction SilentlyContinue
 $env:MYWINKIT_STATE_DIR = $keepState

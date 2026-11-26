@@ -95,8 +95,8 @@ Front door: [README.md](README.md). Docs index and ownership map: [docs/architec
      abort otherwise; never send keys blind or to "whatever has focus";
   4. refuse to start if another window with the kit title exists and its own handle is not verified.
   The title may confirm the handle; it never chooses it. Close only the window it started (by its PID).
-- **Config lives on GitHub, not in the deployed copies.** `config/catalog.json`, `settings.json` and
-  `winget-id-overrides.json` on `main` are the single home; deployed copies only read them (raw URL → cache →
+- **Config lives on GitHub, not in the deployed copies.** `config/catalog.json`, `settings.json`,
+  `winget-id-overrides.json` and `terminal.json` on `main` are the single home; deployed copies only read them (raw URL → cache →
   bundled copy). Never write config into a deployed folder or OneDrive.
 - **The menu never writes config.** Config changes are made in the repo (`config/*.json`, canonical form via
   `ConvertTo-KitJsonDocument`: ASCII, one item per line); `test-config.ps1` fails otherwise. Learned winget-ID heals

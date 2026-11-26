@@ -19,8 +19,8 @@
       1. Essentials, autoInstallEssentials on (default; this PC's choice in
          Settings, else config/settings.json; the older autoInstallPwsh
          still counts): WITHOUT asking, in this order, each skipped when it
-         is already done: PowerShell 7 (winget, fallback: signed MSI from
-         GitHub), Windows Terminal (winget), Claude Code CLI (official
+         is already done: PowerShell 7 (winget, fallback: signed MSIX from
+         GitHub, then the Store), Windows Terminal (winget), Claude Code CLI (official
          installer, at normal user rights), CaskaydiaCove Nerd Font (latest
          Nerd Fonts release, SHA-256 checked), Windows Terminal settings
          (config/terminal.json merged into settings.json, backup first) and
@@ -71,7 +71,10 @@
     Internal: this copy was relaunched as administrator by the loader.
 .PARAMETER KitEnv
     Internal: MYWINKIT_* environment of the parent (base64), because an
-    elevated process does not inherit the environment.
+    elevated process (and a Windows Terminal tab) does not inherit the environment.
+.PARAMETER InTerminal
+    Internal: this copy was relaunched inside Windows Terminal by the loader
+    (never relaunch again).
 .NOTES
     Keep ASCII-only and Windows PowerShell 5.1 compatible.
     Slash forms from install.cmd: /auto /pause /dryrun /classic /noelevate.
@@ -85,6 +88,9 @@
     skipped in test mode), MYWINKIT_SIMULATE_FAIL=<steps> fails those. Elevation: MYWINKIT_SIMULATE_ADMIN=1|0
     (elevated or not), MYWINKIT_SIMULATE_ELEVATION=same|other (what a UAC prompt
     would give: this user, or another account = over-the-shoulder),
+    MYWINKIT_SIMULATE_WT_LAUNCH=ok|fail (the Windows Terminal relaunch is
+    simulated: ok runs the tab's command in this console, fail = wt could not
+    start; without it there is no Terminal relaunch in test mode),
     MYWINKIT_SIMULATE_UAC=accept|decline (the relaunch is simulated: accept runs
     the child copy in this console as if elevated), MYWINKIT_SIMULATE_SESSION_USER
     =same|other (the signed-in user, for the over-the-shoulder check). In test
@@ -107,6 +113,7 @@ param(
     [switch]$NoElevate,
     [switch]$ElevatedChild,
     [string]$KitEnv,
+    [switch]$InTerminal,
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$Rest
 )
 
@@ -419,6 +426,165 @@ $script:TestMode = $WhatIfLoader -or $script:HasClassicTI -or $PSBoundParameters
 $script:IsAdmin = Test-LoaderAdmin
 $script:OtherUserExit = 75   # the elevated copy found it runs as another account: hand back to the parent
 
+# ---------------------------------------------------------------- run inside Windows Terminal (not the blue console)
+# The kit relaunches itself into a Windows Terminal tab when Terminal is installed: elevated (the
+# admin-once step), or as it is (already elevated, or no admin). wt.exe returns at once, so the
+# window that started it waits on a hand-off file instead of a process: the tab's PowerShell writes
+# "pid=<n>" when it starts and "ec=<exit code>" when the kit ends (75 = the over-the-shoulder
+# hand-back). -InTerminal marks the relaunched copy, which never relaunches again.
+
+function Get-WtExe {
+    <# wt.exe (Windows Terminal's app alias), or $null. Testing: -NoTerminal, MYWINKIT_SIMULATE_WT=present|absent. #>
+    if ($NoTerminal -or $env:MYWINKIT_SIMULATE_WT -eq 'absent') { return $null }
+    if ($env:MYWINKIT_SIMULATE_WT -eq 'present') { return 'wt.exe' }
+    $p = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\wt.exe'
+    if (Test-Path -LiteralPath $p) { return $p }
+    $c = Get-Command wt.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($c) { return $c.Source }
+    return $null
+}
+
+function Test-InsideTerminal {
+    <#
+    This console is already a terminal tab: the -InTerminal marker, WT_SESSION, or a
+    pseudo-console window (Windows Terminal as the default terminal app hands a
+    started console to Terminal without setting WT_SESSION). The classic conhost
+    window has the class ConsoleWindowClass.
+    #>
+    if ($InTerminal -or $env:WT_SESSION) { return $true }
+    if ($env:MYWINKIT_SIMULATE_WT_LAUNCH) { return $false }   # tests: decide from the marker only
+    try {
+        if (-not ('MyWinKitLoader.Con' -as [type])) {
+            Add-Type -Namespace MyWinKitLoader -Name Con -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);
+'@
+        }
+        $h = [MyWinKitLoader.Con]::GetConsoleWindow()
+        if ($h -eq [IntPtr]::Zero) { return $false }
+        $sb = New-Object System.Text.StringBuilder 256
+        [void][MyWinKitLoader.Con]::GetClassName($h, $sb, 256)
+        return ($sb.ToString() -eq 'PseudoConsoleWindow')
+    } catch { return $false }
+}
+
+function Get-KitEnvB64 {
+    <# MYWINKIT_* variables as one base64 argument (an elevated process or a Terminal tab does not inherit them). #>
+    $kitEnvText = (@(Get-ChildItem Env: | Where-Object { $_.Name -like 'MYWINKIT_*' } | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join "`n")
+    return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($kitEnvText))
+}
+
+function ConvertTo-LoaderPsLiteral([string]$s) { return "'" + $s.Replace("'", "''") + "'" }
+
+function Get-HandoffScript([string]$Handoff, [string[]]$KitArgs) {
+    <#
+    What the Terminal tab runs (powershell -EncodedCommand, so no quoting or ";" reaches
+    wt.exe's own command-line parser): note the PID, run install.ps1 with the arguments,
+    write its exit code to the hand-off file.
+    #>
+    $argText = (@($KitArgs) | ForEach-Object { if ("$_" -match '^-[A-Za-z]+$') { $_ } else { ConvertTo-LoaderPsLiteral "$_" } }) -join ' '
+    $f = ConvertTo-LoaderPsLiteral $Handoff
+    $script = ConvertTo-LoaderPsLiteral (Join-Path $root 'install.ps1')
+    return @"
+try { [IO.File]::WriteAllText($f, "pid=`$PID") } catch {}
+& $script $argText
+`$c = `$LASTEXITCODE; if (`$null -eq `$c) { `$c = 0 }
+try { [IO.File]::WriteAllText($f, "pid=`$PID``nec=`$c") } catch {}
+exit `$c
+"@
+}
+
+function Wait-Handoff([string]$Handoff, [int]$StartTimeoutSec = 90) {
+    <# Exit code from the hand-off file; $null when the tab never started (timeout). Ends early when that PowerShell is gone. #>
+    $sw = [Diagnostics.Stopwatch]::StartNew(); $tabPid = 0
+    while ($true) {
+        $txt = ''; if (Test-Path -LiteralPath $Handoff) { try { $txt = [IO.File]::ReadAllText($Handoff) } catch {} }
+        if ($txt -match 'ec=(-?\d+)') { Remove-Item -LiteralPath $Handoff -Force -ErrorAction SilentlyContinue; return [int]$Matches[1] }
+        if ($txt -match 'pid=(\d+)') { $tabPid = [int]$Matches[1] }
+        if (-not $tabPid -and $sw.Elapsed.TotalSeconds -gt $StartTimeoutSec) { return $null }
+        if ($tabPid -and -not (Get-Process -Id $tabPid -ErrorAction SilentlyContinue)) {
+            Start-Sleep -Milliseconds 800
+            $txt = ''; try { $txt = [IO.File]::ReadAllText($Handoff) } catch {}
+            Remove-Item -LiteralPath $Handoff -Force -ErrorAction SilentlyContinue
+            if ($txt -match 'ec=(-?\d+)') { return [int]$Matches[1] }
+            Write-RunLog "terminal: the kit's tab (pid $tabPid) ended without an exit code"
+            return 1
+        }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
+function Start-InTerminal([switch]$Elevated) {
+    <#
+    Relaunch this copy in a new Windows Terminal window (elevated with -Elevated: one UAC
+    prompt) and wait for it. @{ Started; Declined; Ec ($null = never started); Why }.
+    #>
+    $wt = Get-WtExe
+    if (-not $wt) { return @{ Started = $false; Declined = $false; Ec = $null; Why = 'wt.exe not found' } }
+    if (-not (Test-Path -LiteralPath $stateDir)) { New-Item -ItemType Directory -Path $stateDir -Force | Out-Null }
+    $handoff = Join-Path $stateDir "handoff-$PID.txt"
+    Remove-Item -LiteralPath $handoff -Force -ErrorAction SilentlyContinue
+    $kitArgs = (Get-ForwardArgs -Skip @('InTerminal')) + @('-NoUpdate', '-InTerminal')   # (Get-ForwardArgs returns one array: + flattens it, @() would nest it)
+    if ($Elevated) { $kitArgs += '-ElevatedChild' }
+    $keepAdm = $env:MYWINKIT_SIMULATE_ADMIN
+    if ($env:MYWINKIT_SIMULATE_WT_LAUNCH -eq 'ok' -and $Elevated) { $env:MYWINKIT_SIMULATE_ADMIN = '1' }   # simulated: the tab runs elevated
+    $kitArgs += @('-KitEnv', (Get-KitEnvB64))
+    $env:MYWINKIT_SIMULATE_ADMIN = $keepAdm
+    $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes((Get-HandoffScript -Handoff $handoff -KitArgs $kitArgs)))
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    # new window, the Windows PowerShell profile (by its fixed guid: not the Claude Code default), a fixed title
+    $wtArgs = @('-w', 'new', 'new-tab', '-p', '{61c54bbd-c2c6-5271-96e7-009a87ff44bf}', '--title', 'my-win-kit', '--suppressApplicationTitle', $ps, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $enc)
+    $shown = "$wt $(Join-ArgLine ($wtArgs | Select-Object -First 13)) <command>"
+    Write-RunLog "terminal: kit arguments for the tab: $(($kitArgs | Select-Object -SkipLast 2) -join ' ')"
+    $sim = $env:MYWINKIT_SIMULATE_WT_LAUNCH
+    if ($sim -eq 'fail') { Write-RunLog 'terminal: simulated: wt.exe could not start'; return @{ Started = $false; Declined = $false; Ec = $null; Why = 'simulated launch failure' } }
+    if ($sim) {
+        Write-Say "Simulated: the kit continues in Windows Terminal$(if ($Elevated) { ' (administrator)' }) (same console)." 'Magenta'
+        Write-RunLog "terminal: simulated $(if ($Elevated) { 'elevated ' })launch: $shown"
+        $keepAdm = $env:MYWINKIT_SIMULATE_ADMIN
+        if ($Elevated) { $env:MYWINKIT_SIMULATE_ADMIN = '1' }
+        try { & $ps -NoProfile -ExecutionPolicy Bypass -EncodedCommand $enc | Out-Host } finally { $env:MYWINKIT_SIMULATE_ADMIN = $keepAdm }
+    } else {
+        try {
+            if ($Elevated) { Start-Process -FilePath $wt -ArgumentList (Join-ArgLine $wtArgs) -Verb RunAs -ErrorAction Stop | Out-Null }
+            else { Start-Process -FilePath $wt -ArgumentList (Join-ArgLine $wtArgs) -ErrorAction Stop | Out-Null }
+        } catch {
+            $e = $_.Exception; $code = 0
+            while ($e) { if ($e -is [ComponentModel.Win32Exception]) { $code = $e.NativeErrorCode; break }; $e = $e.InnerException }
+            $declined = ($code -eq 1223) -or ("$($_.Exception.Message)" -match '(?i)cancel')
+            Write-RunLog "terminal: wt.exe launch $(if ($declined) { 'declined at the UAC prompt' } else { 'failed' }): $($_.Exception.Message)"
+            return @{ Started = $false; Declined = $declined; Ec = $null; Why = "$($_.Exception.Message)" }
+        }
+        Write-RunLog "terminal: started $(if ($Elevated) { 'elevated ' })$shown; waiting on $handoff"
+    }
+    $ec = Wait-Handoff -Handoff $handoff
+    if ($null -eq $ec) { Write-RunLog 'terminal: the Terminal tab did not start the kit within 90 s' }
+    return @{ Started = $true; Declined = $false; Ec = $ec; Why = '' }
+}
+
+$script:WtTried = $false
+function Invoke-TerminalHandoff([string]$Why) {
+    <#
+    Before a menu starts in a classic console: relaunch into Windows Terminal (same
+    rights) and exit with its code. Once per run; never for /auto (stays in its
+    window: scheduled runs and pipes keep their output), never inside a terminal,
+    never in tests unless MYWINKIT_SIMULATE_WT_LAUNCH is set.
+    #>
+    if ($script:WtTried) { return }
+    $script:WtTried = $true
+    if ($Auto -or $WhatIfLoader) { return }
+    if ($script:TestMode -and -not $env:MYWINKIT_SIMULATE_WT_LAUNCH) { return }
+    if (-not (Get-WtExe)) { return }
+    if (Test-InsideTerminal) { Write-RunLog 'terminal: already inside a terminal tab - no relaunch'; return }
+    Write-Say "my-win-kit $Dot continuing in Windows Terminal$(if ($Why) { " ($Why)" })" 'DarkYellow'
+    $w = Start-InTerminal
+    if ($w.Started -and $null -ne $w.Ec) {
+        Write-RunLog "terminal: the kit in Windows Terminal exited with code $($w.Ec)"
+        exit $w.Ec
+    }
+    Write-RunLog "terminal: staying in this window ($(if ($w.Started) { 'the tab did not start' } else { $w.Why }))"
+}
+
 if ($ElevatedChild) {
     # The relaunched copy: make sure the elevated account is the signed-in user.
     $me = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -460,13 +626,23 @@ if ($ElevatedChild) {
         # Relaunch this copy elevated with the same arguments and wait for it (exit code + over-the-shoulder hand-back).
         function New-ElevArgs {
             # MYWINKIT_* travel as an argument: the elevated process does not inherit this environment
-            $kitEnvText = (@(Get-ChildItem Env: | Where-Object { $_.Name -like 'MYWINKIT_*' } | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join "`n")
-            $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($kitEnvText))
-            return , (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'install.ps1')) + (Get-ForwardArgs) + @('-NoUpdate', '-ElevatedChild', '-KitEnv', $b64))
+            return , (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'install.ps1')) + (Get-ForwardArgs) + @('-NoUpdate', '-ElevatedChild', '-KitEnv', (Get-KitEnvB64)))
         }
         $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        $ec = $null
-        if ($env:MYWINKIT_SIMULATE_UAC -eq 'decline') {
+        $ec = $null; $handled = $false
+        # Windows Terminal installed: the elevated copy runs in a Terminal window, not the blue console
+        # (/auto stays in a console window, so its exit code comes straight from the process)
+        if (-not $Auto -and (Get-WtExe) -and ((-not $script:TestMode) -or $env:MYWINKIT_SIMULATE_WT_LAUNCH) -and $env:MYWINKIT_SIMULATE_UAC -ne 'decline') {
+            Write-Say "my-win-kit $Dot asking Windows for administrator rights once, so nothing else asks (switch off in Settings)" 'DarkYellow'
+            $w = Start-InTerminal -Elevated
+            if ($w.Started) {
+                $handled = $true; $ec = $w.Ec; $script:WtTried = $true
+                if ($null -eq $ec) { Write-Say 'Windows Terminal did not start the kit - carrying on here.' 'Yellow' }
+            } elseif ($w.Declined) { $handled = $true }
+            else { Write-RunLog "elevate: elevated Windows Terminal launch failed ($($w.Why)) - falling back to an administrator console window" }
+        }
+        if ($handled) {
+        } elseif ($env:MYWINKIT_SIMULATE_UAC -eq 'decline') {
             Write-Say 'Simulated: administrator prompt declined.' 'Magenta'
         } elseif ($env:MYWINKIT_SIMULATE_UAC -eq 'accept') {
             Write-Say 'Simulated: administrator prompt accepted - the kit runs elevated (same console).' 'Magenta'
@@ -553,42 +729,48 @@ function Get-SimulatedInstall {
 }
 
 function Install-Pwsh {
-    <# Install PowerShell 7: winget first, then the signed MSI from the official GitHub release. #>
+    <# Install PowerShell 7: winget first, then the signed .msixbundle from the official GitHub release, then the Store package. #>
     $sim = Get-SimulatedInstall
     if ($sim) { Write-Say "Simulated: PowerShell 7 install ($sim)." 'Magenta'; Write-RunLog "loader: simulated PowerShell 7 install ($sim)"; return ($sim -eq 'ok') }
     if (Get-Command winget -ErrorAction SilentlyContinue) {
         Write-Say 'Installing PowerShell 7 with winget...' 'DarkYellow'
         $ec = Invoke-LoaderWinget @('install', '--id', 'Microsoft.PowerShell', '--exact', '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
         Write-RunLog "loader: winget install Microsoft.PowerShell exit $ec"
-        if ($ec -eq 0) { return $true }
-        Write-Say "winget exit code $ec - trying the official MSI instead." 'Yellow'
+        if ($ec -eq 0 -or $ec -eq -2147009274) { return $true }   # 0x80073D06: a higher version is already installed
+        Write-Say "winget exit code $ec - trying the official MSIX package from GitHub instead." 'Yellow'
     }
+    # Since PowerShell 7.7 the releases ship no MSI: the signed .msixbundle (all architectures), per user
+    $file = $null
     try {
-        $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+        if (-not (Import-LoaderCore)) { throw 'src\core.psm1 did not load' }
         Write-Say 'Looking up the latest PowerShell release on GitHub...' 'DarkYellow'
-        $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/PowerShell/PowerShell/releases/latest' -Headers @{ 'User-Agent' = 'my-win-kit' } -UseBasicParsing
-        $asset = $rel.assets | Where-Object { $_.name -match "^PowerShell-[0-9.]+-win-$arch\.msi$" } | Select-Object -First 1
-        if (-not $asset) { Write-Say "No $arch MSI in release $($rel.tag_name)." 'Red'; return $false }
-        $file = Join-Path $env:TEMP $asset.name
-        Write-Say "Downloading $($asset.name)..." 'DarkYellow'
+        $json = [string](Invoke-WebRequest -Uri 'https://api.github.com/repos/PowerShell/PowerShell/releases/latest' -Headers @{ 'User-Agent' = 'my-win-kit'; Accept = 'application/vnd.github+json' } -UseBasicParsing -TimeoutSec 20).Content
+        $asset = Get-KitPwshMsixAsset -Json $json
+        $file = Join-Path $env:TEMP $asset.Name
+        Write-Say "Downloading $($asset.Name)..." 'DarkYellow'
         $pp = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'
-        try { Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $file -UseBasicParsing } finally { $ProgressPreference = $pp }
+        try { Invoke-WebRequest -Uri $asset.Url -OutFile $file -UseBasicParsing } finally { $ProgressPreference = $pp }
         $sig = Get-AuthenticodeSignature -LiteralPath $file
-        if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notlike '*Microsoft Corporation*') {
-            Write-Say "MSI signature not valid ($($sig.Status)) - not installing." 'Red'
-            Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
-            return $false
+        if ($sig.Status -ne 'Valid' -or -not $sig.SignerCertificate -or $sig.SignerCertificate.Subject -notlike '*O=Microsoft Corporation*') {
+            throw "package signature not valid for Microsoft Corporation ($($sig.Status))"
         }
-        Write-Say 'Installing (Windows will ask for administrator approval)...' 'DarkYellow'
-        $msiArgs = "/i `"$file`" /qb- ADD_PATH=1 ENABLE_MU=1 USE_MU=1 REGISTER_MANIFEST=1"
-        $proc = Start-Process msiexec.exe -ArgumentList $msiArgs -Verb RunAs -PassThru
-        $proc.WaitForExit()
-        Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
-        return ($proc.ExitCode -in 0, 3010)
+        Write-Say "Installing $($asset.Name)..." 'DarkYellow'
+        Add-AppxPackage -Path $file -ErrorAction Stop
+        Write-RunLog "loader: PowerShell 7 installed from $($asset.Name) (Add-AppxPackage)"
+        return $true
     } catch {
-        Write-Say "PowerShell 7 install failed: $($_.Exception.Message)" 'Red'
-        return $false
+        Write-Say "PowerShell 7 MSIX install did not work: $($_.Exception.Message)" 'Yellow'
+        Write-RunLog "loader: PowerShell 7 msixbundle failed: $($_.Exception.Message)"
+    } finally { if ($file) { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue } }
+    # last resort: the Microsoft Store package (same MSIX, Microsoft's own channel)
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Write-Say 'Trying the Microsoft Store package (9MZ1SNWT0N5D)...' 'DarkYellow'
+        $ec = Invoke-LoaderWinget @('install', '--id', '9MZ1SNWT0N5D', '--source', 'msstore', '--exact', '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+        Write-RunLog "loader: winget install 9MZ1SNWT0N5D (msstore) exit $ec"
+        if ($ec -eq 0 -or $ec -eq -2147009274) { return $true }
     }
+    Write-Say 'PowerShell 7 install failed.' 'Red'
+    return $false
 }
 
 # ---------------------------------------------------------------- Windows Terminal + the auto-install setting
@@ -610,8 +792,8 @@ function Install-Terminal {
     Write-Say 'Installing Windows Terminal with winget...' 'DarkYellow'
     $ec = Invoke-LoaderWinget @('install', '--id', 'Microsoft.WindowsTerminal', '--exact', '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
     Write-RunLog "loader: winget install Microsoft.WindowsTerminal exit $ec"
-    # 0 = installed; winget's "nothing to do" codes = already current
-    return ($ec -in 0, -1978335189, -1978335153, -1978335135, -1978334962)
+    # 0 = installed; winget's "nothing to do" codes = already current; 0x80073D06 = the Store copy is newer
+    return ($ec -in 0, -1978335189, -1978335153, -1978335135, -1978334962, -2147009274)
 }
 
 function Get-EssentialsSetting {
@@ -681,6 +863,7 @@ function Start-Auto([string]$Why = '') {
 
 function Start-Classic([string]$Why = '') {
     if ($Auto) { Start-Auto $Why }
+    Invoke-TerminalHandoff
     Write-RunLog "loader: starting CLASSIC menu (src\tui-classic.ps1) in Windows PowerShell $($PSVersionTable.PSVersion)$(if ($Why) { " - reason: $Why" })"
     Write-Say "Starting classic menu $Dot Windows PowerShell $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor)$(if ($Why) { " $Dot $Why" })" 'DarkYellow'
     $a = @{ KitRoot = $root }
@@ -692,6 +875,7 @@ function Start-Classic([string]$Why = '') {
 
 function Start-Modern($Pwsh) {
     if ($Auto) { Start-Auto "PowerShell 7 $($Pwsh.Version) present; unattended runs use the classic engine" }
+    Invoke-TerminalHandoff
     $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'src\tui-spectre.ps1'), '-KitRoot', $root)
     if ($DryRun) { $a += '-DryRun' }
     Write-RunLog "loader: starting MODERN menu (src\tui-spectre.ps1) with $($Pwsh.Path) (PowerShell $($Pwsh.Version))"
@@ -743,7 +927,7 @@ if ($ess.On) {
         Write-Host ''
         Write-Say "my-win-kit $Dot installing $($what -join ' and ') $Dot no question asked (switch off in Settings)" 'DarkYellow'
         if ($DryRun) {
-            if (-not $hasPwsh) { Write-Say 'Dry run: would install PowerShell 7 (winget Microsoft.PowerShell, MSI fallback) without asking.' 'Magenta' }
+            if (-not $hasPwsh) { Write-Say 'Dry run: would install PowerShell 7 (winget Microsoft.PowerShell, MSIX fallback) without asking.' 'Magenta' }
             if ($needWt) { Write-Say 'Dry run: would install Windows Terminal (winget Microsoft.WindowsTerminal) without asking.' 'Magenta'; $wtOk = $true }
         } else {
             if (-not $hasPwsh) {
@@ -793,7 +977,7 @@ Write-RunLog "loader: install PowerShell 7 answer = '$ans'"
 if ($ans -match '^[Nn]') { Start-Classic 'PowerShell 7 install declined' }
 
 if ($DryRun) {
-    Write-Say 'Dry run: would install PowerShell 7 (winget Microsoft.PowerShell, MSI fallback).' 'Magenta'
+    Write-Say 'Dry run: would install PowerShell 7 (winget Microsoft.PowerShell, MSIX fallback).' 'Magenta'
     Start-Classic 'dry run: PowerShell 7 not installed'
 }
 if (Install-Pwsh) {

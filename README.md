@@ -24,8 +24,9 @@ At every start the kit checks these and sets up whatever is missing, **without a
 5. **Windows Terminal set up the same way on every PC** ([config/terminal.json](config/terminal.json)): a
    *Claude Code* profile (PowerShell 7 running `claude`) as the default tab, the Nerd Font, the *Dark+* colours at
    90% opacity, Ctrl+C / Ctrl+V copy and paste, Alt+Shift+D duplicate pane, and every tab starting in
-   the dev folder (`D:\dev\git`, or `C:\dev\git` when there is no D: drive). Your
-   other profiles and settings stay; the old file is backed up first as `settings.json.bak-my-win-kit-<date>`.
+   the dev folder (below; the kit's own profiles too), plus a
+   *my-win-kit* profile that starts the kit from the OneDrive folder. Your other profiles and settings stay; the
+   old file is backed up first as `settings.json.bak-my-win-kit-<date>`.
 6. **Windows Terminal as the default terminal app** (console programs open in Terminal).
 
 Anything already there is skipped, so a set-up PC starts as fast as before. A step that fails shows one yellow
@@ -38,13 +39,14 @@ Windows PowerShell 5.1; every install works in both.
 only asks *"Install PowerShell 7 now? [Y/n]"* when PowerShell 7 is missing, as before. `n` opens the classic menu.
 
 **Administrator rights once:** at start Windows asks once ("Do you want to allow this app to make changes?"); the
-kit then runs as administrator in its own window (orange **ADMIN** badge), and no installer asks again. The first
-window waits and closes when the kit finishes. Say **No** and the kit carries on as before (each installer asks for
+kit then runs as administrator in its own window (orange **ADMIN** badge), and no installer asks again. With
+Windows Terminal installed that window is a **Windows Terminal** window, not the blue PowerShell console; without
+admin rights the kit moves into Terminal as well. The first window waits and closes when the kit finishes. Say **No** and the kit carries on as before (each installer asks for
 itself). On a standard account (where Windows would ask for another account's password) the kit doesn't ask up
 front, so per-user apps land in the right profile. Switch it off per PC in Settings → *Ask for administrator rights
 once at start* (classic menu: `V`), or for one run with `install.cmd /noelevate`. A few apps never install as
-administrator (OneDrive, VS Code, GitHub Desktop, Claude Code, Cursor: `NoAdmin` in the catalogue); the kit runs
-those at your normal rights.
+administrator (OneDrive, VS Code, GitHub Desktop, Claude Code, Cursor, Antigravity IDE: `NoAdmin` in the
+catalogue); the kit runs those at your normal rights.
 
 By hand: `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1` (add `-Classic` to skip straight
 to the classic menu, or `-DryRun` to see what would run without installing anything).
@@ -58,8 +60,10 @@ install.cmd /auto
 One administrator prompt, then no questions at all: it updates the kit itself if GitHub has a newer version,
 sets up the essentials (above) if missing, installs every recommended app that is missing, and runs
 **Update everything** (below). Items that need a person (post-install tools, WSL + Ubuntu, the Chris Titus prompt)
-are skipped and listed as "Skipped (needs you)". It ends with the results, the log paths and an exit code: `0` all
-ok, `1` something failed. Add `/dryrun` to see what it would do, `/pause` to keep the window open at the end
+are skipped and listed as "Skipped (needs you)"; apps that update themselves (Chrome, Office, Teams …) are left
+alone. It ends with the results, a "Blocked (needs you)" list (an app was in use, Smart App Control, …), the log
+paths and an exit code: `0` all ok (a needed restart or a skipped app counts as ok), `1` something failed, `2`
+nothing failed but something is blocked. Add `/dryrun` to see what it would do, `/pause` to keep the window open at the end
 (`install.ps1 -Auto -DryRun -Pause` works too).
 
 Most installs need winget (App Installer). If it's missing, the menu opens its Microsoft Store page.
@@ -76,7 +80,8 @@ The « Back row is always at the top of the list, and the key hints are always a
 Which menu ran is logged: `%LOCALAPPDATA%\my-win-kit\logs\run-*.log` (Settings shows the current file).
 
 A gradient **MY WIN KIT** banner, gruvbox colours, and one set of badges everywhere: √ installed, ↑ update
-available, · not installed, × failed, ↔ healed. In dry run every screen carries a purple **DRY RUN** band.
+available, · not installed, × failed, ↔ healed; after a run also yellow √ restart needed, orange ▲ blocked (needs
+you: close the app, Smart App Control, installer type changed) and grey - skipped (pinned, updates itself). In dry run every screen carries a purple **DRY RUN** band.
 
 - **Install apps:** pick a starting point (recommended set, only what's missing on this PC, retry last
   failures, your last selection, or empty), adjust the grouped list (space ticks an app, ticking a group header
@@ -84,8 +89,10 @@ available, · not installed, × failed, ↔ healed. In dry run every screen carr
   exists. **Search to add or remove an app** lets you type a name instead of scrolling.
 - **Update** → **Update everything:** every app from the catalogue that is installed and has a newer version (AI
   tools too, each through its own updater) **plus everything else winget can upgrade on this PC** (runtimes,
-  other apps; pinned ones and ones with an unknown version are left alone). A review table shows both groups and
-  their counts first; Esc goes back.
+  other apps; pinned ones and ones with an unknown version are left alone). Apps that update themselves (Chrome,
+  Office, Teams, OneDrive, Dropbox, Acrobat Reader, AnyDesk, WhatsApp) are listed as *updates itself* and left out;
+  *Choose which to update* lets you tick them anyway. A review table shows the groups and their counts first; Esc
+  goes back.
 - **Update** → **Update AI tools:** a table of every AI tool in the catalogue (Claude, Codex, Cursor, Antigravity,
   KiloCode, Hermes …) with installed vs latest versions, then one key updates **the ones installed on this PC**
   (winget upgrade, npm, or the tool's own updater). It never installs a missing tool: use Install apps for that.
@@ -95,19 +102,23 @@ available, · not installed, × failed, ↔ healed. In dry run every screen carr
   at start and asking for administrator rights once at start (saved in
   `%LOCALAPPDATA%\my-win-kit\local-settings.json`), the dry-run toggle for this session, and the log folder.
 
-Each run ends with a results table and writes a log to `%TEMP%\my-win-kit\`.
+Each run ends with a results table and writes a log to `%TEMP%\my-win-kit\`. When something failed or was blocked,
+**Retry the failed / blocked** runs just those again (close the apps that were in use first). The kit never closes
+a running app for you.
 
 ## The classic menu
 
 Type into the prompt and press Enter: numbers (`5`, `1 5 12`), ranges (`20-27`), group letters (`U`, `B`, `D` …),
 `*` (all except post-install), `0` (none). Commands: `Z` recommended set, `N` only what's new here, `I` install,
 `L` update (`1` everything, `2` AI tools; Enter = back), `W` Windows tweaks, `K` essentials on start on/off, `V`
-administrator rights at start on/off (both per PC), `Q` quit. Failed apps stay selected, so `I`
-retries them.
+administrator rights at start on/off (both per PC), `Q` quit. After a run with failures, `R` retries the failed and
+blocked apps at once; they also stay selected, so `I` retries them later.
 
 ## Set-up items that aren't apps
 
-- **Dev folder** (recommended set): creates `D:\dev\git`, or `C:\dev\git` when the PC has no local D: disk.
+- **Dev folder** (recommended set): uses the dev folder the PC already has (`D:\dev\github`, `C:\dev\github`,
+  `D:\dev\git` or `C:\dev\git`, in that order); without one it creates `D:\dev\github`, or `C:\dev\github` when the
+  PC has no local D: disk. It never moves or renames a folder.
 - **WSL + Ubuntu** (Dev tools, off): installs or updates WSL, then the newest Ubuntu LTS. Windows asks for admin,
   may need a restart (run it again afterwards), and Ubuntu asks for a Linux user name and password; type `exit`
   to come back to the kit.

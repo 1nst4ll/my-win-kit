@@ -2,6 +2,71 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-26: always latest without errors, and the kit inside Windows Terminal (kit v2.8.0, branch `v28-latest`, PR #5)
+
+- Daniel asked to "search web for all packages if they are correct and how we can have always latest version
+  without errors", then "do v2.8" (all of the package-check fixes), and added "can app open in terminal instead
+  blue ps shell". Every claim used here was re-checked against its primary source (winget returnCodes.md and
+  AppInstallerErrors.h for winget 1.29.380, the winget-pkgs manifests, Python's devguide + PEP 719, PowerShell's
+  install page + release assets, Microsoft's App Control page for Smart App Control, Hermes' install.ps1, the VS
+  Code setup docs, Notepad++'s v8.8.8 note, vendor update pages).
+- **Catalogue:** Python 3.13 (41) moved to Removed (security-only, no more Windows installers) and **Python 3.14**
+  added as Id 62 (`Python.Python.3.14`); PowerToys (3) `Uninstall ^PowerToys` (winget's manifest has no ProductCode,
+  so an installed copy was not detected); Node.js LTS (40) `Uninstall ^Node\.js` (policy: latest LTS); Hermes (56)
+  no longer `Requires` git (its installer brings its own pinned PortableGit) and is `Unsigned`; Antigravity IDE (55)
+  `/mergetasks=!runcode` (as in its winget manifest: no IDE window after a silent install) and `NoAdmin` (a VS
+  Code-style Inno user setup; run as admin it switches its updater off); Adobe Acrobat (13) renamed **Adobe Acrobat
+  Reader** ("Free Adobe PDF reader", Id kept); Notepad++ (2) `InstallerType nullsoft` (winget picks the MSI, which
+  Notepad++ says is for enterprise IT); **`SelfUpdates`** on Office, Chrome, OneDrive, Dropbox, Acrobat Reader,
+  Teams, WhatsApp and AnyDesk (RealVNC left off: its Store copy is an MSI the Store does not update); Office gets a
+  `HashNote` ("Microsoft changed setup.exe; try tomorrow") and stays on winget (a fixed setup.exe URL is not resolved
+  from a vendor page, which CLAUDE.md requires). Next free Id 63.
+- **Outcome buckets** (`Get-KitWingetOutcome`): restart needed (`0x8A150109`, `0x8A15010B`), in use (`0x8A150101`,
+  `0x8A150103`, `0x8A150111`), transient with one automatic retry (`0x8A150008`, `0x8A15006D`, `0x8A150102`,
+  `0x8A150107`, `0x8A15007F`), installer type changed (`0x8A15008E`, reported, never reinstalled silently), pinned
+  (`0x8A150068`), Store policy (`0x8A15001B/1C`), another version installed (`0x8A15010D`), hash mismatch
+  (`0x8A150011`), and `0x80073D06` (a higher MSIX version is installed) as up to date (also in the loader's Terminal
+  install). New result statuses **restart** (yellow √), **blocked** (orange ▲) and **skipped** (grey -) in both
+  menus; `/auto` exits 0 (ok, restart needed and skipped included), 1 (failed) or 2 (blocked) and prints the
+  blocked list, the self-updating apps it left alone and the apps that need a restart.
+- **SelfUpdates:** installed normally; Update everything and `/auto` list them as "updates itself" and leave them
+  out (modern menu: "Choose which to update" ticks them by hand; classic `L` `1`: answer `s`); a hash mismatch or
+  "not newer" on them is never "failed".
+- **In use:** before an upgrade the kit looks for running programs inside the app's install folder (from Add/Remove
+  Programs) and reports "blocked: in use by bash.exe, ssh.exe - close it, then Retry"; it never kills anything.
+  After a run with failures or blocks: **Retry the failed / blocked** (modern) or `R` (classic).
+- **Installer type / scope / source:** `--source winget` on every winget item (Store items `--source msstore`);
+  catalogue `InstallerType` / `Scope` only on a fresh install.
+- **Hash mismatch:** `winget source update` once per run, one retry, then "winget's catalogue is behind the vendor,
+  try later"; the "previous versions" heal is skipped when the newest two versions share one installer URL. Never
+  `--ignore-security-hash`, `--force`, `--include-unknown` or `--all`.
+- **PowerShell 7 fallback** (loader): the MSI search (7.7 ships no MSI) became the release's signed `.msixbundle`
+  (`Add-AppxPackage`, signer Microsoft Corporation), then the Store package `9MZ1SNWT0N5D`.
+- **Enable RDP:** `Enable-NetFirewallRule -Group '@FirewallAPI.dll,-28752'` (works on Polish Windows).
+- **Smart App Control:** with it on (`VerifiedAndReputablePolicyState` = 1), an Application Control refusal is
+  "blocked by Smart App Control", and Hermes (unsigned) is not even started (Update AI tools skips it with that note).
+- **Terminal:** `config/terminal.json` `startingDirectory.prefer` = `dev-folder` (the dev folder logic itself); the
+  folder is also set on the kit's own profiles, so a Claude Code profile with its own folder (Stacy's) moves too. A
+  new **my-win-kit** profile starts `install.cmd` from the OneDrive kit folder through `%OneDrive%` (no personal
+  path in the repo).
+- **The kit inside Windows Terminal:** Daniel's run log showed Terminal installed and set as the default terminal
+  app, but the elevate-once relaunch (`Start-Process powershell.exe -Verb RunAs`) still opened the blue console.
+  With wt.exe present the elevated copy now starts as `wt.exe -w new new-tab ... powershell.exe -EncodedCommand ...`
+  (one UAC prompt); the first window waits on a hand-off file (pid, then exit code; 75 = over-the-shoulder) because
+  wt.exe returns at once. Without admin rights, or when Terminal was installed by the essentials in this same run,
+  the loader moves into Terminal before the menu opens. Console window as before when wt.exe is missing or fails;
+  `/auto` stays in its window; `-InTerminal` stops a second relaunch; tests simulate it
+  (`MYWINKIT_SIMULATE_WT_LAUNCH`) and never start wt.
+- **Dev folder = `dev\github`:** Daniel: "some machines have already /dev/github instead of git" and chose
+  `dev\github`. A read-only check of his 4 PCs found `C:\dev\github`, `D:\dev\github` and (twice)
+  `C:\dev\git`. `Get-KitDevFolderPath` (Dev folder app 60, the Terminal start folder) now uses the
+  first existing one of `D:\dev\github`, `C:\dev\github`, `D:\dev\git`, `C:\dev\git` (D: only as a ready local fixed
+  disk) and creates nothing then; without one it creates `D:\dev\github`, else `C:\dev\github`. Nothing is moved,
+  renamed or deleted. Id 60's Desc says so; `config/terminal.json` keeps `prefer: dev-folder` (no hard-coded folder).
+- **Small:** `install-*.log` names carry the PID; CLAUDE.md's "Config lives on GitHub" lists `terminal.json`.
+- **Left for Daniel:** Bitwarden nullsoft + user scope, the Affinity rename, PostgreSQL password note, Zoom per-user,
+  MAS DoH fallback (STATUS → Open items).
+
 ## 2026-11-26: Terminal tabs start in the dev folder
 
 - Daniel: "change this starting to D:\dev\git or if no D: C:\dev\git". `config/terminal.json` `startingDirectory.prefer` is now

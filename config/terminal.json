@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "_about": "Windows Terminal settings the loader applies at every start (essentials step, setting autoInstallEssentials). Merged into the PC's own settings.json after a backup: globals, profileDefaults (= profiles.defaults), the profiles here (matched by guid), defaultProfile and the key bindings (matched by id or keys) are set; everything else there is kept (other profiles, schemes, actions). Every tab starts in the kit's dev folder: D:\\dev\\git, or C:\\dev\\git when there is no D: drive (created if missing). The font is set once CaskaydiaCove Nerd Font is installed. Field reference: docs/architecture.md#windows-terminal-settings",
-  "startingDirectory": { "prefer": "D:\\dev\\git", "fallback": "dev-folder" },
+  "_about": "Windows Terminal settings the loader applies at every start (essentials step, setting autoInstallEssentials). Merged into the PC's own settings.json after a backup: globals, profileDefaults (= profiles.defaults), the profiles here (matched by guid), defaultProfile and the key bindings (matched by id or keys) are set; everything else there is kept (other profiles, schemes, actions). Every tab (and every kit profile) starts in the kit's dev folder (prefer dev-folder: an existing D:\\dev\\github, C:\\dev\\github, D:\\dev\\git or C:\\dev\\git, else a new D:\\dev\\github or C:\\dev\\github). The font is set once CaskaydiaCove Nerd Font is installed. Field reference: docs/architecture.md#windows-terminal-settings",
+  "startingDirectory": { "prefer": "dev-folder" },
   "defaultProfile": "{b7a91c2d-4e83-4f6a-9d25-1c3f8ae60b74}",
   "globals": { "copyFormatting": "none", "copyOnSelect": false, "useAcrylicInTabRow": true, "newTabMenu": [{ "type": "remainingProfiles" }] },
   "profileDefaults": {
@@ -11,7 +11,8 @@
     "useAcrylic": false
   },
   "profiles": [
-    { "guid": "{b7a91c2d-4e83-4f6a-9d25-1c3f8ae60b74}", "name": "Claude Code", "commandline": "pwsh.exe -NoExit -Command claude", "icon": "\ud83e\udd16", "hidden": false }
+    { "guid": "{b7a91c2d-4e83-4f6a-9d25-1c3f8ae60b74}", "name": "Claude Code", "commandline": "pwsh.exe -NoExit -Command claude", "icon": "\ud83e\udd16", "hidden": false },
+    { "guid": "{ded1ec90-a0a0-40b1-aaa0-dc04bef6d4b0}", "name": "my-win-kit", "commandline": "cmd.exe /d /c if exist \"%OneDrive%\\[98] Shortcuts\\install.cmd\" (\"%OneDrive%\\[98] Shortcuts\\install.cmd\") else (echo my-win-kit: install.cmd is not in the OneDrive kit folder on this PC & pause)", "hidden": false }
   ],
   "keybindings": [
     { "id": "Terminal.CopyToClipboard", "keys": "ctrl+c" },

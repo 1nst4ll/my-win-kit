@@ -61,10 +61,20 @@ Runs on stock Windows PowerShell 5.1 with nothing installed.
      filtered token carries it as a deny-only group) → no whole-kit elevation, because Windows would ask for
      another account and per-user installs (Store, user-scope winget, `%USERPROFILE%` tools, npm globals) would
      land in that account's profile (over-the-shoulder);
-   - otherwise → `Start-Process powershell.exe -Verb RunAs` on this copy's `install.ps1` with the same arguments
-     plus `-NoUpdate -ElevatedChild -KitEnv <base64 MYWINKIT_* variables>` (an elevated process doesn't inherit
-     the environment; the run log path travels this way), wait for it, exit with its code. UAC declined (the
-     start throws) → one line, carry on non-elevated.
+   - otherwise, **Windows Terminal installed** (`Get-WtExe`: the `wt.exe` app alias) and not `/auto` →
+     `Start-InTerminal -Elevated`: `Start-Process wt.exe -Verb RunAs` with `-w new new-tab -p <Windows PowerShell
+     profile guid> --title my-win-kit --suppressApplicationTitle powershell.exe -NoProfile -ExecutionPolicy Bypass
+     -EncodedCommand <script>`. The encoded script (`Get-HandoffScript`) runs this copy's `install.ps1` with the same
+     arguments plus `-NoUpdate -InTerminal -ElevatedChild -KitEnv <base64 MYWINKIT_* variables>`, so no quoting and no
+     `;` (wt's command separator) ever reaches wt's own parser. wt.exe returns at once, so the first window waits on
+     a **hand-off file** (`<state>\handoff-<parent pid>.txt`): the tab writes `pid=<n>` when it starts and `ec=<exit
+     code>` when the kit ends (`Wait-Handoff`; no `pid=` within 90 s = the tab never started, carry on here; the tab's
+     process gone without `ec=` = exit 1). Its exit code ends the first window, 75 = the over-the-shoulder hand-back.
+     UAC declined (Win32 error 1223) → one line, carry on non-elevated; any other wt failure → the console path:
+   - **no Terminal** (first run on a fresh PC), wt failed, or `/auto` → `Start-Process powershell.exe -Verb RunAs` on
+     this copy's `install.ps1` with the same arguments plus `-NoUpdate -ElevatedChild -KitEnv <base64>` (an elevated
+     process doesn't inherit the environment; the run log path travels this way), wait for it, exit with its code.
+     UAC declined (the start throws) → one line, carry on non-elevated.
    - **The elevated copy** compares its account SID with the owner of `explorer.exe` in its session
      (`Get-SessionUserSid`, CIM `GetOwnerSid`). Different → exit 75, and the waiting parent carries on
      non-elevated. The run log records `elevate: elevated = yes|no - <why>`.
@@ -73,7 +83,9 @@ Runs on stock Windows PowerShell 5.1 with nothing installed.
    - Never a real prompt in tests: in test mode (`-WhatIfLoader`, `-ClassicTestInput`, `-Answer`, `-UpdateAnswer`,
      or `MYWINKIT_STATE_DIR` set) the step is skipped unless `MYWINKIT_SIMULATE_UAC=accept|decline` simulates it
      (`accept` runs the child copy in the same console with `MYWINKIT_SIMULATE_ADMIN=1`). Other hooks:
-     `MYWINKIT_SIMULATE_ADMIN=1|0`, `MYWINKIT_SIMULATE_ELEVATION=same|other`, `MYWINKIT_SIMULATE_SESSION_USER=same|other`.
+     `MYWINKIT_SIMULATE_ADMIN=1|0`, `MYWINKIT_SIMULATE_ELEVATION=same|other`, `MYWINKIT_SIMULATE_SESSION_USER=same|other`,
+     `MYWINKIT_SIMULATE_WT_LAUNCH=ok|fail` (the Terminal launch: `ok` runs the tab's encoded command in this console,
+     `fail` = wt could not start; without it there is never a Terminal relaunch in test mode).
 2. **Find PowerShell 7** (`Find-Pwsh`): checks `pwsh` on PATH plus the known install paths (PATH is stale right
    after an install) and asks each candidate for its version. The best one wins.
 3. **Read the essentials setting** (`Get-EssentialsSetting`): `autoInstallEssentials` from this PC's
@@ -84,11 +96,16 @@ Runs on stock Windows PowerShell 5.1 with nothing installed.
 4. **Decide:**
    - **essentials on** → the **essentials step**, without asking, in this order; each step checks first and does
      nothing when it is already done:
-     1. **PowerShell 7** when 7.4+ is missing: `Install-Pwsh` (`winget install Microsoft.PowerShell`, then the
-        official MSI from the latest GitHub release; its Authenticode signer must be Microsoft Corporation).
+     1. **PowerShell 7** when 7.4+ is missing: `Install-Pwsh`: `winget install Microsoft.PowerShell` (exit 0 or
+        `0x80073D06` = a higher version is already there); else the official **`.msixbundle`** of the latest GitHub
+        release (`Get-KitPwshMsixAsset` reads the GitHub API answer; since 7.7 the releases ship no MSI, the bundle holds
+        every architecture), Authenticode signer `O=Microsoft Corporation` required, `Add-AppxPackage` (per user);
+        else the Microsoft Store package `9MZ1SNWT0N5D` through winget. `Find-Pwsh` also checks the MSIX alias
+        `%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe`.
      2. **Windows Terminal** when missing: `Install-Terminal` (`winget install Microsoft.WindowsTerminal`; winget's
         "nothing to do" exits count as success; there is no other channel). Detection:
-        `%LOCALAPPDATA%\Microsoft\WindowsApps\wt.exe` or the `Microsoft.WindowsTerminal*` Appx package. winget runs
+        `%LOCALAPPDATA%\Microsoft\WindowsApps\wt.exe` or the `Microsoft.WindowsTerminal*` Appx package; `0x80073D06`
+        (the Store copy is newer) counts as installed. winget runs
         through the engine's `Invoke-KitProcess` (the loader imports `src\core.psm1`, which is 5.1-compatible).
      3. to 6. **`Invoke-LoaderEssentials`** → `Invoke-KitEssential` (engine, [below](#essentials)) for `claude`
         (Claude Code CLI), `font` (CaskaydiaCove Nerd Font), `terminal-settings` (config/terminal.json merged into
@@ -100,6 +117,16 @@ Runs on stock Windows PowerShell 5.1 with nothing installed.
      steps (Terminal, Claude Code, the font) are not retried until the next day after a failure (`<state>\loader.json`
      keys `wtFailed`, `claude-failed`, `font-failed`), so a PC without winget or network doesn't retry on every
      start. Then: pwsh available → modern menu; pwsh still missing → classic menu (never stranded).
+   - **Into Windows Terminal first** (`Invoke-TerminalHandoff`, at the top of `Start-Modern` / `Start-Classic`, once
+     per run): when wt.exe exists and this console is not already a terminal tab (`Test-InsideTerminal`: the
+     `-InTerminal` marker, `WT_SESSION`, or a `PseudoConsoleWindow` console window, which is what Terminal as the
+     default terminal app gives a console it took over), the loader relaunches itself into a new Terminal window with
+     the same rights (`Start-InTerminal` without `-Verb RunAs`; same hand-off file) and exits with its code. This also
+     covers a fresh PC: the essentials step installs Terminal, and the same run then moves into it (the relaunched copy
+     re-runs the quick essentials checks). The tab runs Windows PowerShell 5.1 for the loader, which starts pwsh for
+     the modern menu in the same tab. Never for `/auto` (an unattended run stays in its window, so pipes and scheduled
+     runs keep its output and exit code), never twice (`-InTerminal`), never in tests without
+     `MYWINKIT_SIMULATE_WT_LAUNCH`; a failed launch keeps the current window.
    - pwsh **7.4+** → `pwsh -NoProfile -ExecutionPolicy Bypass -File src\tui-spectre.ps1 -KitRoot <folder>`.
      If that exits **3** (Spectre module unavailable) → classic menu.
    - **essentials off** and pwsh missing or older → asks "Install PowerShell 7 now? [Y/n]" (Enter = yes), then the
@@ -135,20 +162,55 @@ No UI. Both menus call the same functions, so behaviour is identical in both.
   `claude`, `agy`; an `Exe` that is a folder only proves the install, the command then comes from PATH). Odd winget
   version strings (`> 280.4`, `ad 9.8.0`) are reduced to the dotted number.
 - **`Invoke-KitPackage -Package -Installed -Mode install|update -DryRun -OnStatus`** is the single entry point.
-  It returns a result object (`Status` = installed | updated | current | done | failed | dryrun, `From`, `To`,
-  `Detail`, `Healed`, `Seconds`) and writes everything to a log in `%TEMP%\my-win-kit\`. By method:
-  - **winget / msstore:** `winget install --exact --silent`. `Get-KitWingetOutcome` classifies the exit: 0 = ok
-    (then `winget list` reads the new version); only winget's "nothing to do" codes = up to date
-    (`0x8A15002B` UPDATE_NOT_APPLICABLE, `0x8A15004F` UPGRADE_VERSION_NOT_NEWER, `0x8A150061`
-    PACKAGE_ALREADY_INSTALLED, `0x8A15010E` INSTALL_DOWNGRADE; `$script:WG_NOTHING_TO_DO`). Any other non-zero
-    exit is **failed**, installed or not (e.g. an upgrade whose installer failed), with the output line that
-    names the problem plus the code as `Detail` ("Installer failed with exit code: 1 (winget 0x8A150006)").
+  It returns a result object (`Status`, `From`, `To`, `Detail`, `Healed`, `Seconds`) and writes everything to a log
+  in `%TEMP%\my-win-kit\install-<date>-<time>-<pid>.log` (the PID keeps two runs in one second apart). **Statuses:**
+  installed | updated | current | done | dryrun | **restart** (done, Windows restart needed) | **skipped** (pinned,
+  or updates itself) | **blocked** (needs a person: the app is in use, Smart App Control, installer type changed,
+  policy, another version installed) | failed. `Test-KitResultOk` = everything except failed and blocked.
+  `-Available <version>` (the menus pass the known update) tells it an upgrade will really run.
+  - **Before anything:** `Unsigned` + Smart App Control on → blocked without running (below). **In use:** an
+    installed winget / Store / rest-of-PC item with a known update, or a direct app that is not current, is checked
+    first: `Get-KitInUse` finds the install folder in Add/Remove Programs (`Get-KitInstallFolder`: the entry that
+    matches the `Uninstall` regex, else the DisplayName equal to or starting with the app's name; its
+    `InstallLocation`, else the folder of its `DisplayIcon` .exe; never a drive root, Program Files, the profile,
+    `%LOCALAPPDATA%\Programs` or a Windows folder) and lists running programs inside it (`Get-KitBlockingProcesses`,
+    the kit's own process tree excluded). Any → **blocked** "in use by bash.exe, ssh.exe - close it, then Retry";
+    nothing is ever killed.
+  - **winget / msstore:** `winget install --id <id> --exact --silent --source winget|msstore` (the source is always
+    named, so a winget item never matches msstore; `Get-KitWingetInstallArgs`). The catalogue's `InstallerType` /
+    `Scope` become `--installer-type` / `--scope` on a **fresh install only**: an upgrade keeps the installed type and
+    scope. Never `--force`, `--ignore-security-hash` (elevated winget refuses it anyway), `--include-unknown` or
+    `--all`. **`Get-KitWingetOutcome` buckets** (codes from winget's returnCodes.md; `$script:WgBucketCodes`):
+    | Bucket | Codes | Result |
+    |---|---|---|
+    | ok | 0 | installed / updated (then `winget list` reads the version) |
+    | current | `0x8A15002B` `0x8A15004F` `0x8A150061` `0x8A15010E`, `0x80073D06` (MSIX: a higher version is installed) | current |
+    | restart | `0x8A150109` reboot to finish, `0x8A15010B` reboot initiated (`0x8A15010A` "restart, then try again" is a failure) | restart |
+    | busy | `0x8A150101` `0x8A150103` `0x8A150111` (app or file in use) | blocked: "close it, then Retry" |
+    | transient | `0x8A150008` download failed, `0x8A15006D` service busy, `0x8A150102` install in progress, `0x8A150107` no network, `0x8A15007F` Store catalog | one automatic retry after 5 s, then failed |
+    | reinstall | `0x8A15008E` (winget 1.29: the upgrade uses another install technology) | blocked: "installer type changed: uninstall + install needed" (never done silently) |
+    | pinned | `0x8A150068` | skipped |
+    | policy | `0x8A15001B` `0x8A15001C` (Store blocked by policy) | blocked |
+    | otherver | `0x8A15010D` another version installed | blocked |
+    | hash | `0x8A150011` installer hash mismatch | see below |
+    | anything else | | failed, with the output line that names the problem plus the code ("Installer failed with exit code: 1 (winget 0x8A150006)") |
+
+    **Hash mismatch:** the vendor replaced the file behind a fixed URL before winget's manifest caught up. The kit
+    runs `winget source update` (once per run, `Invoke-KitProcess`) and retries once. Still a mismatch → failed
+    "winget's catalogue is behind the vendor, try later" (the catalogue's `HashNote` replaces that text: Office says
+    "Microsoft changed setup.exe; try tomorrow"); a `SelfUpdates` app is never failed for it: skipped when installed
+    ("updates itself"), blocked when not.
     Self-healing: ID vanished (`0x8A150014`) → `Find-KitReplacementId` scores search hits (prefix/version
     split +6, same tail +4, exact name +3, pre-release −3; ≥ 3 wins) and retries; download dead (404, hash
-    mismatch, nothing installed) → two previous versions, then the Store channel. Heals are saved on
-    this PC only (`cache\local-overrides.json`).
+    mismatch, nothing installed) → two previous versions, unless the newest two versions download from the same
+    URL (`Test-KitSharedInstallerUrl`, `winget show --version`: Chrome, Office), then the Store channel. Heals are
+    saved on this PC only (`cache\local-overrides.json`).
   - **script:** the vendor's official `irm <url> | iex`, always in a **child** `powershell.exe`, so a vendor
-    `exit`/`throw` can't close the menu. When the tool is already installed and has an `Update` command
+    `exit`/`throw` can't close the menu. A failure whose output names Windows Application Control while **Smart App
+    Control** is on (`Test-KitSmartAppControl`: `HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy`
+    `VerifiedAndReputablePolicyState` = 1, Enforce; 0 off, 2 evaluation) is **blocked** "blocked by Smart App
+    Control", not failed; an `Unsigned` tool (Hermes) is not even started there, so Update AI tools skips it with that
+    note. When the tool is already installed and has an `Update` command
     (`claude update`, `agy update`, `hermes update`), that runs instead. `Interactive` scripts (MAS, WinUtil)
     share the console. `Shell: pwsh` runs the child in PowerShell 7 instead (the Chris Titus profile installs
     into the running shell's profile). `Elevated` without admin rights opens the child in **its own administrator
@@ -157,17 +219,20 @@ No UI. Both menus call the same functions, so behaviour is identical in both.
     elevated: it shares the console like any interactive script.
   - **direct:** `Resolve-KitDirect` fetches the vendor's download page and pulls the current installer link with
     the catalogue regex (per CPU arch), so every run gets the vendor's latest release. If the installed version
-    is already ≥ that, it reports up to date and downloads nothing. Otherwise it downloads to `%TEMP%`, requires
+    is already ≥ that, it reports up to date and downloads nothing. Otherwise (after the in-use check) it downloads to `%TEMP%`, requires
     a **valid Authenticode signature from the catalogue's signer** (Google LLC), runs it silently and waits for
     that process only. If the page no longer matches, it falls back to the `Fallback` winget ID for that run.
   - **npm:** `npm install -g` (needs Node; also the update path, it fetches the latest).
   - **builtin:**
-    - `enable-rdp`: registry + NLA + firewall group, elevated via UAC when needed; prints the Tailscale IP if
-      present.
-    - `dev-folder`: `Get-KitDevFolderPath` = `D:\dev\git` when D: is ready and a **Fixed** disk
-      (`System.IO.DriveInfo`; a CD/DVD, USB stick or network drive doesn't count), else `%SystemDrive%\dev\git`.
-      Exists → current; dry run → "would create <path>"; otherwise `New-Item` → done. `-DDriveType` injects the D:
-      check for tests.
+    - `enable-rdp`: registry + NLA + the firewall group by its resource string (`Enable-NetFirewallRule -Group
+      '@FirewallAPI.dll,-28752'`, the same on every Windows language; the display name "Remote Desktop" is localized),
+      elevated via UAC when needed (`Get-KitEnableRdpScript`); prints the Tailscale IP if present.
+    - `dev-folder`: `Get-KitDevFolderPath` = the first folder that already exists of `D:\dev\github`,
+      `%SystemDrive%\dev\github`, `D:\dev\git`, `%SystemDrive%\dev\git` (the D: ones only when D: is ready and a
+      **Fixed** disk: `System.IO.DriveInfo`; a CD/DVD, USB stick or network drive doesn't count); none → `D:\dev\github`
+      with a fixed D:, else `%SystemDrive%\dev\github`. Nothing is ever moved, renamed or deleted (an old `dev\git`
+      keeps being used). Exists → current; dry run → "would create <path>"; otherwise `New-Item` → done.
+      `-DDriveType` and `-Exists` (path → bool) inject the D: check and the folder checks for tests.
     - `wsl-ubuntu` (`Invoke-KitWslUbuntu`): WSL present (`%ProgramFiles%\WSL\wsl.exe` or the
       `MicrosoftCorporationII.WindowsSubsystemForLinux` package; the inbox stub doesn't count) → `wsl --update`,
       else `wsl --install --no-distribution`, both through `Invoke-KitElevatedCapture` (already admin:
@@ -247,18 +312,20 @@ No UI. Both menus call the same functions, so behaviour is identical in both.
     (`Get-KitRegistryAccess`), which tests replace with an in-memory stub.
 - **Update everything:** `Get-KitUpdateAllPlan -Installed -Updates` returns `Kit` (`Get-KitCatalogUpdateSet`:
   installed catalogue apps with a known newer version, plus script tools with a native updater and npm tools,
-  whose updates winget doesn't list; never Interactive or POST) and `Other`: the rows of `winget upgrade`
+  whose updates winget doesn't list; never Interactive or POST; `SelfUpdates` apps go to `SelfUpdating` instead,
+  listed as "updates itself" and left out of `Run`) and `Other`: the rows of `winget upgrade`
   (`ConvertFrom-KitWingetUpgradeText`: first table only, so the "require explicit targeting" table and the footer
   are left out; the raw lines are reused from the last `Get-KitUpdates`) minus catalogue winget / Store / fallback
   IDs, `winget pin` pins (`Get-KitWingetPins`), unknown or ranged versions and cut-off Ids (`Excluded` says why).
   Other rows become items with `Method = 'winget-upgrade'`, a negative Id and group `PC` (`New-KitPcUpgrade`);
   `Invoke-KitPackage` runs them as `winget upgrade --id <Id> --exact --silent --accept-package-agreements
   --accept-source-agreements --disable-interactivity [--source]` through `Invoke-KitWinget` and classifies the exit
-  with `Get-KitWingetOutcome` (ok = updated, nothing-to-do codes = current, anything else = failed). Menus never
-  remember negative Ids as a selection or failure.
+  with `Get-KitWingetOutcome` (the same buckets; a transient error is retried once). Menus never remember negative
+  Ids as a selection or failure.
 - **Unattended plan:** `Get-KitAutoPlan` = recommended apps that are missing (`Install`) + the update-everything
   plan (`Update` = its kit half, `Other` = the rest of the PC); `Skipped` = Interactive / POST items it would otherwise touch
-  (recommended or installed). `Get-KitAutoExitCode` = 1 when any result failed.
+  (recommended or installed); `SelfUpdating` = left alone. `Get-KitAutoExitCode`: 1 = something failed, 2 = nothing
+  failed but something is blocked, 0 = all ok (restart needed and skipped are not failures).
 - **Failure reasons:** `Get-KitFailLine` picks the last output line that names a problem; winget, scripts and native
   updaters use it, so a result says e.g. "An Application Control policy has blocked this file (exit 1)" rather than
   "see log".
@@ -302,7 +369,8 @@ picker, `Show-Picker`, built on `[Console]::ReadKey`.
 - **Glyphs:** only characters present in **both Consolas and Cascadia Mono** (verified with WPF `GlyphTypeface`),
   so classic conhost renders them without font fallback. Badges, used the same way in picker, review, progress
   and results: `√` installed (green), `↑` update available / updated (yellow / green), `·` not installed (grey),
-  `×` failed (red), `↔` healed (aqua), `○` dry run (purple), `=` up to date (aqua). ✓ ✗ ↻ are missing from Consolas
+  `×` failed (red), `↔` healed (aqua), `○` dry run (purple), `=` up to date (aqua); results only: `√` restart needed
+  (yellow), `▲` blocked (orange; the same `▲` that marks warnings), `-` skipped (grey). ✓ ✗ ↻ are missing from Consolas
   (and ✗ ↻ from Cascadia Mono), so they are not used. The spinner is Spectre's `Point` (`∙●∙`); the default
   `Dots` spinner uses Braille, which Consolas lacks.
 
@@ -311,9 +379,11 @@ picker, `Show-Picker`, built on `[Console]::ReadKey`.
 - **Main menu:** Install apps · Update · Windows tweaks · Settings · Quit, each with an icon and a one-line
   description.
 - **Update** (submenu, « Back = main menu): **Update everything** (spinner: scan + `Get-KitUpdates` +
-  `Get-KitUpdateAllPlan`, then a Review table of both groups, kit apps first, trimmed to window − 20 rows, with
-  counts and the number skipped; Esc = back; "Update all now" / "Simulate all now" runs `Invoke-Run` with the plan's
-  `Run` list) and **Update AI tools** (below). After a run, back goes to the main menu.
+  `Get-KitUpdateAllPlan`, then a Review table of kit apps, then "updates itself" rows (grey `-`, left out), then
+  other apps, trimmed to window − 20 rows (− 21 with self-updating rows), with counts and the number skipped; Esc =
+  back; "Update all now" / "Simulate all now" runs the plan's `Run` list; "Choose which to update" (only when there
+  are self-updating apps) opens a grouped picker with kit and other apps ticked and the self-updating ones unticked)
+  and **Update AI tools** (below). After a run, back goes to the main menu.
 - **Install flow:**
   1. scan installed apps (spinner);
   2. "Start from": recommended set / recommended but only what's missing / everything with an update / retry
@@ -327,8 +397,11 @@ picker, `Show-Picker`, built on `[Console]::ReadKey`.
      gruvbox progress bar, percentage, elapsed time): an overall task plus the current app (completed tasks
      hide). Each finished app prints a badge line above the live view. Interactive items run after it, outside
      the progress view. Then a rounded results table (badge, app, result, version from → to, time, note) and a
-     summary panel (`√ ok · ↔ healed · × failed · total time`, log path, removed shortcuts; purple in dry run,
-     red with failures, green otherwise).
+     summary panel (`√ ok · ↔ healed · ▲ blocked · × failed · total time`, "Restart Windows to finish: …", log path,
+     removed shortcuts; purple in dry run, red with failures, orange with blocks, green otherwise). With failures or
+     blocks the results screen offers **Retry the failed / blocked** (`Invoke-RunWithRetry`: runs just those again,
+     as often as needed, after the user closed the apps that were in use; the results table keeps window − 24 rows
+     then) above the « Back row.
 - **Update AI tools** (under Update; « Back returns to the Update submenu): table of every `AI = $true` app (installed, latest, how it updates: winget upgrade, npm,
   official updater or download page; trimmed to window − 17 rows, installed first), then "Update all installed"
   or "Pick which installed tools to update". Both use `Get-KitAiUpdateSet`, so a tool that isn't installed is
@@ -381,8 +454,9 @@ no GitHub CLI dependency.
 
 `config/terminal.json` (read like the other files; the loader reads the cached copy, then the bundled one, and the
 menus refresh the cache from GitHub at each start; `Get-KitTerminalConfig`). Fields: `startingDirectory.prefer`
-(folder, environment variables allowed; `D:\dev\git` today; used when it exists, else the kit's dev folder from
-`Get-KitDevFolderPath`, created if missing; `Resolve-KitTerminalStartDir`), `defaultProfile` (guid), `globals`
+(`dev-folder` today = the kit's dev folder from `Get-KitDevFolderPath`: an existing `dev\github` or `dev\git` on D:
+or C:, else a new `D:\dev\github` or `C:\dev\github`, created; or a folder, environment variables allowed, used when it exists, else the dev folder;
+`Resolve-KitTerminalStartDir`), `defaultProfile` (guid), `globals`
 (top-level Terminal settings), `profileDefaults` (= `profiles.defaults`), `profiles` (matched by `guid`) and
 `keybindings` (`{ id, keys }`). Public repo: no user names, host names or personal paths (`test-config.ps1` checks).
 
@@ -393,6 +467,10 @@ menus refresh the cache from GitHub at each start; `Get-KitTerminalConfig`). Fie
 - **No file** (Terminal never started): writes a new one with `$help`, `$schema` and the desired settings;
   Terminal adds its generated profiles (PowerShell, Command Prompt, WSL distros) at its first start, so the repo
   lists none of them.
+- **Starting folder:** set in `profiles.defaults` and in every kit profile (the `profiles` here, by guid), so a PC's
+  Claude Code profile that carries its own folder moves to the dev folder too; other profiles keep theirs. The
+  `my-win-kit` profile starts `install.cmd` from the OneDrive kit folder through `%OneDrive%` (`cmd.exe /d /c if
+  exist ...`, a message when the folder isn't there), so the repo holds no personal path.
 - **Existing file:** read as JSON with comments (`ConvertFrom-KitJsoncText`: `//` and `/* */` comments and
   trailing commas are stripped outside strings; plain files take a fast path). It sets `globals`, merges
   `profileDefaults` into `profiles.defaults` key by key (objects such as `font` merge, so a font size stays), adds or
@@ -422,7 +500,12 @@ output has the installed version), `Update` (native updater, e.g. `claude update
 `Uninstall` (regex on the uninstall DisplayName), `Fallback` (winget ID when a direct download can't be resolved),
 `Requires` (command that must exist first), `NoAdmin` (the installer must not run as administrator: from an
 elevated kit it runs at the signed-in user's normal rights, see [the engine](#the-engine-srccorepsm1); never on an
-Interactive or Elevated item). `RetiredIds`: Ids that must never be reused. `Direct.<key>`: `Page`,
+Interactive or Elevated item), `SelfUpdates` (the app keeps itself current and runs ahead of winget: installed
+normally, left out of Update everything and `/auto` updates unless ticked by hand, a hash mismatch or "not newer" is
+never a failure), `Unsigned` (its program is unsigned: on a PC with Smart App Control on it is reported as blocked
+and not run), `InstallerType` / `Scope` (winget `--installer-type` / `--scope`, fresh installs only, e.g. Notepad++
+`nullsoft` instead of the enterprise MSI winget picks by default), `HashNote` (the text for a hash mismatch).
+`RetiredIds`: Ids that must never be reused. `Direct.<key>`: `Page`,
 `Pattern` (regex with `{arch}` / `{arch2}`), `Arch`, `Arch2`, `Signer` (Authenticode subject), `Args` (silent
 switches). Claude Desktop stays on winget on purpose: Anthropic's latest-download link refuses scripted clients.
 
@@ -473,8 +556,11 @@ except POST), `0` (none). Commands use letters that aren't group letters: `Z` re
 essentials on start on/off, `V` this PC's admin at start on/off (both shown on the command
 line with their source), `Q` quit. `ADMIN` on the subtitle when elevated. **`-Auto`** (from the loader's `/auto`):
 no menu and no questions: `Get-KitAutoPlan`, the same run loop without the "Press Enter" (`-Unattended`), a
-"Skipped (needs you)" line, the run log path and `exit 0|1`; `-Pause` waits for Enter at the end. Runs print one line per app using the same
-engine; failures stay selected for a retry. `-TestInput "a;b;c"` feeds answers (tests).
+"Skipped (needs you)" line, an "Updates itself (left alone)" line, a "Blocked (needs you)" list with each reason,
+the run log path and `exit 0|1|2`; `-Pause` waits for Enter at the end. Runs print one line per app using the same
+engine (badges as above); after a run with failures or blocks, `R` retries just those (Enter = continue), and they
+stay selected for a later `I`. `L` `1` lists the self-updating apps apart and asks `[Y/n, s = also the N that update
+themselves]`. `-TestInput "a;b;c"` feeds answers (tests).
 
 ## win11-tweaks.ps1
 
@@ -510,10 +596,10 @@ All tests run the kit in dry-run mode; nothing installs.
 | Script | Engine | Covers |
 |---|---|---|
 | `tools/lint.ps1` | 5.1 (`-ParseOnly`) + pwsh | parser check of every `.ps1/.psm1/.psd1`; PSScriptAnalyzer (pwsh) |
-| `tools/test-core.ps1` | 5.1 + pwsh | essentials: Terminal settings merge on scratch files (new file, existing file with comments + trailing comma + other profiles kept, backup, second run = no write, dry run, unparsable file left alone, `-NoFont` / `-NoDefaultProfile`, old-style profile list), starting-folder fallback, default terminal through a registry stub, Nerd Font detection + install from a local zip into a scratch folder, latest-release parsing from a sample GitHub API answer (digest, `SHA-256.txt` fallback), simulated steps; per-PC `autoInstallEssentials` (+ the older `autoInstallPwsh`), `elevateAtStart`, NoAdmin set + routing (`Test-KitDeElevate`), the de-elevation helper (simulated) and its task script (run directly, no task), the `/auto` plan and exit code, the update-everything plan on sample `winget upgrade` output (kit IDs, pins, unknown versions left out; explicit-targeting table ignored), failure reasons; catalogue sanity (unique Ids/names, groups, methods, DEV/POST off, POST interactive), the 2026-11-26 catalogue changes (removed apps, Obsidian off, Cursor/Codex AI-flagged and off, the three new entries), `Get-KitAiUpdateSet` (installed only), dev-folder path choice (injected D: types), WSL distro picker on sample `wsl --list --online` text (plain and UTF-16-as-UTF-8), restart detection, dry run of every package, version compare; `-Online` adds the installed scan and vendor-page resolution |
-| `tools/smoke-tui.ps1` | pwsh | the Spectre menu driven by scripted keys (`MYWINKIT_SIMULATE_ADMIN=0` unless a scenario sets it): Update submenu, Update everything review (+ a dry run when this PC has updates, local only), exactly one Back row on a results screen, the ADMIN badge, the admin-at-start Settings row, install flow, search, AI table (every AI tool listed, never "installs missing ones"), settings (read-only panel, a seeded local fix, the per-PC auto-install toggle; fails if removed screens reappear) + tweaks (+ "update all" and "pick installed" when an AI tool is installed, local only) |
-| `tools/smoke-loader.ps1` | 5.1 | essentials (simulated): order PS7 → Terminal → Claude Code → font → Terminal settings → default terminal, all present = nothing runs, partly present, a failure carries on and is not retried the same day, dry run, `/auto`, setting off = none run, skipped in test mode without the simulation; elevation (simulated: relaunch / already admin / declined / standard account / other account handed back / setting off / `/noelevate`, arguments kept, classic `V`, ADMIN); `/auto` with stdin closed and a time limit (exit 0, no prompt, run log, with a simulated elevation; essentials off asks nothing); `install.cmd` argument pass-through; classic `L` submenu; loader decisions (pwsh/Terminal present / absent / forced classic); auto mode installs without the question (dry run, simulated ok and failed installs end in the classic menu; a failed Terminal install isn't retried the same day); essentials off via `local-settings.json` (older `autoInstallPwsh` name): declining and dry-run accepting the PowerShell 7 install; classic `K` toggles the override; a classic-menu run |
-| `tools/test-config.ps1` | 5.1 + pwsh | config read chain (remote / cache / corrupt cache / bundled / defaults; terminal.json cached too), JSON writer (ASCII, round trip) and canonical form of all four `config/*.json`, terminal.json ASCII + no personal data (user and host names, `C:\Users\` paths, IPs), catalogue Ids (unique across Packages + Removed, no `RetiredIds` reuse), heals kept local, no config-write functions exported, publish, self-update (accept / reuse / decline / broken zip), `irm \| iex` bootstrap |
+| `tools/test-core.ps1` | 5.1 + pwsh | essentials: Terminal settings merge on scratch files (new file, existing file with comments + trailing comma + other profiles kept, backup, second run = no write, dry run, unparsable file left alone, `-NoFont` / `-NoDefaultProfile`, old-style profile list), starting-folder fallback, default terminal through a registry stub, Nerd Font detection + install from a local zip into a scratch folder, latest-release parsing from a sample GitHub API answer (digest, `SHA-256.txt` fallback), simulated steps; per-PC `autoInstallEssentials` (+ the older `autoInstallPwsh`), `elevateAtStart`, NoAdmin set + routing (`Test-KitDeElevate`), the de-elevation helper (simulated) and its task script (run directly, no task), the `/auto` plan and exit code, the update-everything plan on sample `winget upgrade` output (kit IDs, pins, unknown versions left out; explicit-targeting table ignored), failure reasons; catalogue sanity (unique Ids/names, groups, methods, DEV/POST off, POST interactive), the 2026-11-26 catalogue changes (removed apps, Obsidian off, Cursor/Codex AI-flagged and off, the three new entries), `Get-KitAiUpdateSet` (installed only), dev-folder path choice (injected D: types x existing folders, 80 combinations), WSL distro picker on sample `wsl --list --online` text (plain and UTF-16-as-UTF-8), restart detection, dry run of every package, version compare; v2.8: every winget outcome bucket on sample exit codes, result status per bucket, SelfUpdates in the update-all plan and on hash mismatch, `/auto` exit codes 0/1/2, installer type / scope / source arguments (fresh install vs upgrade), in-use detection with a fake ARP list + process list, hash mismatch (source update once + retry) and transient retry with winget mocked in the module, Smart App Control (simulated), the RDP group string, the PowerShell 7 `.msixbundle` from a sample GitHub API answer, kit profile starting folder override, the PID in the log name, the 2.8 catalogue changes; `-Online` adds the installed scan and vendor-page resolution |
+| `tools/smoke-tui.ps1` | pwsh | the Spectre menu driven by scripted keys (`MYWINKIT_SIMULATE_ADMIN=0` unless a scenario sets it): Update submenu, Update everything review (+ a dry run when this PC has updates, local only), exactly one Back row on a results screen, the ADMIN badge, the admin-at-start Settings row, install flow, search, AI table (every AI tool listed, never "installs missing ones"), settings (read-only panel, a seeded local fix, the per-PC auto-install toggle; fails if removed screens reappear) + tweaks (+ "update all" and "pick installed" when an AI tool is installed, local only), the result badges (blocked / restart needed / skipped / failed through `MYWINKIT_SIMULATE_OUTCOME`, dry run only) and Retry the failed / blocked |
+| `tools/smoke-loader.ps1` | 5.1 | essentials (simulated): order PS7 → Terminal → Claude Code → font → Terminal settings → default terminal, all present = nothing runs, partly present, a failure carries on and is not retried the same day, dry run, `/auto`, setting off = none run, skipped in test mode without the simulation; elevation (simulated: relaunch / already admin / declined / standard account / other account handed back / setting off / `/noelevate`, arguments kept, classic `V`, ADMIN); `/auto` with stdin closed and a time limit (exit 0, no prompt, run log, with a simulated elevation; essentials off asks nothing); `install.cmd` argument pass-through; Windows Terminal relaunch (simulated with `MYWINKIT_SIMULATE_WT_LAUNCH`): elevated wt launch with arguments kept (incl. `;`) and the exit code through the hand-off file, the over-the-shoulder 75 through it, wt failure or no wt = the console window, no admin = relaunch without UAC, `-InTerminal` / `WT_SESSION` = no relaunch, one relaunch only, `/auto` stays; classic `L` submenu; classic result badges and `R` retry; loader decisions (pwsh/Terminal present / absent / forced classic); auto mode installs without the question (dry run, simulated ok and failed installs end in the classic menu; a failed Terminal install isn't retried the same day); essentials off via `local-settings.json` (older `autoInstallPwsh` name): declining and dry-run accepting the PowerShell 7 install; classic `K` toggles the override; a classic-menu run |
+| `tools/test-config.ps1` | 5.1 + pwsh | config read chain (remote / cache / corrupt cache / bundled / defaults; terminal.json cached too), JSON writer (ASCII, round trip) and canonical form of all four `config/*.json`, terminal.json ASCII + no personal data (user and host names, `C:\Users\` paths, IPs), catalogue Ids (unique across Packages + Removed, no `RetiredIds` reuse, Python 3.14 on Id 62), terminal.json `dev-folder` start folder and the path-free my-win-kit profile, heals kept local, no config-write functions exported, publish, self-update (accept / reuse / decline / broken zip), `irm \| iex` bootstrap |
 | `tools/render-screens.ps1 -OutDir <dir>` | pwsh (+5.1 for classic) | not a test: captures every screen as `.txt` (layout) and truecolor `.ans` (view with `Get-Content x.ans -Raw` in Windows Terminal) at 120 × 30, and prints the main-menu height |
 
 test-core, smoke-tui, smoke-loader and render-screens point `MYWINKIT_CONFIG_URL` at the repo's own `config/`

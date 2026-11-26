@@ -24,7 +24,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:KitVersion  = '2.7.0'   # bump with user-visible changes (shown in the menu banner)
+$script:KitVersion  = '2.8.0'   # bump with user-visible changes (shown in the menu banner)
 $script:KitRoot     = $null
 $script:BaseData    = $null
 $script:Catalog     = @()
@@ -43,6 +43,32 @@ $script:WG_UPGRADE_VERSION_NOT_NEWER = -1978335153   # 0x8A15004F UPGRADE_VERSIO
 $script:WG_PACKAGE_ALREADY_INSTALLED = -1978335135   # 0x8A150061 PACKAGE_ALREADY_INSTALLED: installed, upgrade not attempted
 $script:WG_INSTALL_DOWNGRADE         = -1978334962   # 0x8A15010E INSTALL_DOWNGRADE: a higher version is already installed
 $script:WG_NOTHING_TO_DO = @($script:WG_UPDATE_NOT_APPLICABLE, $script:WG_UPGRADE_VERSION_NOT_NEWER, $script:WG_PACKAGE_ALREADY_INSTALLED, $script:WG_INSTALL_DOWNGRADE)
+$script:WG_HASH_MISMATCH = -1978335215   # 0x8A150011 INSTALLER_HASH_MISMATCH
+# Outcome buckets for a winget exit (Get-KitWingetOutcome). Codes from winget-cli
+# doc/windows/package-manager/winget/returnCodes.md (winget 1.29); 0x80073D06 is the MSIX
+# deployment error ERROR_INSTALL_PACKAGE_DOWNGRADE (a higher version is already installed).
+#   current   = nothing to do                   restart   = installed, Windows restart needed
+#   busy      = the app is in use (close it)    transient = network/source hiccup, one automatic retry
+#   reinstall = installer type changed          pinned    = `winget pin`, left alone
+#   policy    = blocked by group policy         otherver  = another version is installed
+#   hash      = installer hash mismatch (winget's catalogue is behind the vendor)
+$script:WgBucketCodes = [ordered]@{
+    current   = @('8A15002B', '8A15004F', '8A150061', '8A15010E', '80073D06')
+    restart   = @('8A150109', '8A15010B')
+    busy      = @('8A150101', '8A150103', '8A150111')
+    transient = @('8A150008', '8A15006D', '8A150102', '8A150107', '8A15007F')
+    reinstall = @('8A15008E')
+    pinned    = @('8A150068')
+    policy    = @('8A15001B', '8A15001C')
+    otherver  = @('8A15010D')
+    hash      = @('8A150011')
+}
+$script:WgBucket = @{}
+foreach ($b in @($script:WgBucketCodes.Keys)) { foreach ($hx in $script:WgBucketCodes[$b]) { $script:WgBucket[[Convert]::ToInt32($hx, 16)] = $b } }
+$script:RetryDelaySec = 5          # pause before the one automatic retry of a transient winget error (tests: 0)
+$script:SourceUpdated = $false     # `winget source update` ran in this run (once per run, only after a hash mismatch)
+$script:UninstallCache = $null     # Add/Remove Programs entries, read once per run (in-use check)
+$script:SelfChain = $null          # this process and its parents (never "in use" blockers)
 $script:UA          = 'my-win-kit (PowerShell)'
 $script:LastUpgradeRaw = $null   # raw `winget upgrade` lines from the last Get-KitUpdates
 $script:LastFailLine = ''        # the line that names the problem in the last failed script/updater run
@@ -50,6 +76,15 @@ $script:LastFailLine = ''        # the line that names the problem in the last f
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 
 # ---------------------------------------------------------------- setup
+
+function Get-KitProp($Object, [string]$Name) {
+    <# An optional property, $null when the object has none (StrictMode-safe for hand-built package objects). #>
+    if ($null -eq $Object) { return $null }
+    if ($Object -is [System.Collections.IDictionary]) { return $Object[$Name] }
+    $pp = $Object.PSObject.Properties[$Name]
+    if ($pp) { return $pp.Value }
+    return $null
+}
 
 function ConvertTo-KitPackage($h, [hashtable]$Order, [string]$Origin = 'config') {
     # Indexer access: optional keys are simply $null (StrictMode-safe)
@@ -61,7 +96,8 @@ function ConvertTo-KitPackage($h, [hashtable]$Order, [string]$Origin = 'config')
         Update = $h['Update']; Version = $h['Version']; Exe = $h['Exe']; Appx = $h['Appx']
         Uninstall = $h['Uninstall']; Fallback = $h['Fallback']; Requires = $h['Requires']
         Elevated = [bool]$h['Elevated']; Shell = $h['Shell']; Detect = $h['Detect']
-        NoAdmin = [bool]$h['NoAdmin']
+        NoAdmin = [bool]$h['NoAdmin']; SelfUpdates = [bool]$h['SelfUpdates']; Unsigned = [bool]$h['Unsigned']
+        InstallerType = $h['InstallerType']; Scope = $h['Scope']; HashNote = $h['HashNote']
         Origin = $Origin
     }
 }
@@ -325,7 +361,9 @@ function Update-KitPath {
 function Start-KitLog {
     $dir = Join-Path $env:TEMP 'my-win-kit'
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    $script:LogPath = Join-Path $dir ('install-{0:yyyyMMdd-HHmmss}.log' -f (Get-Date))
+    # the PID keeps two runs that start in the same second apart (e.g. a test run next to a real one)
+    $script:LogPath = Join-Path $dir ('install-{0:yyyyMMdd-HHmmss}-{1}.log' -f (Get-Date), $PID)
+    $script:SourceUpdated = $false; $script:UninstallCache = $null   # once per run
     Write-KitLog "my-win-kit run on $env:COMPUTERNAME, PowerShell $($PSVersionTable.PSVersion)"
     return $script:LogPath
 }
@@ -387,8 +425,121 @@ function Get-KitUninstallEntries {
         Where-Object { $_.PSObject.Properties['DisplayName'] -and $_.DisplayName } |
         ForEach-Object {
             $v = $null; if ($_.PSObject.Properties['DisplayVersion']) { $v = $_.DisplayVersion }
-            [pscustomobject]@{ Name = $_.DisplayName; Version = $v }
+            $loc = ''; if ($_.PSObject.Properties['InstallLocation']) { $loc = [string]$_.InstallLocation }
+            $ico = ''; if ($_.PSObject.Properties['DisplayIcon']) { $ico = [string]$_.DisplayIcon }
+            [pscustomobject]@{ Name = $_.DisplayName; Version = $v; InstallLocation = $loc; DisplayIcon = $ico }
         })
+}
+
+# ---------------------------------------------------------------- in use? (checked before an upgrade, never kills anything)
+
+function Get-KitSelfChain {
+    <# This process and its parents (up to 8): the kit's own window never counts as "in use". #>
+    if ($null -ne $script:SelfChain) { return $script:SelfChain }
+    $ids = @($PID)
+    try {
+        $cur = $PID
+        for ($i = 0; $i -lt 8; $i++) {
+            $p = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $cur" -ErrorAction Stop
+            if (-not $p -or -not $p.ParentProcessId -or $ids -contains [int]$p.ParentProcessId) { break }
+            $cur = [int]$p.ParentProcessId; $ids += $cur
+        }
+    } catch {}
+    $script:SelfChain = $ids
+    return $ids
+}
+
+function Test-KitUsableFolder {
+    <# A folder specific enough to say "this app's files": never a drive root, Program Files, the profile or Windows. #>
+    param([string]$Path)
+    if (-not $Path) { return $false }
+    try { $f = [IO.Path]::GetFullPath($Path.Trim('"', ' ')).TrimEnd('\') } catch { return $false }
+    if ($f.Length -le 3) { return $false }
+    $broad = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramW6432, $env:ProgramData, $env:LOCALAPPDATA, $env:APPDATA, $env:USERPROFILE, $env:PUBLIC,
+        $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Programs' }), $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps' })) |
+        Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') }
+    foreach ($b in $broad) { if ($f -eq $b) { return $false } }
+    if ($env:windir -and ($f -eq $env:windir.TrimEnd('\') -or $f.StartsWith($env:windir.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase))) { return $false }
+    return $true
+}
+
+function Get-KitInstallFolder {
+    <#
+    The app's install folder from Add/Remove Programs: the entry that matches the
+    catalogue's Uninstall regex, else the DisplayName equal to (or starting with)
+    the app's name; its InstallLocation, else the folder of its DisplayIcon .exe.
+    '' when unknown or too broad. -Entries injects the ARP list (tests).
+    #>
+    param([Parameter(Mandatory)]$Package, [object[]]$Entries)
+    if ($null -eq $Entries) {
+        if ($null -eq $script:UninstallCache) { $script:UninstallCache = @(Get-KitUninstallEntries) }
+        $Entries = $script:UninstallCache
+    }
+    $name = ([string]$Package.Name).TrimEnd([char]0x2026, '.', ' ')
+    $hit = $null
+    $urx = Get-KitProp $Package 'Uninstall'
+    if ($urx) { $hit = @($Entries | Where-Object { $_.Name -match $urx }) | Select-Object -First 1 }
+    if (-not $hit -and $name) {
+        $hit = @($Entries | Where-Object { $_.Name -eq $name }) | Select-Object -First 1
+        if (-not $hit) { $rx = '^' + [regex]::Escape($name) + '(\s|$)'; $hit = @($Entries | Where-Object { $_.Name -match $rx }) | Select-Object -First 1 }
+    }
+    if (-not $hit) { return '' }
+    if (Test-KitUsableFolder $hit.InstallLocation) { return ([IO.Path]::GetFullPath(([string]$hit.InstallLocation).Trim('"', ' ')).TrimEnd('\')) }
+    $ico = ([string]$hit.DisplayIcon -replace ',\s*-?\d+\s*$', '').Trim('"', ' ')
+    if ($ico -match '(?i)\.exe$') {
+        $dir = Split-Path -Parent $ico
+        if (Test-KitUsableFolder $dir) { return ([IO.Path]::GetFullPath($dir).TrimEnd('\')) }
+    }
+    return ''
+}
+
+function Get-KitBlockingProcesses {
+    <#
+    Running programs whose file is inside -Folder (the kit's own process tree
+    excluded). -Processes injects @{ Id; Name; Path } objects (tests).
+    Returns distinct program names, e.g. 'bash.exe', 'ssh.exe'.
+    #>
+    param([string]$Folder, [object[]]$Processes)
+    if (-not $Folder) { return @() }
+    if ($null -eq $Processes) {
+        $Processes = @(Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
+            $pp = $null; try { $pp = $_.Path } catch {}
+            if ($pp) { [pscustomobject]@{ Id = $_.Id; Name = $_.ProcessName; Path = $pp } }
+        })
+    }
+    $self = @(Get-KitSelfChain)
+    $pre = $Folder.TrimEnd('\') + '\'
+    $names = @($Processes | Where-Object { $_.Path -and ([string]$_.Path).StartsWith($pre, [StringComparison]::OrdinalIgnoreCase) -and $self -notcontains [int]$_.Id } |
+        ForEach-Object { Split-Path -Leaf ([string]$_.Path) } | Sort-Object -Unique)
+    return $names
+}
+
+function Get-KitInUse {
+    <# Programs that would block an upgrade of this package (its install folder is in use), or @(). -Entries / -Processes: tests. #>
+    param([Parameter(Mandatory)]$Package, [object[]]$Entries, [object[]]$Processes)
+    $folder = Get-KitInstallFolder -Package $Package -Entries $Entries
+    if (-not $folder) { return @() }
+    return @(Get-KitBlockingProcesses -Folder $folder -Processes $Processes)
+}
+
+# ---------------------------------------------------------------- Smart App Control
+
+function Test-KitSmartAppControl {
+    <#
+    Smart App Control is ON (enforcing): HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy
+    VerifiedAndReputablePolicyState = 1 (0 = off, 2 = evaluation mode). It blocks
+    unsigned programs that have no reputation. Testing: MYWINKIT_SIMULATE_SAC=on|off.
+    #>
+    if ($env:MYWINKIT_SIMULATE_SAC -eq 'on') { return $true }
+    if ($env:MYWINKIT_SIMULATE_SAC -eq 'off') { return $false }
+    try { return ([int](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' -Name 'VerifiedAndReputablePolicyState' -ErrorAction Stop).VerifiedAndReputablePolicyState -eq 1) } catch { return $false }
+}
+
+function Test-KitAppControlBlock {
+    <# The output names a Windows Application Control block ("An Application Control policy has blocked this file"). #>
+    param([string[]]$Out = @())
+    foreach ($l in @($Out)) { if ("$l" -match '(?i)Application Control') { return $true } }
+    return $false
 }
 
 function Get-KitVersionText {
@@ -530,14 +681,99 @@ function Get-KitFailLine {
 
 function Get-KitWingetOutcome {
     <#
-    Classify a `winget install` exit: @{ Status = ok | current | failed; Reason }.
-    current = one of winget's "nothing to do" codes ($script:WG_NOTHING_TO_DO).
-    Every other non-zero exit is failed, whether or not the app is installed.
+    Classify a winget exit: @{ Status; Reason }. Status = ok, a bucket from
+    $script:WgBucketCodes (current, restart, busy, transient, reinstall, pinned,
+    policy, otherver, hash) or failed (any other non-zero exit, installed or not).
     #>
     param([int]$ExitCode, [string[]]$Out = @())
     if ($ExitCode -eq 0) { return @{ Status = 'ok'; Reason = '' } }
-    if ($script:WG_NOTHING_TO_DO -contains $ExitCode) { return @{ Status = 'current'; Reason = '' } }
+    $code = 'winget 0x{0:X8}' -f $ExitCode
+    $b = $script:WgBucket[$ExitCode]
+    switch ($b) {
+        'current'   { return @{ Status = 'current'; Reason = '' } }
+        'restart'   { return @{ Status = 'restart'; Reason = "installed - restart Windows to finish ($code)" } }
+        'busy'      { return @{ Status = 'busy'; Reason = "the app is in use - close it, then retry ($code)" } }
+        'reinstall' { return @{ Status = 'reinstall'; Reason = "installer type changed: uninstall + install needed (not done automatically; $code)" } }
+        'pinned'    { return @{ Status = 'pinned'; Reason = "pinned with winget pin - left alone ($code)" } }
+        'policy'    { return @{ Status = 'policy'; Reason = "blocked by policy ($code)" } }
+        'otherver'  { return @{ Status = 'otherver'; Reason = "another version of this app is already installed ($code)" } }
+        'hash'      { return @{ Status = 'hash'; Reason = "installer hash mismatch: winget's catalogue is behind the vendor, try later ($code)" } }
+        'transient' { return @{ Status = 'transient'; Reason = (Get-KitWingetFailReason -ExitCode $ExitCode -Out $Out) } }
+    }
     return @{ Status = 'failed'; Reason = (Get-KitWingetFailReason -ExitCode $ExitCode -Out $Out) }
+}
+
+function Get-KitWingetResult {
+    <#
+    Result status for a winget outcome that is not ok/current: @{ Status; Detail }.
+      restart                     -> restart  (done, restart needed; not a failure)
+      busy, reinstall, policy, otherver -> blocked (needs a person, never forced)
+      pinned                      -> skipped
+      hash                        -> failed, or for a SelfUpdates app: skipped when
+                                     installed (it updates itself), blocked when not
+      transient (after its retry), failed -> failed
+    The catalogue's HashNote replaces the hash-mismatch text (Office).
+    #>
+    param([Parameter(Mandatory)]$Package, [Parameter(Mandatory)][hashtable]$Outcome, [bool]$IsInstalled)
+    $why = [string]$Outcome.Reason
+    switch ($Outcome.Status) {
+        'restart'   { return @{ Status = 'restart'; Detail = $why } }
+        'busy'      {
+            $code = 'winget'; $m = [regex]::Match($why, 'winget 0x[0-9A-F]{8}'); if ($m.Success) { $code = $m.Value }
+            return @{ Status = 'blocked'; Detail = ($Package.Name + ' is in use - close it, then Retry (' + $code + ')') }
+        }
+        'reinstall' { return @{ Status = 'blocked'; Detail = $why } }
+        'policy'    { return @{ Status = 'blocked'; Detail = $why } }
+        'otherver'  { return @{ Status = 'blocked'; Detail = "$why - uninstall it or update it from the app" } }
+        'pinned'    { return @{ Status = 'skipped'; Detail = $why } }
+        'hash'      {
+            $note = Get-KitProp $Package 'HashNote'; if ($note) { $why = "$note (winget 0x8A150011)" }
+            if (Get-KitProp $Package 'SelfUpdates') {
+                if ($IsInstalled) { return @{ Status = 'skipped'; Detail = "updates itself; $why" } }
+                return @{ Status = 'blocked'; Detail = $why }
+            }
+            return @{ Status = 'failed'; Detail = $why }
+        }
+    }
+    return @{ Status = 'failed'; Detail = $why }
+}
+
+function Update-KitWingetSource {
+    <# `winget source update`, once per run (only after a hash mismatch). Returns $true when it ran now. #>
+    if ($script:SourceUpdated) { return $false }
+    $script:SourceUpdated = $true
+    Write-KitLog 'winget source update  (after an installer hash mismatch)'
+    $r = Invoke-KitProcess -FilePath 'winget' -ArgumentList @('source', 'update', '--disable-interactivity')
+    Write-KitLog "  exit $($r.Ec)"
+    return $true
+}
+
+function Get-KitInstallerUrl {
+    <# Installer URL winget would download for one version (`winget show --version`), or ''. The installer section comes last. #>
+    param([string]$WId, [string]$Version, [string]$Method)
+    $sa = @('show', '--id', $WId, '--exact', '--disable-interactivity', '--accept-source-agreements')
+    if ($Version) { $sa += @('--version', $Version) }
+    if ($Method -eq 'msstore') { $sa += @('--source', 'msstore') } else { $sa += @('--source', 'winget') }
+    $url = ''
+    foreach ($l in (Get-KitWingetRaw $sa)) {
+        if ($l -match '(?i)^\s*Installer\s*Url:\s*(https?://\S+)') { return $Matches[1] }
+        if ($l -match ':\s*(https?://\S+)\s*$') { $url = $Matches[1] }
+    }
+    return $url
+}
+
+function Test-KitSharedInstallerUrl {
+    <#
+    Every listed version downloads from the same URL (Chrome, Office: the vendor
+    replaces one file in place), so older versions cannot heal a broken download.
+    Compares the newest two versions; $false when unknown.
+    #>
+    param([string]$WId, [string]$Method, [string[]]$Versions)
+    $v = @($Versions | Select-Object -First 2)
+    if ($v.Count -lt 2) { return $false }
+    $a = Get-KitInstallerUrl -WId $WId -Version $v[0] -Method $Method
+    $b = Get-KitInstallerUrl -WId $WId -Version $v[1] -Method $Method
+    return [bool]($a -and $a -eq $b)
 }
 
 function Get-KitWingetRows {
@@ -671,10 +907,20 @@ function Find-KitStoreFallback {
 }
 
 function Get-KitWingetInstallArgs {
-    param([string]$WId, [string]$Method, [string]$Version = '')
+    <#
+    `winget install` arguments. The source is always named (winget items: the
+    community source only, so msstore lookups and duplicate matches never happen).
+    -InstallerType / -Scope (catalogue InstallerType / Scope) are for a FRESH
+    install only: the caller leaves them out when the app is installed, because
+    an upgrade must keep the installer type and scope that is already there.
+    Never: --force, --ignore-security-hash, --include-unknown, --all.
+    #>
+    param([string]$WId, [string]$Method, [string]$Version = '', [string]$InstallerType = '', [string]$Scope = '')
     $a = @('install', '--id', $WId, '--exact', '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
     if ($Version) { $a += @('--version', $Version) }
-    if ($Method -eq 'msstore') { $a += @('--source', 'msstore') }
+    if ($Method -eq 'msstore') { $a += @('--source', 'msstore') } else { $a += @('--source', 'winget') }
+    if ($InstallerType) { $a += @('--installer-type', $InstallerType) }
+    if ($Scope) { $a += @('--scope', $Scope) }
     return $a
 }
 
@@ -957,19 +1203,26 @@ function Invoke-KitCommandLine {
     return [int]$ec
 }
 
-function Invoke-KitEnableRdp {
-    <# Allow RDP with NLA + open the firewall group. Elevates through UAC when needed. #>
-    $body = @'
-$ErrorActionPreference = 'Stop'
+$script:RdpFirewallGroup = '@FirewallAPI.dll,-28752'   # the "Remote Desktop" rule group, by its resource string (same on every Windows language)
+
+function Get-KitEnableRdpScript {
+    <# The script the RDP helper runs (elevated). The firewall group is named by its resource string, so Polish Windows works too. #>
+    return @"
+`$ErrorActionPreference = 'Stop'
 try {
     Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
     Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 1
-    Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
+    Enable-NetFirewallRule -Group '$($script:RdpFirewallGroup)'
     # Lock RDP to the Tailscale range (uncomment to use):
-    # Set-NetFirewallRule -DisplayGroup 'Remote Desktop' -RemoteAddress 100.64.0.0/10
+    # Set-NetFirewallRule -Group '$($script:RdpFirewallGroup)' -RemoteAddress 100.64.0.0/10
     exit 0
 } catch { exit 1 }
-'@
+"@
+}
+
+function Invoke-KitEnableRdp {
+    <# Allow RDP with NLA + open the firewall group. Elevates through UAC when needed. #>
+    $body = Get-KitEnableRdpScript
     $tmp = Join-Path $env:TEMP 'my-win-kit-enable-rdp.ps1'
     Set-Content -LiteralPath $tmp -Value $body -Encoding UTF8
     try {
@@ -1017,7 +1270,24 @@ function Get-KitPwshPath {
     if (Test-Path -LiteralPath $known) { return $known }
     $c = Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($c) { return $c.Path }
+    $alias = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\pwsh.exe'   # the MSIX package's alias
+    if (Test-Path -LiteralPath $alias) { return $alias }
     return $null
+}
+
+function Get-KitPwshMsixAsset {
+    <#
+    The PowerShell 7 MSIX bundle in a GitHub release (the API answer for
+    repos/PowerShell/PowerShell/releases/latest, JSON text): @{ Tag; Name; Url;
+    Size }. Since 7.7 the releases ship no MSI; the .msixbundle holds every
+    architecture. Throws when the release has none.
+    #>
+    param([Parameter(Mandatory)][string]$Json)
+    $rel = $Json | ConvertFrom-Json
+    # stable: PowerShell-7.7.0.msixbundle (preview releases use PowerShellPreview-*, never matched)
+    $a = @($rel.assets | Where-Object { $_.name -match '^PowerShell-\d+\.\d+\.\d+(-win)?\.msixbundle$' } | Select-Object -First 1)
+    if (-not $a.Count) { throw "no .msixbundle in release $($rel.tag_name)" }
+    return @{ Tag = [string]$rel.tag_name; Name = [string]$a[0].name; Url = [string]$a[0].browser_download_url; Size = [long]$a[0].size }
 }
 
 function Get-KitPwshProfilePath {
@@ -1044,21 +1314,38 @@ function Get-KitDriveType {
 
 function Get-KitDevFolderPath {
     <#
-    D:\dev\git when D: is a local fixed disk (not a CD/DVD, USB stick or network
-    drive), else <system drive>\dev\git. -DDriveType injects the D: check (tests).
+    The dev folder. An existing one wins (nothing is created, moved or renamed),
+    checked in this order: D:\dev\github, C:\dev\github, D:\dev\git, C:\dev\git
+    (D: only when it is a ready local fixed disk: not a CD/DVD, USB stick or
+    network drive; C: = the system drive). None there: D:\dev\github when D: is
+    a fixed disk, else C:\dev\github (the caller creates it).
+    Tests: -DDriveType injects the D: check, -Exists (scriptblock: path -> bool)
+    the folder checks.
     #>
-    param([AllowEmptyString()][string]$DDriveType)
+    param([AllowEmptyString()][string]$DDriveType, [scriptblock]$Exists)
     if (-not $PSBoundParameters.ContainsKey('DDriveType')) { $DDriveType = Get-KitDriveType 'D' }
-    if ($DDriveType -eq 'Fixed') { return 'D:\dev\git' }
+    if (-not $Exists) { $Exists = { param($p) Test-Path -LiteralPath $p -PathType Container } }
     $sys = $env:SystemDrive; if (-not $sys) { $sys = 'C:' }
-    return "$sys\dev\git"
+    $hasD = $DDriveType -eq 'Fixed'
+    $cands = @()
+    foreach ($leaf in 'dev\github', 'dev\git') {
+        if ($hasD) { $cands += "D:\$leaf" }
+        $cands += "$sys\$leaf"
+    }
+    foreach ($c in $cands) { if (& $Exists $c) { return $c } }
+    if ($hasD) { return 'D:\dev\github' }
+    return "$sys\dev\github"
 }
 
 function Invoke-KitDevFolder {
-    <# Create the dev folder (idempotent). @{ Status = done|current|dryrun|failed; Detail; To = path }. #>
-    param([switch]$DryRun, [AllowEmptyString()][string]$DDriveType)
-    $path = if ($PSBoundParameters.ContainsKey('DDriveType')) { Get-KitDevFolderPath -DDriveType $DDriveType } else { Get-KitDevFolderPath }
-    if (Test-Path -LiteralPath $path -PathType Container) { return @{ Status = 'current'; Detail = "$path already exists"; To = $path } }
+    <# Create the dev folder unless one exists (idempotent). @{ Status = done|current|dryrun|failed; Detail; To = path }. #>
+    param([switch]$DryRun, [AllowEmptyString()][string]$DDriveType, [scriptblock]$Exists)
+    $gp = @{}
+    if ($PSBoundParameters.ContainsKey('DDriveType')) { $gp.DDriveType = $DDriveType }
+    if ($Exists) { $gp.Exists = $Exists }
+    $path = Get-KitDevFolderPath @gp
+    $there = if ($Exists) { & $Exists $path } else { Test-Path -LiteralPath $path -PathType Container }
+    if ($there) { return @{ Status = 'current'; Detail = "$path already exists"; To = $path } }
     if ($DryRun) { return @{ Status = 'dryrun'; Detail = "would create $path"; To = $path } }
     try {
         New-Item -ItemType Directory -Path $path -Force -ErrorAction Stop | Out-Null
@@ -1578,13 +1865,15 @@ function Get-KitTerminalConfig {
 
 function Resolve-KitTerminalStartDir {
     <#
-    Starting folder for every Terminal profile: -Prefer (environment variables
-    expanded; default %OneDrive%\.playground) when that folder exists, else
-    -Fallback (default: the kit's dev folder, D:\dev\git or C:\dev\git), created
-    when missing unless -DryRun. @{ Path; Source = prefer|fallback|home; Created }.
+    Starting folder for every Terminal profile: -Prefer (a folder, environment
+    variables expanded) when that folder exists, else -Fallback (default: the
+    kit's dev folder, D:\dev\git or C:\dev\git), created when missing unless
+    -DryRun. -Prefer 'dev-folder' (the default) = the dev folder itself.
+    @{ Path; Source = prefer|fallback|home; Created }.
     #>
-    param([string]$Prefer = '%OneDrive%\.playground', [string]$Fallback, [switch]$DryRun)
-    if (-not $PSBoundParameters.ContainsKey('Fallback')) { $Fallback = Get-KitDevFolderPath }
+    param([string]$Prefer = 'dev-folder', [string]$Fallback, [switch]$DryRun)
+    if (-not $PSBoundParameters.ContainsKey('Fallback') -or $Fallback -eq 'dev-folder') { $Fallback = Get-KitDevFolderPath }
+    if ($Prefer -eq 'dev-folder') { $Prefer = '' }
     $p = [Environment]::ExpandEnvironmentVariables($Prefer)
     if ($p -and $p -notmatch '%' -and (Test-Path -LiteralPath $p -PathType Container)) { return @{ Path = $p; Source = 'prefer'; Created = $false } }
     if ($Fallback) {
@@ -1611,7 +1900,9 @@ function Merge-KitTerminalSettings {
         Writes only when something changes, after a backup to
         settings.json.bak-my-win-kit-<date>. A file that does not parse is
         never overwritten.
-        -StartingDirectory goes into profiles.defaults. -NoFont leaves the font
+        -StartingDirectory goes into profiles.defaults and into each kit-managed
+        profile (config/terminal.json profiles, by guid), so a profile that
+        carries its own folder starts there too. -NoFont leaves the font
         out (the Nerd Font is not installed yet, so Terminal would warn);
         -NoDefaultProfile keeps the current default profile (no PowerShell 7).
     #>
@@ -1650,12 +1941,16 @@ function Merge-KitTerminalSettings {
     Merge-KitJsonInto -Target $prof['defaults'] -Source $defs -Prefix 'profiles.defaults' -Changes $changes
     $list = New-Object System.Collections.ArrayList
     foreach ($x in @($prof['list'])) { [void]$list.Add($x) }
-    foreach ($want in @($Desired['profiles'])) {
-        if ($want -isnot [System.Collections.IDictionary] -or -not $want['guid']) { continue }
+    $ins = 0   # new kit profiles go on top, in config order
+    foreach ($want0 in @($Desired['profiles'])) {
+        if ($want0 -isnot [System.Collections.IDictionary] -or -not $want0['guid']) { continue }
+        $want = Copy-KitJsonValue $want0
+        # kit-managed profiles start in the same folder, even when the PC's copy carries its own
+        if ($StartingDirectory) { $want['startingDirectory'] = $StartingDirectory }
         $hit = $null
         foreach ($x in $list) { if ($x -is [System.Collections.IDictionary] -and ([string]$x['guid']) -eq ([string]$want['guid'])) { $hit = $x; break } }
         if ($hit) { Merge-KitJsonInto -Target $hit -Source $want -Prefix "profile '$($want['name'])'" -Changes $changes }
-        else { [void]$list.Insert(0, (Copy-KitJsonValue $want)); $changes.Add("profile '$($want['name'])' added") }
+        else { [void]$list.Insert([Math]::Min($ins, $list.Count), (Copy-KitJsonValue $want)); $ins++; $changes.Add("profile '$($want['name'])' added") }
     }
     $prof['list'] = @($list.ToArray())
     # default profile
@@ -1968,7 +2263,7 @@ function Invoke-KitEssential {
             'terminal-settings' {
                 $cfg = $null; if ($KitRoot) { $cfg = Get-KitTerminalConfig -KitRoot $KitRoot }
                 if (-not $cfg) { $r = @{ Status = 'skipped'; Detail = 'no config/terminal.json' }; break }
-                $sd = $cfg['startingDirectory']; $prefer = '%OneDrive%\.playground'
+                $sd = $cfg['startingDirectory']; $prefer = 'dev-folder'
                 if ($sd -is [System.Collections.IDictionary] -and $sd['prefer']) { $prefer = [string]$sd['prefer'] }
                 $start = Resolve-KitTerminalStartDir -Prefer $prefer -DryRun:$DryRun
                 $m = Merge-KitTerminalSettings -Path (Get-KitTerminalSettingsPath) -Desired $cfg -StartingDirectory $start.Path -NoFont:(-not (Test-KitNerdFont)) -NoDefaultProfile:(-not $PwshPresent) -DryRun:$DryRun
@@ -2050,7 +2345,8 @@ function Get-KitUpdateAllPlan {
         "Update everything": @{ Kit; Other; Run; Excluded }.
     .DESCRIPTION
         Kit   = Get-KitCatalogUpdateSet (catalogue apps, AI tools included, each
-                through its own method).
+                through its own method), minus SelfUpdates apps.
+        SelfUpdating = the SelfUpdates apps with an update: not in Run.
         Other = every other row of `winget upgrade` (apps on the PC that are not
                 in the catalogue), as winget-upgrade items. Left out: rows whose Id
                 is a catalogue winget/Store/fallback ID, pinned packages (`winget
@@ -2085,7 +2381,11 @@ function Get-KitUpdateAllPlan {
         $n++
         $others += New-KitPcUpgrade -Row $row -Id (-$n) -GroupOrder $gOrder
     }
-    return [pscustomobject]@{ Kit = @($kit); Other = @($others); Run = @(@(Get-KitRunOrder $kit) + @($others)); Excluded = @($excluded) }
+    # SelfUpdates apps (Chrome, Office, Teams ...) keep themselves current and run ahead of winget:
+    # listed as "updates itself", left out of Run (a person can still tick them on the review screen)
+    $self = @($kit | Where-Object SelfUpdates)
+    $kit = @($kit | Where-Object { -not $_.SelfUpdates })
+    return [pscustomobject]@{ Kit = @($kit); SelfUpdating = @($self); Other = @($others); Run = @(@(Get-KitRunOrder $kit) + @($others)); Excluded = @($excluded) }
 }
 
 # ---------------------------------------------------------------- unattended run (/auto)
@@ -2099,7 +2399,8 @@ function Get-KitAutoPlan {
                 outside the catalogue; Get-KitUpdateAllPlan)
       Skipped = Interactive and POST items it would otherwise touch
                 (recommended or installed): they need a person
-    Returns @{ Install; Update; Other; Skipped; Run } (Run = Install + Update, in run order, then Other).
+      SelfUpdating = installed SelfUpdates apps with an update: left alone
+    Returns @{ Install; Update; Other; Skipped; SelfUpdating; Run } (Run = Install + Update, in run order, then Other).
     -UpgradeLines / -Pinned pass through to Get-KitUpdateAllPlan (tests).
     #>
     param([Parameter(Mandatory)][hashtable]$Installed, [hashtable]$Updates = @{}, [string[]]$UpgradeLines = $null, [string[]]$Pinned = $null, [object[]]$Packages = $script:Catalog)
@@ -2112,15 +2413,28 @@ function Get-KitAutoPlan {
     }
     return [pscustomobject]@{
         Install = @($install); Update = @($all.Kit); Other = @($all.Other); Skipped = @(Get-KitRunOrder $skipped)
+        SelfUpdating = @($all.SelfUpdating)
         Run = @(@(Get-KitRunOrder (@($install) + @($all.Kit))) + @($all.Other))
     }
 }
 
 function Get-KitAutoExitCode {
-    <# Exit code of an unattended run: 0 = nothing failed, 1 = at least one failure. #>
+    <#
+    Exit code of an unattended run: 1 = at least one failure; 2 = nothing failed
+    but something is blocked (in use, Smart App Control, installer type changed,
+    policy: needs a person); 0 = all ok. "restart needed" and "skipped" (pinned,
+    updates itself) are not failures.
+    #>
     param([object[]]$Results = @())
     if (@($Results | Where-Object { $_.Status -eq 'failed' }).Count) { return 1 }
+    if (@($Results | Where-Object { $_.Status -eq 'blocked' }).Count) { return 2 }
     return 0
+}
+
+function Test-KitResultOk {
+    <# A result that is not a problem: installed, updated, current, done, dryrun, restart (needed), skipped. #>
+    param($Result)
+    return ($Result.Status -notin 'failed', 'blocked')
 }
 
 function Get-KitAiUpdateSet {
@@ -2146,7 +2460,10 @@ function Invoke-KitPackage {
     <#
     .SYNOPSIS
         Install or update one package. Returns a result object:
-        Status = installed | updated | current | failed | dryrun.
+        Status = installed | updated | current | done | dryrun | restart (done,
+        Windows restart needed) | skipped (pinned, updates itself) | blocked
+        (needs a person: in use, Smart App Control, installer type changed,
+        policy) | failed.
     .PARAMETER Installed
         Version from Get-KitInstalled ($null = not installed).
     .PARAMETER Mode
@@ -2160,31 +2477,59 @@ function Invoke-KitPackage {
         $Installed = $null,
         [ValidateSet('install', 'update')][string]$Mode = 'install',
         [switch]$DryRun,
-        [scriptblock]$OnStatus
+        [scriptblock]$OnStatus,
+        [string]$Available = ''   # newer version the caller knows of (Get-KitUpdates): an upgrade will run, so check "in use"
     )
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $p = $Package
     $isInst = $null -ne $Installed
     $from = if ($isInst) { [string]$Installed } else { '' }
     function Step([string]$t) { if ($OnStatus) { try { & $OnStatus $t } catch {} } }
+    function Get-InUseResult {
+        # an upgrade replaces files that running programs hold open: report it, never kill anything
+        $busy = @(Get-KitInUse -Package $p)
+        if (-not $busy.Count) { return $null }
+        $names = (@($busy | Select-Object -First 4) -join ', ') + $(if ($busy.Count -gt 4) { " +$($busy.Count - 4)" } else { '' })
+        Write-KitLog "  blocked: in use by $($busy -join ', ')"
+        return (New-KitResult $p 'blocked' $from '' "in use by $names - close it, then Retry" '' $sw.Elapsed.TotalSeconds)
+    }
     # NoAdmin + elevated kit: the installer runs at the signed-in user's normal rights
     $de = Test-KitDeElevate -Package $p
     $deNote = ''; if ($de) { $deNote = ' (at normal user rights, not as admin)' }
     Write-KitLog "== $($p.Name) [$($p.Method) $($p.Ref)] installed='$from' mode=$Mode dry=$([bool]$DryRun)$(if ($de) { ' de-elevated' })"
 
     try {
+        # Tests only, and only in a dry run: MYWINKIT_SIMULATE_OUTCOME="2=blocked,3=failed" gives those results
+        if ($DryRun -and $env:MYWINKIT_SIMULATE_OUTCOME) {
+            foreach ($pair in ($env:MYWINKIT_SIMULATE_OUTCOME -split '[,;]')) {
+                $k, $v = $pair -split '=', 2
+                if ("$k".Trim() -eq "$($p.Id)" -and $v) { return New-KitResult $p $v.Trim() $from '' "simulated $($v.Trim())" '' $sw.Elapsed.TotalSeconds }
+            }
+        }
         if ($p.Requires) {
             Update-KitPath
             if (-not (Get-Command $p.Requires -ErrorAction SilentlyContinue)) {
                 return New-KitResult $p 'failed' $from '' "needs $($p.Requires) first (install it, then retry)" '' $sw.Elapsed.TotalSeconds
             }
         }
+        # Smart App Control blocks unsigned programs without reputation: do not even try (Hermes' hermes.exe)
+        if ((Get-KitProp $p 'Unsigned') -and (Test-KitSmartAppControl)) {
+            return New-KitResult $p 'blocked' $from '' 'blocked by Smart App Control (its program is unsigned); use it in WSL, or turn Smart App Control off' '' $sw.Elapsed.TotalSeconds
+        }
+        if (-not $DryRun -and $isInst -and -not $p.Interactive -and (($p.Method -in 'winget', 'msstore' -and $Available) -or $p.Method -eq 'winget-upgrade')) {
+            $iu = Get-InUseResult; if ($iu) { return $iu }
+        }
 
         switch ($p.Method) {
             { $_ -in 'winget', 'msstore' } {
-                $a = Get-KitWingetInstallArgs -WId $p.Ref -Method $p.Method
+                # installer type / scope only for a fresh install: an upgrade keeps what is installed
+                $itype = ''; $scope = ''
+                if (-not $isInst) { $itype = [string](Get-KitProp $p 'InstallerType'); $scope = [string](Get-KitProp $p 'Scope') }
+                $a = Get-KitWingetInstallArgs -WId $p.Ref -Method $p.Method -InstallerType $itype -Scope $scope
                 if ($DryRun) {
                     $what = "winget install $($p.Ref)"; if ($p.Method -eq 'msstore') { $what += ' (Store)' }
+                    if ($itype) { $what += " --installer-type $itype" }
+                    if ($scope) { $what += " --scope $scope" }
                     return New-KitResult $p 'dryrun' $from '' "$what$deNote" '' $sw.Elapsed.TotalSeconds
                 }
                 Step $(if ($de) { 'installing with winget at normal user rights' } else { 'installing with winget' })
@@ -2207,13 +2552,35 @@ function Invoke-KitPackage {
                         $healed = "$($p.Ref) -> $newId"
                         $p.Ref = $newId
                         Step "healed to $newId - installing"
-                        $r = Invoke-KitWinget (Get-KitWingetInstallArgs -WId $p.Ref -Method $p.Method) -DeElevate:$de
+                        $a = Get-KitWingetInstallArgs -WId $p.Ref -Method $p.Method -InstallerType $itype -Scope $scope
+                        $r = Invoke-KitWinget $a -DeElevate:$de
+                    }
+                }
+                $bk = (Get-KitWingetOutcome -ExitCode $r.Ec -Out $r.Out).Status
+                if ($bk -eq 'transient') {
+                    # network / source hiccup: one automatic retry
+                    Step 'temporary winget error - retrying once'
+                    if ($script:RetryDelaySec -gt 0) { Start-Sleep -Seconds $script:RetryDelaySec }
+                    $r = Invoke-KitWinget $a -DeElevate:$de
+                    $bk = (Get-KitWingetOutcome -ExitCode $r.Ec -Out $r.Out).Status
+                    if ($r.Ec -eq 0 -and -not $healed) { $healed = 'retried once (temporary winget error)' }
+                }
+                if ($bk -eq 'hash') {
+                    # winget's manifest pins an older hash than the vendor's file: refresh the source once, retry once
+                    if (Update-KitWingetSource) {
+                        Step 'installer hash mismatch - refreshed the winget sources, retrying once'
+                        $r = Invoke-KitWinget $a -DeElevate:$de
+                        if ($r.Ec -eq 0 -and -not $healed) { $healed = 'retried after winget source update (hash mismatch)' }
                     }
                 }
                 if ($r.Ec -ne 0 -and -not $isInst -and (Test-KitDownloadFail $r.Out)) {
-                    foreach ($v in @(Get-KitPkgVersions -WId $p.Ref -Method $p.Method | Select-Object -Skip 1 -First 2)) {
+                    $vers = @(Get-KitPkgVersions -WId $p.Ref -Method $p.Method)
+                    # older versions only help when they download from another URL (not Chrome / Office)
+                    $shared = ($r.Ec -eq $script:WG_HASH_MISMATCH) -and (Test-KitSharedInstallerUrl -WId $p.Ref -Method $p.Method -Versions $vers)
+                    if ($shared) { Write-KitLog '  every version shares one installer URL: older versions skipped' }
+                    foreach ($v in @(if (-not $shared) { $vers | Select-Object -Skip 1 -First 2 })) {
                         Step "latest download broken - trying v$v"
-                        $r2 = Invoke-KitWinget (Get-KitWingetInstallArgs -WId $p.Ref -Method $p.Method -Version $v) -DeElevate:$de
+                        $r2 = Invoke-KitWinget (Get-KitWingetInstallArgs -WId $p.Ref -Method $p.Method -Version $v -InstallerType $itype -Scope $scope) -DeElevate:$de
                         if ($r2.Ec -eq 0) { $r = $r2; $healed = "pinned v$v (latest installer download broken)"; break }
                     }
                     if ($r.Ec -ne 0 -and $p.Method -ne 'msstore') {
@@ -2232,7 +2599,7 @@ function Invoke-KitPackage {
                 }
 
                 $o = Get-KitWingetOutcome -ExitCode $r.Ec -Out $r.Out
-                if ($o.Status -eq 'ok') {
+                if ($o.Status -in 'ok', 'restart') {
                     Step 'verifying'
                     $post = Get-KitPkgVersion -WId $p.Ref -Method $p.Method
                     $st = if ($isInst) { 'updated' } else { 'installed' }
@@ -2242,14 +2609,16 @@ function Invoke-KitPackage {
                         $st = 'current'; $det = "winget exit 0, but the installed version is still $from"
                         Write-KitLog "  note: $det"
                     }
+                    if ($o.Status -eq 'restart') { $st = 'restart'; $det = $o.Reason }
                     return New-KitResult $p $st $from "$post" $det $healed $sw.Elapsed.TotalSeconds
                 }
                 if ($o.Status -eq 'current') {
                     $det = ''; if (-not $isInst) { $det = 'winget: already installed, nothing newer' }
                     return New-KitResult $p 'current' $from $from $det $healed $sw.Elapsed.TotalSeconds
                 }
-                Write-KitLog "  failed: $($o.Reason)"
-                return New-KitResult $p 'failed' $from '' $o.Reason $healed $sw.Elapsed.TotalSeconds
+                $wr = Get-KitWingetResult -Package $p -Outcome $o -IsInstalled $isInst
+                Write-KitLog "  $($wr.Status): $($wr.Detail)"
+                return New-KitResult $p $wr.Status $from '' $wr.Detail $healed $sw.Elapsed.TotalSeconds
             }
 
             'winget-upgrade' {
@@ -2267,10 +2636,18 @@ function Invoke-KitPackage {
                     if ($r.Ec -eq 0) { $healed = 'ran at normal user rights (installer refuses admin)' }
                 }
                 $o = Get-KitWingetOutcome -ExitCode $r.Ec -Out $r.Out
+                if ($o.Status -eq 'transient') {
+                    Step 'temporary winget error - retrying once'
+                    if ($script:RetryDelaySec -gt 0) { Start-Sleep -Seconds $script:RetryDelaySec }
+                    $r = Invoke-KitWinget $a
+                    $o = Get-KitWingetOutcome -ExitCode $r.Ec -Out $r.Out
+                }
                 if ($o.Status -eq 'ok') { return New-KitResult $p 'updated' $from $to '' $healed $sw.Elapsed.TotalSeconds }
+                if ($o.Status -eq 'restart') { return New-KitResult $p 'restart' $from $to $o.Reason $healed $sw.Elapsed.TotalSeconds }
                 if ($o.Status -eq 'current') { return New-KitResult $p 'current' $from $from 'winget: nothing to upgrade' $healed $sw.Elapsed.TotalSeconds }
-                Write-KitLog "  failed: $($o.Reason)"
-                return New-KitResult $p 'failed' $from '' $o.Reason $healed $sw.Elapsed.TotalSeconds
+                $wr = Get-KitWingetResult -Package $p -Outcome $o -IsInstalled $true
+                Write-KitLog "  $($wr.Status): $($wr.Detail)"
+                return New-KitResult $p $wr.Status $from '' $wr.Detail $healed $sw.Elapsed.TotalSeconds
             }
 
             'script' {
@@ -2293,6 +2670,10 @@ function Invoke-KitPackage {
                 }
                 if ($ec -eq 1223) { return New-KitResult $p 'failed' $from '' 'administrator prompt declined' '' $sw.Elapsed.TotalSeconds }
                 if ($ec -ne 0) {
+                    # Smart App Control on, and the tool's program was refused: not a failure of the kit or the tool
+                    if ((Test-KitAppControlBlock -Out @($script:LastFailLine)) -and (Test-KitSmartAppControl)) {
+                        return New-KitResult $p 'blocked' $from '' 'blocked by Smart App Control (Windows refused its program); use it in WSL, or turn Smart App Control off' '' $sw.Elapsed.TotalSeconds
+                    }
                     # a short reason from the child's own output when it names one (e.g. "blocked by an Application Control policy")
                     $why = if ($script:LastFailLine) { "$($script:LastFailLine) (exit $ec)" } else { "exit code $ec (see log)" }
                     return New-KitResult $p 'failed' $from '' $why '' $sw.Elapsed.TotalSeconds
@@ -2322,6 +2703,7 @@ function Invoke-KitPackage {
                 if ($isInst -and (Test-KitVersionCurrent -Installed $from -Latest $d.Version)) {
                     return New-KitResult $p 'current' $from $from "latest is $($d.Version)" '' $sw.Elapsed.TotalSeconds
                 }
+                if ($isInst -and -not $DryRun) { $iu = Get-InUseResult; if ($iu) { return $iu } }
                 if ($DryRun) {
                     Write-KitLog "  would download $($d.Url)"
                     return New-KitResult $p 'dryrun' $from $d.Version "download $($d.FileName) v$($d.Version) ($($d.Signer) signed), run $($d.Args)$deNote" '' $sw.Elapsed.TotalSeconds
@@ -2439,4 +2821,6 @@ Export-ModuleMember -Function Initialize-Kit, Get-KitVersion, Get-KitUpdates, Ge
     Get-KitAutoInstallEssentials, Invoke-KitEssential, Remove-KitJsonComments, ConvertFrom-KitJsoncText, ConvertTo-KitJsonPretty,
     Get-KitTerminalSettingsPath, Get-KitTerminalConfig, Resolve-KitTerminalStartDir, Merge-KitTerminalSettings, Set-KitDefaultTerminal,
     Test-KitNerdFont, Get-KitNerdFontRelease, Get-KitSha256FromList, Get-KitFileSha256, ConvertTo-KitFontRegName, Install-KitNerdFont,
-    Test-KitClaudeCode, Install-KitClaudeCode
+    Test-KitClaudeCode, Install-KitClaudeCode,
+    Get-KitWingetInstallArgs, Get-KitWingetResult, Get-KitInstallFolder, Get-KitBlockingProcesses, Get-KitInUse, Test-KitSmartAppControl, Test-KitAppControlBlock,
+    Get-KitEnableRdpScript, Get-KitPwshMsixAsset, Test-KitResultOk
