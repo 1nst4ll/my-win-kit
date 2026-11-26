@@ -7,6 +7,16 @@
 
 _A new session can start from this line, no handover needed._
 
+- **v2.8.1 on branch `fix/scan-hang` (not merged, waiting for Daniel's go).** Fixes "Update everything" hanging on
+  "Checking what's installed" on a laptop: `hermes --version` ran a git fetch that never finished, and
+  `Invoke-KitProcess` had no time limit (see CHANGELOG). Now: Hermes's version is read from its package metadata
+  (`Detect: hermes`) and scans/probes have time limits. Merging publishes it to every PC.
+  - **Manual cleanup, not done:** that laptop has 2.05 GB of leftover `tmp_pack_*` files in
+    `%LOCALAPPDATA%\hermes\hermes-agent\.git\objects\pack` from the hung fetches, plus `git fetch` processes from
+    the hung scan that may still be running. Close the kit, end the `hermes.exe`/`git.exe` processes, then delete the
+    `tmp_pack_*` files.
+  - `tools/test-config.ps1` has 4 failures (self-update / `irm | iex` checks) that also fail on unchanged `main`, so
+    v2.8.1 did not cause them; not yet looked into.
 - **Session paused 2026-11-26 (Daniel: "commit and push and close this session").** `main` = kit v2.8.0, published;
   no open PRs. Open threads, in Daniel's order:
   1. **Git on the main PC is still 2.55.0.5.** The upgrade to 2.56.1 is blocked because Git for Windows refuses to
@@ -70,7 +80,7 @@ _A new session can start from this line, no handover needed._
 | Apps in `config/catalog.json` | 59 total: 33 in the recommended set, 22 DEV (off), 3 POST (off); 3 removed (Perplexity 8, Samsung Quick Share 33, Python 3.13 41). NoAdmin: 6 (OneDrive, VS Code, GitHub Desktop, Cursor, Claude Code CLI, Antigravity IDE). SelfUpdates: 8 (Office, Chrome, OneDrive, Dropbox, Acrobat Reader, Teams, WhatsApp, AnyDesk). Unsigned: 1 (Hermes) |
 | By method | 45 winget, 2 Store, 6 script, 2 direct, 1 npm, 3 builtin. AI-flagged (Update AI tools): 9 (Claude Desktop, Claude Code CLI, KiloCode CLI, Cursor, Codex CLI, Antigravity IDE, Antigravity, Antigravity CLI, Hermes Agent) |
 | Next free app Id | 63 (above every Id in Packages, Removed, RetiredIds; use it when adding an app to `config/catalog.json` by hand) |
-| Kit version | 2.8.0 (`$script:KitVersion` in src/core.psm1) |
+| Kit version | 2.8.1 on branch `fix/scan-hang` (not merged); `main` = 2.8.0 (`$script:KitVersion` in src/core.psm1) |
 | Shared settings | `removeShortcuts` true, `dryRunByDefault` false, `elevateAtStart` true; `autoInstallEssentials` true (was `autoInstallPwsh`, still read) |
 | Modern menu needs | PowerShell 7.4+, PwshSpectreConsole ≥ 2.3 (tested with 2.6.3 on pwsh 7.7.0); no GitHub CLI or sign-in |
 | Startup (this PC) | ~750 ms launch → banner → quit, plus the config fetch (3 small files; 4 with `terminal.json`). The essentials checks add ~0.3 s when everything is already set up (core import ~55 ms, Terminal settings compare ~260 ms in 5.1) |

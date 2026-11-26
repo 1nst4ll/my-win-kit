@@ -157,7 +157,9 @@ No UI. Both menus call the same functions, so behaviour is identical in both.
   for all winget/Store IDs, one `npm ls -g --depth=0 --json` when the catalogue has npm packages and npm exists,
   plus per-package checks: `Detect` (built-in checks: `dev-folder` = the folder exists, `ctt-profile` = PowerShell
   7's profile in Documents names Chris Titus Tech, `wsl-ubuntu` = an `Ubuntu*` distro registered under
-  `HKCU\...\Lxss`, read from the registry so WSL is never started), `Appx` name (MSIX apps such as Claude Desktop),
+  `HKCU\...\Lxss`, read from the registry so WSL is never started, `hermes` = the version in
+  `%LOCALAPPDATA%\hermes\hermes-agentvenv\Lib\site-packages\hermes_agent-*.dist-info`, because `hermes --version` runs
+  a `git fetch` that can hang for minutes; `Get-KitToolVersion` also prefers `Detect`), `Appx` name (MSIX apps such as Claude Desktop),
   `Uninstall` DisplayName regex (direct installers), `Exe` path + `Version` command (script installs such as
   `claude`, `agy`; an `Exe` that is a folder only proves the install, the command then comes from PATH). Odd winget
   version strings (`> 280.4`, `ad 9.8.0`) are reduced to the dotted number.
@@ -251,7 +253,10 @@ No UI. Both menus call the same functions, so behaviour is identical in both.
   version and update, npm, the non-interactive `irm | iex` child, the RDP helper) runs through it, never through
   `& exe`. It starts the program with `ProcessStartInfo` (`CreateNoWindow`, stdin/stdout/stderr redirected, both
   streams read at once, UTF-8), so the child gets its own hidden console and returns `Ec`, `Out`, `Err` and
-  `Started`. `.cmd`/`.bat` files run via `cmd.exe /d /s /c`. Reason: PowerShell 7 in a conhost window switches
+  `Started`. `-TimeoutSec` (0 = no limit, used for installs and updates) caps scans and read-only probes:
+  version commands 20 s, `winget export` 180 s, other read-only winget queries and `winget source update` 120 s,
+  `npm ls -g` 60 s, `npm view` 30 s, `wsl --list --online` 30 s, `tailscale ip` 10 s. On timeout it kills the
+  whole tree (`taskkill /T /F`, a grandchild can hold the pipes) and returns `TimedOut = $true`. `.cmd`/`.bat` files run via `cmd.exe /d /s /c`. Reason: PowerShell 7 in a conhost window switches
   the console's VT processing off for as long as a `&`-started program runs, and Spectre's live progress and
   spinners then print raw escape codes. Only `Interactive` items (MAS, WinUtil, an already-elevated Chris Titus
   prompt, `wsl --install -d` for Ubuntu's first run) and the tweaks menu ("Open here") still share the console; nothing live is drawn while they run. `Enable-KitConsoleVt` switches VT back on (best effort, no-op when output is not a
@@ -494,7 +499,7 @@ package | builtin name: `enable-rdp`, `dev-folder`, `wsl-ubuntu`), `Desc`. Optio
 tools, which updates it only when installed; never ticks or installs it), `Interactive` (needs the console, never
 under a spinner), `Elevated` (script: runs as administrator, own window when the menu isn't elevated), `Shell`
 (`pwsh` = run the script in PowerShell 7 instead of Windows PowerShell), `Detect` (built-in install check:
-`dev-folder`, `ctt-profile`, `wsl-ubuntu`), `Exe` (file, or folder, that proves a script/npm install, env vars
+`dev-folder`, `ctt-profile`, `wsl-ubuntu`, `hermes`), `Exe` (file, or folder, that proves a script/npm install, env vars
 expanded), `Version` (command whose
 output has the installed version), `Update` (native updater, e.g. `claude update`), `Appx` (MSIX package name),
 `Uninstall` (regex on the uninstall DisplayName), `Fallback` (winget ID when a direct download can't be resolved),

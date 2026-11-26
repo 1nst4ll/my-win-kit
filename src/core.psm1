@@ -24,7 +24,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:KitVersion  = '2.8.0'   # bump with user-visible changes (shown in the menu banner)
+$script:KitVersion  = '2.8.1'   # bump with user-visible changes (shown in the menu banner)
 $script:KitRoot     = $null
 $script:BaseData    = $null
 $script:Catalog     = @()
@@ -553,6 +553,7 @@ function Get-KitVersionText {
 function Get-KitToolVersion {
     <# Run a package's Version command (e.g. "claude --version") via its known exe. #>
     param([Parameter(Mandatory)]$Package)
+    if ($Package.Detect) { $d = Get-KitDetect -Name $Package.Detect; if ($null -ne $d) { return $d } }   # no child process (hermes --version fetches git)
     if (-not $Package.Version) { return $null }
     $parts = $Package.Version -split '\s+'
     $exe = $parts[0]
@@ -563,7 +564,8 @@ function Get-KitToolVersion {
     if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) { Update-KitPath }   # installed earlier in this run
     if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) { return $null }
     try {
-        $r = Invoke-KitProcess -FilePath $exe -ArgumentList @($parts | Select-Object -Skip 1)
+        $r = Invoke-KitProcess -FilePath $exe -ArgumentList @($parts | Select-Object -Skip 1) -TimeoutSec 20
+        if ($r.TimedOut) { return $null }
         if (-not $r.Started) { return $null }
         return (Get-KitVersionText ((@($r.Out) + @($r.Err)) -join "`n"))
     } catch { return $null }
@@ -585,7 +587,7 @@ function Get-KitInstalled {
     if (Test-KitWinget) {
         $tmp = Join-Path $env:TEMP ('my-win-kit-export-{0}.json' -f [guid]::NewGuid())
         try {
-            $null = Invoke-KitProcess -FilePath 'winget' -ArgumentList @('export', '-o', $tmp, '--include-versions', '--accept-source-agreements', '--disable-interactivity')
+            $null = Invoke-KitProcess -FilePath 'winget' -ArgumentList @('export', '-o', $tmp, '--include-versions', '--accept-source-agreements', '--disable-interactivity') -TimeoutSec 180
             if (Test-Path -LiteralPath $tmp) {
                 $j = Get-Content -LiteralPath $tmp -Raw | ConvertFrom-Json
                 foreach ($src in @($j.Sources)) {
@@ -743,7 +745,7 @@ function Update-KitWingetSource {
     if ($script:SourceUpdated) { return $false }
     $script:SourceUpdated = $true
     Write-KitLog 'winget source update  (after an installer hash mismatch)'
-    $r = Invoke-KitProcess -FilePath 'winget' -ArgumentList @('source', 'update', '--disable-interactivity')
+    $r = Invoke-KitProcess -FilePath 'winget' -ArgumentList @('source', 'update', '--disable-interactivity') -TimeoutSec 120
     Write-KitLog "  exit $($r.Ec)"
     return $true
 }
@@ -797,7 +799,7 @@ function Get-KitWingetRows {
 
 function Get-KitWingetRaw {
     param([string[]]$WingetArgs)
-    $r = Invoke-KitProcess -FilePath 'winget' -ArgumentList $WingetArgs
+    $r = Invoke-KitProcess -FilePath 'winget' -ArgumentList $WingetArgs -TimeoutSec 120   # read-only queries only (list/show/upgrade list/pin list)
     if ($r.Ec -ne 0) { return @() }
     return @($r.Out)
 }
@@ -1029,7 +1031,7 @@ function Get-KitLatestVersion {
                 return $null
             }
             'npm' {
-                $r = Invoke-KitProcess -FilePath 'npm' -ArgumentList @('view', $Package.Ref, 'version')
+                $r = Invoke-KitProcess -FilePath 'npm' -ArgumentList @('view', $Package.Ref, 'version') -TimeoutSec 30
                 if ($r.Started -and $r.Ec -eq 0) { return (Get-KitVersionText (@($r.Out) -join ' ')) }
                 return $null
             }
@@ -1074,8 +1076,12 @@ function Invoke-KitProcess {
         and spinners print raw escape codes. This process gets its own hidden
         console (CreateNoWindow) and redirected stdin/stdout/stderr, so the
         menu's console mode is never touched. .cmd/.bat files run via cmd.exe.
+        -TimeoutSec (0 = no limit, for installs): scans and version probes pass
+        one, so a tool that never exits (e.g. a --version that runs its own
+        update fetch) cannot freeze the menu. On timeout the whole process tree
+        is killed (taskkill /T /F) and the result has TimedOut = $true.
     #>
-    param([Parameter(Mandatory)][string]$FilePath, [string[]]$ArgumentList = @())
+    param([Parameter(Mandatory)][string]$FilePath, [string[]]$ArgumentList = @(), [int]$TimeoutSec = 0)
     $file = $FilePath
     if (-not [IO.Path]::IsPathRooted($file)) {
         $cmd = Get-Command $file -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -1106,7 +1112,25 @@ function Invoke-KitProcess {
         # Read both streams at once so a full stderr pipe cannot deadlock stdout.
         $so = $proc.StandardOutput.ReadToEndAsync()
         $se = $proc.StandardError.ReadToEndAsync()
-        $proc.WaitForExit()
+        if ($TimeoutSec -gt 0) {
+            if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+                # Kill the whole tree: a grandchild holding the pipes would keep it alive otherwise.
+                # taskkill in its own hidden console, not `& exe` (that would switch the menu console's VT off)
+                try {
+                    $kpi = New-Object System.Diagnostics.ProcessStartInfo
+                    $kpi.FileName = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+                    $kpi.Arguments = "/T /F /PID $($proc.Id)"
+                    $kpi.UseShellExecute = $false; $kpi.CreateNoWindow = $true
+                    $kp = [Diagnostics.Process]::Start($kpi); [void]$kp.WaitForExit(10000); $kp.Dispose()
+                } catch {}
+                try { if (-not $proc.HasExited) { $proc.Kill() } } catch {}
+                try { [void]$proc.WaitForExit(5000) } catch {}
+                $outText = ''; if ($so.Wait(2000)) { $outText = $so.Result }
+                $errText = ''; if ($se.Wait(1000)) { $errText = $se.Result }
+                Write-KitLog "timed out after $TimeoutSec s, process tree killed: $FilePath $argLine"
+                return @{ Ec = 1; Out = @(Split-KitOutputLines $outText); Err = @(@(Split-KitOutputLines $errText) + "timed out after $TimeoutSec s"); Started = $true; TimedOut = $true }
+            }
+        } else { $proc.WaitForExit() }
         # A grandchild that inherited the pipes can keep them open: don't wait forever.
         $outText = ''; if ($so.Wait(15000)) { $outText = $so.Result }
         $errText = ''; if ($se.Wait(5000)) { $errText = $se.Result }
@@ -1238,7 +1262,7 @@ function Invoke-KitEnableRdp {
     $detail = 'RDP enabled (NLA on)'
     $ts = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
     if ($ec -eq 0 -and (Test-Path -LiteralPath $ts)) {
-        $ip = @((Invoke-KitProcess -FilePath $ts -ArgumentList @('ip', '-4')).Out) | Select-Object -First 1
+        $ip = @((Invoke-KitProcess -FilePath $ts -ArgumentList @('ip', '-4') -TimeoutSec 10).Out) | Select-Object -First 1
         if ($ip) { $detail += ", Tailscale IP $ip" }
     }
     return @{ Ec = [int]$ec; Detail = $detail }
@@ -1250,7 +1274,7 @@ function Get-KitNpmGlobals {
     <# Globally installed npm packages: hashtable name -> version, or $null when npm is missing. #>
     if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { return $null }
     try {
-        $r = Invoke-KitProcess -FilePath 'npm' -ArgumentList @('ls', '-g', '--depth=0', '--json')
+        $r = Invoke-KitProcess -FilePath 'npm' -ArgumentList @('ls', '-g', '--depth=0', '--json') -TimeoutSec 60
         if (-not $r.Started) { return $null }
         $j = (@($r.Out) -join "`n") | ConvertFrom-Json
         $h = @{}
@@ -1472,7 +1496,7 @@ function Invoke-KitWslUbuntu {
 
     Send-Note 'finding the newest Ubuntu LTS'
     $saved = $env:WSL_UTF8; $env:WSL_UTF8 = '1'
-    try { $lr = Invoke-KitProcess -FilePath $wsl -ArgumentList @('--list', '--online') } finally { $env:WSL_UTF8 = $saved }
+    try { $lr = Invoke-KitProcess -FilePath $wsl -ArgumentList @('--list', '--online') -TimeoutSec 30 } finally { $env:WSL_UTF8 = $saved }
     $name = Select-KitUbuntuDistro -Lines (@($lr.Out) + @($lr.Err))
     Write-KitLog "  newest Ubuntu LTS: $name (wsl --list --online exit $($lr.Ec))"
     $ver = Get-KitVersionText $name; if (-not $ver) { $ver = '' }
@@ -1498,6 +1522,15 @@ function Get-KitDetect {
         switch ($Name) {
             'dev-folder'  { if (Test-Path -LiteralPath (Get-KitDevFolderPath) -PathType Container) { return '' }; return $null }
             'ctt-profile' { if (Test-KitCttProfile) { return '' }; return $null }
+            'hermes'      {
+                # Read the installed package metadata: `hermes --version` runs a git fetch that can hang for minutes.
+                $root = Join-Path $env:LOCALAPPDATA 'hermes\hermes-agent'
+                if (-not (Test-Path -LiteralPath $root -PathType Container)) { return $null }
+                $sp = Join-Path $root 'venv\Lib\site-packages'
+                $di = @(Get-ChildItem -LiteralPath $sp -Directory -Filter 'hermes_agent-*.dist-info' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+                if ($di.Count) { $v = Get-KitVersionText ($di[0].Name -replace '^hermes_agent-', '' -replace '\.dist-info$', ''); if ($v) { return $v } }
+                return ''
+            }
             'wsl-ubuntu'  {
                 $best = $null; $bestMajor = -2
                 foreach ($d in @(Get-KitWslDistros | Where-Object { $_ -match '^Ubuntu(-\d+\.\d+)?$' })) {
@@ -2219,7 +2252,7 @@ function Install-KitClaudeCode {
     $have = Test-KitClaudeCode
     if ($have) {
         $v = ''
-        try { $vr = Invoke-KitProcess -FilePath $have -ArgumentList @('--version'); if ($vr.Started) { $v = Get-KitVersionText ((@($vr.Out) + @($vr.Err)) -join ' ') } } catch {}
+        try { $vr = Invoke-KitProcess -FilePath $have -ArgumentList @('--version') -TimeoutSec 20; if ($vr.Started) { $v = Get-KitVersionText ((@($vr.Out) + @($vr.Err)) -join ' ') } } catch {}
         return @{ Status = 'done'; Detail = $(if ($v) { "installed $v" } else { 'installed' }) }
     }
     $why = Get-KitFailLine -Out $out
