@@ -158,7 +158,7 @@ No UI. Both menus call the same functions, so behaviour is identical in both.
   plus per-package checks: `Detect` (built-in checks: `dev-folder` = the folder exists, `ctt-profile` = PowerShell
   7's profile in Documents names Chris Titus Tech, `wsl-ubuntu` = an `Ubuntu*` distro registered under
   `HKCU\...\Lxss`, read from the registry so WSL is never started, `hermes` = the version in
-  `%LOCALAPPDATA%\hermes\hermes-agentvenv\Lib\site-packages\hermes_agent-*.dist-info`, because `hermes --version` runs
+  `%LOCALAPPDATA%\hermes\hermes-agent\venv\Lib\site-packages\hermes_agent-*.dist-info`, because `hermes --version` runs
   a `git fetch` that can hang for minutes; `Get-KitToolVersion` also prefers `Detect`), `Appx` name (MSIX apps such as Claude Desktop),
   `Uninstall` DisplayName regex (direct installers), `Exe` path + `Version` command (script installs such as
   `claude`, `agy`; an `Exe` that is a folder only proves the install, the command then comes from PATH). Odd winget
