@@ -7,6 +7,22 @@
 
 _A new session can start from this line, no handover needed._
 
+- **Session paused 2026-11-26 (Daniel: "commit and push and close this session").** `main` = kit v2.8.0, published;
+  no open PRs. Open threads, in Daniel's order:
+  1. **Git on the main PC is still 2.55.0.5.** The upgrade to 2.56.1 is blocked because Git for Windows refuses to
+     install while any `bash.exe`/`sleep.exe` from Git's folder runs, and every Claude Code session runs its shell
+     commands through Git Bash (the installer log names the PIDs; with `/SUPPRESSMSGBOXES` it auto-cancels, exit 1).
+     Fix by hand: let other Claude Code sessions go idle, then `winget upgrade --id Git.Git --exact` from a plain
+     PowerShell window.
+  2. **Proposed v2.9 (not started, waiting for "do v2.9"):** for a `blocked` (in use) result, list the processes,
+     mark leftovers whose parent is gone, and offer "close these and retry" after an on-screen confirmation; plus
+     "update at next sign-in" (one-off scheduled task, runs before Claude Code starts), the dependable fix for Git.
+  3. **Smart App Control:** Daniel chose to turn it off on the main PC so Hermes can run (manual step in Windows
+     Security, then a restart; on many builds it can't be turned back on without a reset). The kit already reports
+     SAC refusals as `blocked by Smart App Control`.
+  4. **Package research (2026-11-26)** is saved locally, not in the public repo (it holds PC-specific details):
+     `.local/research/package-audit-2026-11-26.md` (git-ignored). Its fixes shipped in v2.8.0; its "not done"
+     list is in Open items. A sanitized public copy was offered ("publish research"), not requested yet.
 - **Kit v2.8.0 is live:** PR #5 merged into `main` (1bdf12e) on 2026-11-26 with Daniel's go ("merge 5"); the post-merge publish copied 6 files to OneDrive. Daniel: "do v2.8" (the 2026-11-26
   package check) plus "can app open in terminal instead blue ps shell". Catalogue fixes (Python 3.14 on Id 62,
   PowerToys / Node.js detection, Hermes, Antigravity IDE, Acrobat Reader, Notepad++ installer type, SelfUpdates on
@@ -14,8 +30,7 @@ _A new session can start from this line, no handover needed._
   handling, PowerShell 7 `.msixbundle` fallback, RDP firewall group by resource string, Smart App Control, Terminal
   start folder on kit profiles, the kit running inside **Windows Terminal** (elevated or not), and the dev folder
   named **dev\github** (an existing `dev\github` or `dev\git` is reused: of Daniel's 4 PCs two keep their `dev\github`, two their
-  `C:\dev\git`; a PC without one gets `D:\dev\github` or `C:\dev\github`). Waiting for
-  Daniel's review and go to merge (merging publishes to every PC).
+  `C:\dev\git`; a PC without one gets `D:\dev\github` or `C:\dev\github`).
 - **Kit v2.7.0 is live:** PR #4 merged into `main` (f28612d) on 2026-11-26 with Daniel's go ("merge 4"); the
   post-merge publish copied 8 files to OneDrive (incl. the new `config/terminal.json`). The essentials step: at
   every start, without asking, in order: PowerShell 7, Windows Terminal, Claude Code CLI, CaskaydiaCove Nerd Font,

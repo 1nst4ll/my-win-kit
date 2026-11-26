@@ -4,6 +4,9 @@
 /my-packages.json.bak
 /my-packages.json.tmp
 
+# Private notes that must not reach the public repo (research with PC-specific details)
+/.local/
+
 # Logs / scratch
 *.log
 *.tmp

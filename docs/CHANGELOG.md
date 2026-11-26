@@ -2,6 +2,12 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-26: session paused
+
+- Daniel: "commit and push and close this session". STATUS "Resume here" lists the open threads (Git upgrade blocked
+  by Claude Code's Git Bash, proposed v2.9 close-and-retry + update-at-sign-in, Smart App Control off by hand,
+  where the private package research lives). New git-ignored `.local/` for notes with PC-specific details.
+
 ## 2026-11-26: machine names removed from docs and tests
 
 - Daniel: "anonimize it". The public repo named Daniel's own PCs in docs and test labels. They now read "the main
