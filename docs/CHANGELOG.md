@@ -2,6 +2,11 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-26: v2.8.0 merged to `main` and published
+
+- Daniel: "merge 5". PR #5 (`v28-latest`) merged as 1bdf12e after review; CI green on both jobs. The post-merge
+  publish copied 6 files to OneDrive (`src/*`, `config/catalog.json`, `config/terminal.json`, `install.ps1`).
+
 ## 2026-11-26: always latest without errors, and the kit inside Windows Terminal (kit v2.8.0, branch `v28-latest`, PR #5)
 
 - Daniel asked to "search web for all packages if they are correct and how we can have always latest version

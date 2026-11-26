@@ -7,7 +7,7 @@
 
 _A new session can start from this line, no handover needed._
 
-- **Kit v2.8.0 is on branch `v28-latest`, PR #5 into `main` (not merged).** Daniel: "do v2.8" (the 2026-11-26
+- **Kit v2.8.0 is live:** PR #5 merged into `main` (1bdf12e) on 2026-11-26 with Daniel's go ("merge 5"); the post-merge publish copied 6 files to OneDrive. Daniel: "do v2.8" (the 2026-11-26
   package check) plus "can app open in terminal instead blue ps shell". Catalogue fixes (Python 3.14 on Id 62,
   PowerToys / Node.js detection, Hermes, Antigravity IDE, Acrobat Reader, Notepad++ installer type, SelfUpdates on
   8 apps), winget outcome buckets (restart / blocked / skipped), in-use check + Retry failed, hash-mismatch
@@ -49,13 +49,13 @@ _A new session can start from this line, no handover needed._
 | Fact | Value |
 |---|---|
 | Repo | github.com/1nst4ll/my-win-kit (**public**). `main` = the rebuild (merged 2026-11-25); `rebuild-tui` merged, can be deleted |
-| Config home | `config/catalog.json`, `config/settings.json`, `config/winget-id-overrides.json`, `config/terminal.json` on GitHub `main`, edited by hand. Branch `v28-latest` changes catalog.json and terminal.json (live only after the merge) |
+| Config home | `config/catalog.json`, `config/settings.json`, `config/winget-id-overrides.json`, `config/terminal.json` on GitHub `main`, edited by hand |
 | Publish target | `$env:OneDrive\[98] Shortcuts` (the OneDrive folder every PC syncs) |
-| Last publish | 2026-11-26: merge of PR #4 (kit v2.7.0, f28612d), 8 files copied. Before that: PR #3 (kit v2.6.0), 7 files |
+| Last publish | 2026-11-26: merge of PR #5 (kit v2.8.0, 1bdf12e), 6 files copied. Before that: PR #4 (kit v2.7.0), 8 files |
 | Apps in `config/catalog.json` | 59 total: 33 in the recommended set, 22 DEV (off), 3 POST (off); 3 removed (Perplexity 8, Samsung Quick Share 33, Python 3.13 41). NoAdmin: 6 (OneDrive, VS Code, GitHub Desktop, Cursor, Claude Code CLI, Antigravity IDE). SelfUpdates: 8 (Office, Chrome, OneDrive, Dropbox, Acrobat Reader, Teams, WhatsApp, AnyDesk). Unsigned: 1 (Hermes) |
 | By method | 45 winget, 2 Store, 6 script, 2 direct, 1 npm, 3 builtin. AI-flagged (Update AI tools): 9 (Claude Desktop, Claude Code CLI, KiloCode CLI, Cursor, Codex CLI, Antigravity IDE, Antigravity, Antigravity CLI, Hermes Agent) |
 | Next free app Id | 63 (above every Id in Packages, Removed, RetiredIds; use it when adding an app to `config/catalog.json` by hand) |
-| Kit version | 2.7.0 on `main`; 2.8.0 on branch `v28-latest` (`$script:KitVersion` in src/core.psm1) |
+| Kit version | 2.8.0 (`$script:KitVersion` in src/core.psm1) |
 | Shared settings | `removeShortcuts` true, `dryRunByDefault` false, `elevateAtStart` true; `autoInstallEssentials` true (was `autoInstallPwsh`, still read) |
 | Modern menu needs | PowerShell 7.4+, PwshSpectreConsole ≥ 2.3 (tested with 2.6.3 on pwsh 7.7.0); no GitHub CLI or sign-in |
 | Startup (this PC) | ~750 ms launch → banner → quit, plus the config fetch (3 small files; 4 with `terminal.json`). The essentials checks add ~0.3 s when everything is already set up (core import ~55 ms, Terminal settings compare ~260 ms in 5.1) |
@@ -106,7 +106,7 @@ _A new session can start from this line, no handover needed._
 
 ## What's next
 
-- Review PR #5 (kit v2.8.0); after Daniel's go, merge (publishes), then run `install.cmd` once to see the Terminal
+- Run `install.cmd` once to see the Terminal
   window and the new result badges.
 - The real checks in Open items 1 (UAC once, the essentials on this PC and on a fresh one, `/auto`, Update everything).
 
