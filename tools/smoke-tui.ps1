@@ -66,6 +66,10 @@ $scenarios = @(
     @{ Name = 'settings: admin-at-start toggle (this PC), esc back'
        Keys = 'DownArrow,DownArrow,DownArrow,Enter,DownArrow,Enter,Escape,text:q'
        Expect = @('Ask for administrator rights once at start:', '(this PC, from the next start)', 'see you next time') }
+    @{ Name = 'results: blocked / restart needed / skipped / failed badges, Retry the failed / blocked -> retry run -> back -> q'
+       Env = @{ MYWINKIT_SIMULATE_OUTCOME = '2=blocked,3=restart,1=skipped,6=failed' }
+       Keys = 'Enter,Enter,Enter,Enter,Enter,Escape,text:q'
+       Expect = @('blocked', 'restart needed', 'skipped', 'failed', 'Restart Windows to finish', 'Retry the failed / blocked', '(retry)', 'see you next time') }
     @{ Name = 'elevated: ADMIN badge on the banner and every sub-screen header'
        Env = @{ MYWINKIT_SIMULATE_ADMIN = '1' }
        Keys = 'DownArrow,DownArrow,DownArrow,Enter,Escape,text:q'
@@ -97,10 +101,11 @@ if ($hasAi -and -not $env:GITHUB_ACTIONS) {
 foreach ($s in $scenarios) {
     $kitRoot = $root
     $env:MYWINKIT_SIMULATE_ADMIN = '0'   # same screens on an elevated CI runner and a normal PC
+    $env:MYWINKIT_SIMULATE_SAC = 'off'   # Smart App Control on this PC must not change the screens
     if ($s.ContainsKey('Env')) { foreach ($k in $s.Env.Keys) { Set-Item "Env:$k" $s.Env[$k] } }
     $out = & pwsh -NoProfile -File $tui -KitRoot $kitRoot -TestKeys $s.Keys 2>&1 | Out-String
     $ec = $LASTEXITCODE
-    Remove-Item Env:MYWINKIT_SIMULATE_ADMIN -ErrorAction SilentlyContinue
+    foreach ($n in 'MYWINKIT_SIMULATE_ADMIN', 'MYWINKIT_SIMULATE_OUTCOME', 'MYWINKIT_SIMULATE_SAC') { Remove-Item "Env:$n" -ErrorAction SilentlyContinue }
     $missing = @($s.Expect | Where-Object { -not $out.Contains($_) })   # literal, not -like (brackets are wildcards)
     if ($s.ContainsKey('OnceAfter')) {
         # the results screen shows exactly one Back row (Wait-Back): count after the last marker

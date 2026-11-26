@@ -40,6 +40,8 @@ $env:MYWINKIT_RAW_URL = 'file:///C:/nonexistent-my-win-kit-update-source'
 $env:MYWINKIT_CONFIG_URL = ([Uri](Join-Path $root 'config')).AbsoluteUri   # this copy's config, not GitHub main
 $env:MYWINKIT_SIMULATE_WT = 'present'
 $env:MYWINKIT_SIMULATE_INSTALL = ''
+$env:MYWINKIT_SIMULATE_SAC = 'off'   # Smart App Control on this PC must not change the results
+$keepWtSession = $env:WT_SESSION; Remove-Item Env:WT_SESSION -ErrorAction SilentlyContinue   # this shell may run inside Terminal: decide from the simulation only
 $script:fail = 0
 
 function Invoke-Loader([string[]]$LoaderArgs) {
@@ -184,6 +186,39 @@ Check 'elevated as another account -> handed back, no whole-kit elevation' (Invo
 Check 'run log: over-the-shoulder recorded'            (Get-NewestLog) @('over-the-shoulder, handing back', 'elevate: elevated = no - the elevated copy ran as another account')
 Set-Sim @{ MYWINKIT_SIMULATE_ADMIN = '0' }
 
+Write-Host 'Windows Terminal relaunch (simulated with MYWINKIT_SIMULATE_WT_LAUNCH; wt.exe is never started):'
+$wtOnce = 'the kit continues in Windows Terminal'
+function Test-Once([string]$Name, $Run, [string]$Text) {
+    $n = ([regex]::Matches($Run.Out, [regex]::Escape($Text))).Count
+    if ($n -eq 1) { Write-Host "  ok    $Name" -ForegroundColor Green } else { $script:fail++; Write-Host "  FAIL  $Name ('$Text' found $n times)" -ForegroundColor Red }
+}
+Set-Sim @{ MYWINKIT_SIMULATE_ADMIN = '0'; MYWINKIT_SIMULATE_ELEVATION = 'same'; MYWINKIT_SIMULATE_UAC = 'accept' }
+$env:MYWINKIT_SIMULATE_WT_LAUNCH = 'ok'
+$r = Invoke-Loader @('-Classic', '-DryRun', '-ClassicTestInput', 'Q;x y')
+Check 'wt present -> elevated relaunch in Windows Terminal (not the console), kit runs as admin' $r @('Simulated: the kit continues in Windows Terminal (administrator)', 'ADMIN', 'see you next time') @('Simulated: administrator prompt accepted', 'No administrator rights')
+Test-Once 'marker: the relaunched copy never relaunches again' $r $wtOnce
+Check 'run log: wt command, arguments kept (incl. ";"), exit code from the hand-off file' (Get-NewestLog) @('terminal: simulated elevated launch: wt.exe -w new new-tab', '--title my-win-kit', '-ClassicTestInput Q;x y', '-InTerminal', '-ElevatedChild', 'elevate: elevated = yes (relaunched as administrator', 'elevate: the elevated copy exited with code 0')
+Set-Sim @{ MYWINKIT_SIMULATE_ADMIN = '0'; MYWINKIT_SIMULATE_ELEVATION = 'same'; MYWINKIT_SIMULATE_UAC = 'accept'; MYWINKIT_SIMULATE_SESSION_USER = 'other' }
+Check 'over-the-shoulder in Terminal: exit 75 comes back through the hand-off file' (Invoke-Loader @('-Classic', '-DryRun', '-ClassicTestInput', 'Q')) @('Administrator rights came from another account', 'Carrying on here without administrator rights', 'classic menu')
+Set-Sim @{ MYWINKIT_SIMULATE_ADMIN = '0'; MYWINKIT_SIMULATE_ELEVATION = 'same'; MYWINKIT_SIMULATE_UAC = 'accept' }
+$env:MYWINKIT_SIMULATE_WT_LAUNCH = 'fail'
+Check 'wt launch fails -> the administrator console window instead' (Invoke-Loader @('-Classic', '-DryRun', '-ClassicTestInput', 'Q')) @('Simulated: administrator prompt accepted', 'ADMIN', 'see you next time')
+Check 'run log: the fallback is recorded' (Get-NewestLog) @('elevated Windows Terminal launch failed', 'falling back to an administrator console window')
+$env:MYWINKIT_SIMULATE_WT_LAUNCH = 'ok'; $env:MYWINKIT_SIMULATE_WT = 'absent'
+Check 'wt missing (fresh PC) -> the administrator console window' (Invoke-Loader @('-Classic', '-DryRun', '-ClassicTestInput', 'Q')) @('Simulated: administrator prompt accepted', 'ADMIN') @('Windows Terminal (administrator)')
+$env:MYWINKIT_SIMULATE_WT = 'present'
+Set-Sim @{ MYWINKIT_SIMULATE_ADMIN = '0' }
+$r = Invoke-Loader @('-Classic', '-DryRun', '-NoElevate', '-ClassicTestInput', 'Q')
+Check 'no admin (/noelevate), blue console -> relaunch into Terminal without UAC' $r @('Simulated: the kit continues in Windows Terminal (same console)', 'classic menu', 'see you next time') @('(administrator)', 'ADMIN')
+Test-Once 'no admin: one relaunch only' $r $wtOnce
+Check 'already inside Terminal (-InTerminal marker) -> no relaunch' (Invoke-Loader @('-Classic', '-DryRun', '-NoElevate', '-InTerminal', '-ClassicTestInput', 'Q')) @('classic menu') @($wtOnce)
+$env:WT_SESSION = 'smoke-test'
+Check 'already inside Terminal (WT_SESSION) -> no relaunch' (Invoke-Loader @('-Classic', '-DryRun', '-NoElevate', '-ClassicTestInput', 'Q')) @('classic menu') @($wtOnce)
+Remove-Item Env:WT_SESSION -ErrorAction SilentlyContinue
+Check '/auto stays in its own window' (Invoke-LoaderNoInput @('/auto', '/dryrun', '/noelevate')) @('Exit code 0') @($wtOnce, 'TIMEOUT')
+Remove-Item Env:MYWINKIT_SIMULATE_WT_LAUNCH -ErrorAction SilentlyContinue
+Check 'no MYWINKIT_SIMULATE_WT_LAUNCH in test mode -> never a Terminal relaunch' (Invoke-Loader @('-Classic', '-DryRun', '-NoElevate', '-ClassicTestInput', 'Q')) @('classic menu') @($wtOnce)
+
 Write-Host 'unattended (/auto, dry run, no input at all):'
 Check 'what-if: /auto -> unattended front-end'         (Invoke-Loader @('-WhatIfLoader', '/auto')) @('front-end: unattended')
 $cmdOut = & cmd.exe /d /c "`"$(Join-Path $root 'install.cmd')`" -WhatIfLoader /auto" 2>&1 | Out-String
@@ -203,6 +238,11 @@ Set-LocalAuto $null
 Write-Host 'classic menu:'
 Check 'classic L: update submenu -> everything (kit + rest of PC), declined' (Invoke-Loader @('-Classic', '-DryRun', '-NoElevate', '-ClassicTestInput', 'L;1;n;L;;Q')) @('1 everything (kit apps + rest of PC)', '2 AI tools only', 'Kit apps (', 'Other apps on this PC (', 'see you next time')
 Check 'classic: toggles + POST + simulated run'        (Invoke-Loader @('-Classic', '-DryRun', '-ClassicTestInput', '0;2;46;X;I;y;;Q')) @('0 selected', '[1/5] Notepad++', '[5/5] Enable RDP Host', '5 ok', '0 failed', 'see you next time', 'essentials on start: on (shared)', 'admin at start: on (shared)')
+# new result badges + Retry failed (MYWINKIT_SIMULATE_OUTCOME works in a dry run only)
+$env:MYWINKIT_SIMULATE_OUTCOME = '2=blocked,3=restart,1=skipped,4=failed'
+$r = Invoke-Loader @('-Classic', '-DryRun', '-NoElevate', '-ClassicTestInput', '0;1;2;3;4;I;y;R;;Q')
+Check 'classic: blocked / restart / skipped badges, Retry failed runs only those again' $r @('BLOCKED', 'RESTART', 'SKIPPED', 'FAILED', '1 blocked', 'Restart Windows to finish: PowerToys', 'R = retry the 2 failed/blocked', '[1/2] Notepad++', '[2/2] Obsidian', 'see you next time')
+Remove-Item Env:MYWINKIT_SIMULATE_OUTCOME -ErrorAction SilentlyContinue
 
 # The run log must prove which front-end started (newest log = the classic run above)
 $log = Get-ChildItem -LiteralPath (Join-Path $env:MYWINKIT_STATE_DIR 'logs') -Filter 'run-*.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -210,6 +250,7 @@ $logText = if ($log) { Get-Content -LiteralPath $log.FullName -Raw } else { '' }
 Check 'run log records loader decision + front-end' @{ Out = $logText; Ec = 0 } @('loader: decision = classic', 'loader: starting CLASSIC menu', 'frontend: CLASSIC started')
 
 Remove-Item -LiteralPath $env:MYWINKIT_STATE_DIR -Recurse -Force -ErrorAction SilentlyContinue
-foreach ($n in 'MYWINKIT_SIMULATE_WT', 'MYWINKIT_SIMULATE_INSTALL', 'MYWINKIT_SIMULATE_ESSENTIALS', 'MYWINKIT_SIMULATE_FAIL', 'MYWINKIT_SIMULATE_ADMIN', 'MYWINKIT_SIMULATE_ELEVATION', 'MYWINKIT_SIMULATE_UAC', 'MYWINKIT_SIMULATE_SESSION_USER') { Remove-Item "Env:$n" -ErrorAction SilentlyContinue }
+if ($keepWtSession) { $env:WT_SESSION = $keepWtSession }
+foreach ($n in 'MYWINKIT_SIMULATE_WT', 'MYWINKIT_SIMULATE_WT_LAUNCH', 'MYWINKIT_SIMULATE_SAC', 'MYWINKIT_SIMULATE_OUTCOME', 'MYWINKIT_SIMULATE_INSTALL', 'MYWINKIT_SIMULATE_ESSENTIALS', 'MYWINKIT_SIMULATE_FAIL', 'MYWINKIT_SIMULATE_ADMIN', 'MYWINKIT_SIMULATE_ELEVATION', 'MYWINKIT_SIMULATE_UAC', 'MYWINKIT_SIMULATE_SESSION_USER') { Remove-Item "Env:$n" -ErrorAction SilentlyContinue }
 if ($script:fail -eq 0) { Write-Host 'smoke-loader: all passed' -ForegroundColor Green } else { Write-Host "smoke-loader: $($script:fail) failure(s)" -ForegroundColor Red }
 exit $script:fail

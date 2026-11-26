@@ -33,10 +33,13 @@ $screens = [ordered]@{
     '5-tweaks'            = 'DownArrow,DownArrow,Enter,Enter,Enter,text:q'
     '6-settings'          = 'DownArrow,DownArrow,DownArrow,Enter,Escape,text:q'
     '8-admin-settings'    = 'DownArrow,DownArrow,DownArrow,Enter,Escape,text:q'   # elevated: ADMIN badge
+    '10-results-retry'    = 'Enter,Enter,Enter,Enter,Escape,text:q'   # simulated blocked / restart / skipped / failed results + Retry row
 }
+$env:MYWINKIT_SIMULATE_SAC = 'off'
 $esc = [char]27
 foreach ($name in $screens.Keys) {
     $env:MYWINKIT_SIMULATE_ADMIN = if ($name -like '*admin*') { '1' } else { '0' }
+    $env:MYWINKIT_SIMULATE_OUTCOME = if ($name -like '*retry*') { '2=blocked,3=restart,1=skipped,6=failed' } else { '' }
     $env:MYWINKIT_TEST_ANSI = '1'
     $ans = & pwsh -NoProfile -File $tui -KitRoot $root -TestKeys $screens[$name] 2>&1 | Out-String
     $env:MYWINKIT_TEST_ANSI = ''

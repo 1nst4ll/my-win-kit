@@ -90,7 +90,12 @@ try {
     Check (-not $personal.Count -and -not $ip.Success) "terminal.json: no user names, host names, personal paths or IPs$(if ($personal.Count) { ': ' + ($personal -join ', ') })"
     $td = ConvertFrom-KitJsonText $tj
     $tp = @(@($td['profiles']) | Where-Object { $_['guid'] -eq $td['defaultProfile'] })
-    Check ($tp.Count -eq 1 -and $tp[0]['name'] -eq 'Claude Code' -and @($td['keybindings']).Count -eq 3 -and $td['startingDirectory']['prefer'] -eq 'D:\dev\git' -and $td['profileDefaults']['font']['face'] -eq 'CaskaydiaCove Nerd Font Mono') 'terminal.json: Claude Code profile is the default, 3 key bindings, %OneDrive%\.playground, Nerd Font face'
+    Check ($tp.Count -eq 1 -and $tp[0]['name'] -eq 'Claude Code' -and @($td['keybindings']).Count -eq 3 -and $td['startingDirectory']['prefer'] -eq 'dev-folder' -and $td['profileDefaults']['font']['face'] -eq 'CaskaydiaCove Nerd Font Mono') 'terminal.json: Claude Code profile is the default, 3 key bindings, start folder = the dev folder (keyword dev-folder), Nerd Font face'
+    $kp = @(@($td['profiles']) | Where-Object { $_['name'] -eq 'my-win-kit' })
+    Check ($kp.Count -eq 1 -and $kp[0]['commandline'] -like '*%OneDrive%\`[98`] Shortcuts\install.cmd*') 'terminal.json: a my-win-kit profile starts install.cmd from the OneDrive kit folder through %OneDrive% (no personal path)'
+    $cj = ConvertFrom-KitJsonText ([IO.File]::ReadAllText((Join-Path $repo 'config\catalog.json')))
+    $allIds = @(@($cj['Packages']) + @($cj['Removed']) | Where-Object { $_ } | ForEach-Object { [int]$_['Id'] })
+    Check ($allIds -contains 62 -and @($cj['Removed'] | Where-Object { $_['Id'] -eq 41 }).Count -eq 1 -and ($allIds | Measure-Object -Maximum).Maximum -eq 62) 'catalog: Python 3.14 took Id 62 (Python 3.13, Id 41, in Removed); the next free Id is 63'
     Check (Test-Path (Join-Path $state 'cache\terminal.json')) 'read: terminal.json fetched and cached like the other config files'
 
     # ---------------------------------------------------------------- hand-edited catalogue: Ids are permanent
