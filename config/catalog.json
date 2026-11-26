@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "_about": "my-win-kit package catalogue. Edited by the menu (Settings > Manage packages) as commits to this file, or by hand. Field reference: docs/architecture.md#catalog-fields",
+  "_about": "my-win-kit package catalogue. Edited by hand in the repo (keep the canonical form: tools/test-config.ps1 checks it; Ids are permanent). Field reference: docs/architecture.md#catalog-fields",
   "Groups": [
     { "Key": "UTIL", "Label": "Utilities", "Letter": "U" },
     { "Key": "OFCE", "Label": "Office", "Letter": "A" },

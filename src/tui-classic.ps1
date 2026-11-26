@@ -37,7 +37,6 @@ if ($script:Testing) { foreach ($t in ($TestInput -split ";")) { $script:Queue.E
 
 $cat    = @(Initialize-Kit -KitRoot $KitRoot)
 if ((Get-KitSetting 'dryRunByDefault' $false) -and -not $DryRun) { $DryRun = $true; Write-KitRunLog 'classic: dry run because settings.dryRunByDefault is on' }
-Set-KitConfigMemoryOnly ([bool]$DryRun)
 $groups = @(Get-KitGroups)
 $state  = Get-KitState
 try { $Host.UI.RawUI.WindowTitle = "my-win-kit $([char]0x00B7) classic (PowerShell $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor))" } catch {}
@@ -135,15 +134,15 @@ function Show-Menu {
     foreach ($b in $script:Banner) { Write-Host '  ' -NoNewline; Write-Gradient $b $b.Length }
     Write-C "  v$(Get-KitVersion) $($Gl.Dot) classic menu $($Gl.Dot) Windows PowerShell $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor) $($Gl.Dot) " $Pal.Gray -NoNewline
     Write-C "$on selected" $Pal.Orange -NoNewline
-    $ci = Get-KitConfigInfo; $cfg = switch ($ci.Kind) { 'github' { 'config GitHub' } 'gh' { 'config GitHub (gh)' } 'cache' { "config cached $($ci.Detail)" } default { "config $($ci.Kind)" } }
-    Write-C " $($Gl.Dot) $cfg" $(if ($ci.Kind -in 'github', 'gh') { $Pal.Green } else { $Pal.Yellow }) -NoNewline
+    $ci = Get-KitConfigInfo; $cfg = switch ($ci.Kind) { 'github' { 'config GitHub' } 'cache' { "config cached $($ci.Detail)" } default { "config $($ci.Kind)" } }
+    Write-C " $($Gl.Dot) $cfg" $(if ($ci.Kind -eq 'github') { $Pal.Green } else { $Pal.Yellow }) -NoNewline
     if ($DryRun) { Write-C "   $($Gl.Dry) DRY RUN - nothing will be installed" $Pal.Purple } else { Write-Host '' }
     Write-Rule
     # One row block per group: header column (22) + 4 cells of 22
     foreach ($g in $groups) {
         $items = @($cat | Where-Object Group -eq $g.Key | Sort-Object Id)
         if (-not $items) { continue }
-        # groups added from the menu (config/catalog.json) have no icon/colour here: neutral fallback
+        # groups added to config/catalog.json by hand have no icon/colour here: neutral fallback
         $role = if ($GroupRole.ContainsKey($g.Key)) { $Pal[$GroupRole[$g.Key]] } else { $Pal.Fg }
         $icon = if ($GroupIcon.ContainsKey($g.Key)) { $GroupIcon[$g.Key] } else { 0x2022 }
         $letter = if ($g.Letter) { $g.Letter } else { '-' }

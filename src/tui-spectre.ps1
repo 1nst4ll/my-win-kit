@@ -10,7 +10,7 @@
     no Esc/back key. Exit codes: 0 = normal quit, 3 = Spectre unavailable
     (the loader then falls back to the classic menu).
 .PARAMETER KitRoot
-    Folder that holds install.ps1 (and the synced winget-id-overrides.json).
+    Folder that holds install.ps1 (and the bundled config/ copy).
 .PARAMETER DryRun
     Simulate: show what would run, install nothing.
 .PARAMETER TestKeys
@@ -259,8 +259,8 @@ function Show-Banner {
     foreach ($l in (Get-BannerLines)) { Say " $l" }
     $admin = if (Test-KitAdmin) { "[$($Hex.Green)]yes[/]" } else { "[$($Hex.Gray)]no[/]" }
     $ci = Get-KitConfigInfo
-    $cfg = switch ($ci.Kind) { 'github' { 'config GitHub' } 'gh' { 'config GitHub (gh)' } 'cache' { "config cached $($ci.Detail)" } 'bundled' { 'config bundled' } default { 'config ?' } }
-    $cfgColor = if ($ci.Kind -in 'github', 'gh') { $Hex.Green } else { $Hex.Yellow }
+    $cfg = switch ($ci.Kind) { 'github' { 'config GitHub' } 'cache' { "config cached $($ci.Detail)" } 'bundled' { 'config bundled' } default { 'config ?' } }
+    $cfgColor = if ($ci.Kind -eq 'github') { $Hex.Green } else { $Hex.Yellow }
     $s = " [$($Hex.Gray)]v$(Get-KitVersion) $($Glyph.Dot)[/] [$($Hex.Aqua) bold]$(E $script:EngineLabel)[/] [$($Hex.Gray)]$($Glyph.Dot)[/] [$cfgColor]$(E $cfg)[/] [$($Hex.Gray)]$($Glyph.Dot) $(E $env:COMPUTERNAME) $($Glyph.Dot) admin[/] $admin"
     if ($script:DryRunOn) { $s += "  [#282828 on $($Hex.Purple) bold] $($Glyph.Dry) DRY RUN [/]" }
     Say $s
@@ -473,33 +473,6 @@ function Show-Picker {
     }
 }
 
-function Read-KitText {
-    <# One-line text input with the same key rules: Enter = done, Esc = back ($null). #>
-    param([string]$Prompt, [string]$Hint = '', [string]$Default = '')
-    $text = $Default
-    $start = -1; $first = $true
-    while ($true) {
-        $lines = @(
-            "[$($Hex.Fg) bold]$(E $Prompt)[/]"
-            "[$($Hex.Orange) bold]  > [/][$($Hex.Fg)]$(E $text)[/][$($Hex.Orange)]$($Glyph.Full)[/]"
-            $(if ($Hint) { "[$($Hex.Gray)]  $(E $Hint)[/]" } else { '' })
-            '  ' + (Get-KeyHint @('type|text', 'enter|done', 'esc|back'))
-        )
-        if ($script:Test) { if ($first) { $script:Heights.Add("$($script:ScreenName)=$((Get-LinesUsed) + $lines.Count)") } }
-        else {
-            if ($start -lt 0) { [Console]::Write("`n" * ($lines.Count + 1)); $start = [Math]::Max(0, [Console]::CursorTop - $lines.Count - 1) }
-            [Console]::SetCursorPosition(0, $start); [Console]::Write("$([char]27)[J")
-        }
-        foreach ($l in $lines) { Say (Limit-Markup $l ((Get-WindowWidth) - 1)) }
-        $first = $false
-        $k = Read-KitKey
-        if ($k.Key -eq 'Enter') { return $text.Trim() }
-        if ($k.Key -eq 'Escape') { return $null }
-        if ($k.Key -eq 'Backspace') { if ($text) { $text = $text.Substring(0, $text.Length - 1) } else { return $null }; continue }
-        if ($k.KeyChar -and [int]$k.KeyChar -ge 32) { $text += $k.KeyChar }
-    }
-}
-
 function Select-One {
     <# Single choice; a pinned Back row on every screen except the main menu. Returns Key, or 'back' / 'quit'. #>
     param([string[]]$Title, [object[]]$Items, [string]$BackLabel = 'Back', [string]$QuitKey = '', [switch]$NoBack)
@@ -606,7 +579,7 @@ function Get-LegendMarkup {
     return "[$($Hex.Green)]$($Glyph.Ok) installed[/]  [$($Hex.Yellow)]$($Glyph.Up) update[/]  [$($Hex.Gray)]$($Glyph.Not) not installed[/]  [$($Hex.Red)]$($Glyph.Fail) failed[/]  [$($Hex.Aqua)]$($Glyph.Heal) healed[/]"
 }
 
-function Invoke-Scan([switch]$Updates, [switch]$KeepScanFlag) {
+function Invoke-Scan([switch]$Updates) {
     $script:Installed = @{}; $script:Updates = @{}
     $st = [Spectre.Console.AnsiConsole]::Status()
     $st.Spinner = [Spectre.Console.Spinner+Known]::Point
@@ -619,7 +592,7 @@ function Invoke-Scan([switch]$Updates, [switch]$KeepScanFlag) {
             $script:Updates = Get-KitUpdates -Installed $script:Installed
         }
     })
-    if (-not $KeepScanFlag) { $script:ScanDone = $true }   # the install screen still wants its update scan
+    $script:ScanDone = $true
 }
 
 function Get-TrimmedRows([object[]]$Rows, [int]$Max, [scriptblock]$Priority) {
@@ -639,9 +612,8 @@ $script:DryRunOn  = [bool]$DryRun
 $script:Installed = @{}
 $script:Updates   = @{}
 $script:ScanDone  = $false
-# Dry run (from -DryRun or the shared setting): config edits stay in memory, commits are only previewed
+# Dry run: from -DryRun or the shared setting settings.dryRunByDefault
 if ((Get-KitSetting 'dryRunByDefault' $false) -and -not $script:DryRunOn) { $script:DryRunOn = $true; Write-KitRunLog 'modern: dry run because settings.dryRunByDefault is on' }
-Set-KitConfigMemoryOnly $script:DryRunOn
 foreach ($w in (Get-KitWarnings)) { Write-KitRunLog "packages: WARNING $w" }
 
 if (-not (Test-KitWinget) -and -not $script:Test) {
@@ -982,297 +954,64 @@ function Show-Tweaks {
     }
 }
 
-# ---------------------------------------------------------------- manage packages + settings (GitHub config)
-# Every change is a commit to config/*.json in the GitHub repo (gh api), so every PC
-# picks it up at its next start. Dry run: applied in memory, the commit is only shown.
-
-function Update-CatalogView {
-    $script:Catalog = @(Get-KitCatalog)
-    $script:Groups = @(Get-KitGroups)
-}
+# ---------------------------------------------------------------- settings (read-only)
+# The menu never writes config: config/*.json is edited by hand in the repo, and every
+# PC reads the latest from GitHub at its next start.
 
 function Get-ConfigSourceText {
     $i = Get-KitConfigInfo
     switch ($i.Kind) {
         'github'  { "GitHub ($($i.Repo)@$($i.Branch))" }
-        'gh'      { "GitHub via gh ($($i.Repo)@$($i.Branch), private repo)" }
         'cache'   { "cached copy from $($i.Detail) (GitHub not reachable)" }
         'bundled' { 'the copy bundled with the kit (GitHub not reachable, no cache)' }
         default   { $i.Kind }
     }
 }
 
-function Get-ConfigLine {
+function Get-SettingsPanel {
+    <# Read-only summary: config source, settings values, learned package-ID fixes. #>
     $i = Get-KitConfigInfo
-    if ($i.MemoryOnly) {
-        return "[#282828 on $($Hex.Purple) bold] DRY RUN [/] [$($Hex.Purple)]changes stay in memory; you see the commit that would be made, nothing is pushed[/]"
-    }
-    return "[$($Hex.Gray)]Saved as commits to[/] [$($Hex.Aqua)]github.com/$(E $i.Repo)[/] [$($Hex.Gray)]($(E $i.Branch)) $($Glyph.Dot) every PC picks changes up at its next start $($Glyph.Dot) loaded from $(E (Get-ConfigSourceText))[/]"
-}
-
-function Show-ManageHeader([string]$Screen) {
-    Show-Header $Screen
-    Say (Get-ConfigLine)
-    foreach ($w in (Get-KitWarnings)) { Say "[$($Hex.Red)]$($Glyph.Warn) $(E $w)[/]" }
-    Say ''
-}
-
-function Show-Message([string]$Screen, [string]$Markup, [string]$Back = 'Back') {
-    Show-ManageHeader $Screen
-    Say $Markup
-    Say ''
-    Wait-Back $Back
-}
-
-function Get-ResultMarkupLine($r) {
-    switch ($r.Status) {
-        'saved'  { "[$($Hex.Green) bold]$($Glyph.Ok) Committed to GitHub[/] [$($Hex.Gray)]$(E $r.Message)[/]" + $(if ($r.Commit) { "`n  [$($Hex.Aqua)]$(E $r.Commit)[/]" } else { '' }) }
-        'dryrun' { "[$($Hex.Purple) bold]$($Glyph.Dry) Would commit:[/] [$($Hex.Fg)]$(E $r.Preview)[/]`n  [$($Hex.Gray)]Dry run: applied in memory for this session only.[/]" }
-        default  { "[$($Hex.Red) bold]$($Glyph.Fail) Not saved:[/] [$($Hex.Fg)]$(E $r.Message)[/]" }
-    }
-}
-
-function Confirm-GitHubWrite {
-    <# Make sure gh is installed and signed in before a real commit. Returns $true when ready. #>
-    if ($script:DryRunOn -or (Get-KitConfigInfo).MemoryOnly) { return $true }
-    while ($true) {
-        if (-not (Get-KitGh)) {
-            Show-ManageHeader 'GitHub CLI needed'
-            Say "  [$($Hex.Fg)]Saving goes through the GitHub CLI (gh), which isn't installed on this PC.[/]"
-            Say "  [$($Hex.Gray)]The kit never stores tokens itself; gh keeps the sign-in in the Windows credential store.[/]"
-            Say ''
-            if ((Select-One -Title "[$($Hex.Fg) bold]Install it?[/]" -Items @(@{ Key = 'yes'; Label = "[$($Hex.Orange) bold]$($Glyph.Pointer) Install GitHub CLI[/] [$($Hex.Gray)](winget GitHub.cli)[/]" })) -ne 'yes') { return $false }
-            Write-KitRunLog 'github: installing GitHub.cli with winget'
-            Clear-Screen 'installing gh'
-            & winget install --id GitHub.cli --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
-            Update-KitPath
-            if (-not (Get-KitGh)) { Show-Message 'GitHub CLI needed' "  [$($Hex.Red)]GitHub CLI is still not found (winget exit $LASTEXITCODE).[/]"; return $false }
-            continue
-        }
-        if (-not (Test-KitGhLogin)) {
-            Show-ManageHeader 'Sign in to GitHub'
-            Say "  [$($Hex.Fg)]gh is not signed in. Signing in opens github.com in the browser with a one-time code.[/]"
-            Say "  [$($Hex.Gray)]Command: gh auth login --web --hostname github.com --git-protocol https[/]"
-            Say ''
-            if ((Select-One -Title "[$($Hex.Fg) bold]Sign in now?[/]" -Items @(@{ Key = 'yes'; Label = "[$($Hex.Orange) bold]$($Glyph.Pointer) Sign in to GitHub[/]" })) -ne 'yes') { return $false }
-            Write-KitRunLog 'github: gh auth login --web'
-            Clear-Screen 'gh login'
-            & (Get-KitGh) auth login --web --hostname github.com --git-protocol https
-            if (-not (Test-KitGhLogin)) { Show-Message 'Sign in to GitHub' "  [$($Hex.Red)]Still not signed in.[/]"; return $false }
-            Write-KitRunLog "github: signed in as $(Get-KitGhUser)"
-            continue
-        }
-        return $true
-    }
-}
-
-function Invoke-ConfigWrite([string]$Screen, [scriptblock]$Op, [switch]$Quiet) {
-    <# Run one config change (a commit) behind a spinner; show the result unless -Quiet and it worked. #>
-    if (-not (Confirm-GitHubWrite)) { return $null }
-    $script:writeResult = $null
-    $verb = if ((Get-KitConfigInfo).MemoryOnly) { 'Preparing the commit' } else { 'Committing to GitHub' }
-    $st = [Spectre.Console.AnsiConsole]::Status()
-    $st.Spinner = [Spectre.Console.Spinner+Known]::Point
-    $st.SpinnerStyle = St $Hex.Orange
-    $st.Start("[$($Hex.Fg)]$verb...[/]", [Action[Spectre.Console.StatusContext]] {
-        param($ctx)
-        [void]$ctx   # Spectre passes the StatusContext; not every caller needs it
-        $script:writeResult = & $Op
-    })
-    $r = $script:writeResult
-    Write-KitRunLog "config write [$Screen]: $($r.Status) - $($r.Message) $($r.Commit)"
-    Update-CatalogView
-    if (-not ($Quiet -and $r.Status -eq 'saved')) { Show-Message $Screen "  $(Get-ResultMarkupLine $r)" }
-    return $r
-}
-
-function Select-GroupForAdd {
-    <# Existing group (POST excluded) or a new one. Returns @{ Group; NewLabel } or $null. #>
-    $items = foreach ($g in ($script:Groups | Where-Object Key -ne 'POST')) {
-        $n = @($script:Catalog | Where-Object Group -eq $g.Key).Count
-        @{ Key = $g.Key; Label = "$(Get-GroupLabel $g) [$($Hex.Gray)]($n)[/]" }
-    }
-    $items = @($items) + @(@{ Key = '__new'; Label = "[$($Hex.Orange)]+ New group...[/]" })
-    $k = Select-One -Title "[$($Hex.Fg) bold]Which group?[/]" -Items $items
-    if ($k -eq 'back') { return $null }
-    if ($k -eq '__new') {
-        Show-ManageHeader "Add a package $($script:Glyph.Dot) new group"
-        $label = Read-KitText -Prompt 'Name of the new group' -Hint 'for example: My tools'
-        if (-not $label) { return $null }
-        return @{ Group = ''; NewLabel = $label }
-    }
-    return @{ Group = $k; NewLabel = '' }
-}
-
-function Add-FoundPackage($Hit) {
-    <# Group -> default on/off -> commit. $Hit = @{ Name; Id; Version; Source }. #>
-    $method = if ($Hit.Source -eq 'msstore') { 'msstore' } else { 'winget' }
-    Show-ManageHeader 'Add a package'
-    Say "  [$($Hex.Fg) bold]$(E $Hit.Name)[/] [$($Hex.Gray)]$(E $Hit.Id) $($Glyph.Dot) $(E $Hit.Version) $($Glyph.Dot) $method[/]"
-    Say ''
-    $g = Select-GroupForAdd
-    if (-not $g) { return }
-    Show-ManageHeader 'Add a package'
-    Say "  [$($Hex.Fg) bold]$(E $Hit.Name)[/] [$($Hex.Gray)]$(E $Hit.Id)[/]"
-    Say ''
-    $d = Select-One -Title "[$($Hex.Fg) bold]In the recommended set?[/]" -Items @(
-        @{ Key = 'off'; Label = "[$($Hex.Gray)]$($Glyph.Off) Off[/] [$($Hex.Gray)]- tick it by hand when needed[/]" }
-        @{ Key = 'on';  Label = "[$($Hex.Green)]$($Glyph.On) On[/] [$($Hex.Gray)]- pre-selected in the recommended set[/]" }
+    $srcHex = if ($i.Kind -eq 'github') { $Hex.Green } else { $Hex.Yellow }
+    $on = "[$($Hex.Green) bold]on [/]"; $off = "[$($Hex.Gray)]off[/]"
+    $lines = @("[$($Hex.Gray)]Config   [/] [$srcHex]$(E (Get-ConfigSourceText))[/]")
+    $known = @(
+        @{ Name = 'removeShortcuts'; Default = $true;  Desc = 'remove desktop shortcuts that installers create' }
+        @{ Name = 'dryRunByDefault'; Default = $false; Desc = 'start every run in dry run' }
     )
-    if ($d -eq 'back') { return }
-    $name = $Hit.Name; $id = $Hit.Id; $on = ($d -eq 'on')
-    [void](Invoke-ConfigWrite 'Add a package' { Add-KitPackage -Name $name -Ref $id -Method $method -Group $g.Group -NewGroupLabel $g.NewLabel -On $on -Desc "$name ($method $id)" })
-}
-function Show-AddBySearch {
-    Show-ManageHeader 'Add a package'
-    $q = Read-KitText -Prompt 'Search winget and the Microsoft Store for' -Hint 'a name or part of an Id, e.g. "7zip" or "telegram"'
-    if (-not $q) { return }
-    $script:hits = @()
-    $st = [Spectre.Console.AnsiConsole]::Status()
-    $st.Spinner = [Spectre.Console.Spinner+Known]::Point
-    $st.SpinnerStyle = St $Hex.Orange
-    $st.Start("[$($Hex.Fg)]Searching winget and the Store for '$(E $q)'...[/]", [Action[Spectre.Console.StatusContext]] {
-        param($ctx)
-        [void]$ctx   # Spectre passes the StatusContext; not every caller needs it
-        $script:hits = @(Find-KitWingetPackages -Query $q)
-    })
-    Write-KitRunLog "packages: search '$q' -> $($script:hits.Count) hit(s)"
-    if (-not $script:hits.Count) { Show-Message 'Add a package' "  [$($Hex.Yellow)]No results for '$(E $q)'.[/]"; return }
-    $known = @{}; foreach ($p in @($script:Catalog) + @(Get-KitRemovedPackages)) { $known["$($p.Method)|$($p.Ref)"] = $p.Name }
-    $i = 0
-    $items = foreach ($h in $script:hits) {
-        $m = if ($h.Source -eq 'msstore') { 'msstore' } else { 'winget' }
-        $tag = if ($known.ContainsKey("$m|$($h.Id)")) { "  [$($Hex.Green)]$($Glyph.Ok) in the list[/]" } else { '' }
-        New-PickItem "$i" "[$($Hex.Fg)]$(E $h.Name)[/] [$($Hex.Gray)]$($Glyph.Dot)[/] [$($Hex.Aqua)]$(E $h.Id)[/] [$($Hex.Gray)]$($Glyph.Dot) $(E $h.Version) $($Glyph.Dot) $(E $h.Source)[/]$tag" -Text "$($h.Name) $($h.Id)"
-        $i++
+    $first = $true
+    foreach ($s in $known) {
+        $v = if (Get-KitSetting $s.Name $s.Default) { $on } else { $off }
+        $label = if ($first) { 'Settings ' } else { '         ' }
+        $lines += "[$($Hex.Gray)]$label[/] [$($Hex.Fg)]$($s.Name.PadRight(16))[/] $v [$($Hex.Gray)]$($Glyph.Dot) $(E $s.Desc)[/]"
+        $first = $false
     }
-    Show-ManageHeader "Add a package $($Glyph.Dot) results for '$q'"
-    $r = Show-Picker -Title @("[$($Hex.Fg) bold]$($script:hits.Count) result(s)[/] [$($Hex.Gray)]- pick one to add[/]") -Items @($items) -Pinned @(New-PickItem 'back' "[$($Hex.Gray)]$($Glyph.Left) Back[/]") -Search
-    if ($r.Action -ne 'select') { return }
-    Add-FoundPackage $script:hits[[int]$r.Key]
-}
-
-function Show-AddById {
-    Show-ManageHeader 'Add by exact winget ID'
-    $id = Read-KitText -Prompt 'Exact winget ID' -Hint 'for example: 7zip.7zip (Store product IDs work too, e.g. 9NKSQGP7F2NH)'
-    if (-not $id) { return }
-    $script:found = $null
-    $st = [Spectre.Console.AnsiConsole]::Status()
-    $st.Spinner = [Spectre.Console.Spinner+Known]::Point
-    $st.SpinnerStyle = St $Hex.Orange
-    $st.Start("[$($Hex.Fg)]Looking up '$(E $id)'...[/]", [Action[Spectre.Console.StatusContext]] {
-        param($ctx)
-        [void]$ctx   # Spectre passes the StatusContext; not every caller needs it
-        $script:found = Test-KitWingetId -Id $id
-    })
-    Write-KitRunLog "packages: lookup '$id' -> $(if ($script:found) { $script:found.Name } else { 'not found' })"
-    if (-not $script:found) { Show-Message 'Add by exact winget ID' "  [$($Hex.Yellow)]No package with the exact ID '$(E $id)' in winget or the Store.[/]"; return }
-    Add-FoundPackage $script:found
-}
-
-function Show-PackageList {
-    <# All packages by group: space/enter = default on/off, d/Del = remove (confirm), / = filter. #>
-    $cursor = -1; $filter = ''
-    while ($true) {
-        Show-ManageHeader 'Package list'
-        $items = foreach ($g in $script:Groups) {
-            $members = @($script:Catalog | Where-Object Group -eq $g.Key | Sort-Object Id)
-            if (-not $members) { continue }
-            New-PickItem "g:$($g.Key)" (Get-GroupLabel $g) -Group $g.Key -Header
-            foreach ($p in $members) {
-                $def = if ($p.Default) { "[$($Hex.Green) bold]$($Glyph.On) on [/]" } else { "[$($Hex.Gray)]$($Glyph.Off) off[/]" }
-                $mine = if ($p.Origin -eq 'mine') { "  [$($Hex.Purple)]added by you[/]" } else { '' }
-                New-PickItem "$($p.Id)" "  $def $(Get-StateBadge $p) [$($Hex.Fg)]$(E $p.Name)[/] [$($Hex.Gray)]$(Get-MethodLabel $p)[/]$mine" -Text "$($p.Name) $($p.Ref)" -Group $g.Key
-            }
-        }
-        $on = @($script:Catalog | Where-Object Default).Count
-        $title = @("[$($Hex.Fg) bold]$($script:Catalog.Count) packages[/] [$($Hex.Gray)]$($Glyph.Dot) $on on by default (the recommended set) $($Glyph.Dot) $($Glyph.On) on / $($Glyph.Off) off = default[/]")
-        $r = Show-Picker -Title $title -Items @($items) -Pinned @(New-PickItem 'back' "[$($Hex.Gray)]$($Glyph.Left) Back to Manage packages[/]") `
-            -ReturnKeys @('Spacebar', 'Enter', 'd', 'Delete') -Cursor $cursor -Filter $filter -Search `
-            -Hints @('space|default on/off', 'd|remove', '/|filter')
-        if ($r.Action -ne 'key' -and $r.Action -ne 'select') { return }
-        $cursor = $r.Cursor; $filter = $r.Filter
-        if ("$($r.Key)" -like 'g:*') { continue }
-        $p = @($script:Catalog | Where-Object Id -eq ([int]$r.Key))[0]
-        if (-not $p) { continue }
-        if ($r.Action -eq 'select' -or $r.KeyName -in 'Spacebar', 'Enter') {
-            $pid_ = $p.Id; $on = -not $p.Default
-            [void](Invoke-ConfigWrite 'Package list' { Set-KitPackageDefault -Id $pid_ -On $on } -Quiet)
-            continue
-        }
-        # d / Delete: confirm
-        Show-ManageHeader 'Remove a package'
-        Say "  [$($Hex.Fg) bold]$(E $p.Name)[/] [$($Hex.Gray)]$(E $p.Ref) $($Glyph.Dot) $(Get-MethodLabel $p)[/]"
-        Say "  [$($Hex.Gray)]It disappears from both menus on every PC (a commit). Restore it any time under Removed packages.[/]"
-        Say ''
-        $c = Select-One -Title "[$($Hex.Fg) bold]Remove it?[/]" -Items @(@{ Key = 'yes'; Label = "[$($Hex.Red)]$($Glyph.Fail) Remove $(E $p.Name)[/]" }) -BackLabel 'Keep it'
-        if ($c -eq 'yes') { $pid_ = $p.Id; [void](Invoke-ConfigWrite 'Remove a package' { Remove-KitPackage -Id $pid_ } -Quiet) }
+    $fx = { param([int]$n) if ($n -eq 1) { '1 package-ID fix' } else { "$n package-ID fixes" } }
+    $lines += "[$($Hex.Gray)]Fixes    [/] [$($Hex.Fg)]$(& $fx (Get-KitOverrideCount)) in use[/] [$($Hex.Gray)](learned when winget renames or breaks an ID)[/]"
+    if ($i.LocalFixes) {
+        $lines += "[$($Hex.Gray)]         [/] [$($Hex.Yellow)]$(& $fx $i.LocalFixes) learned on this PC only, kept in[/]"
+        $lines += "[$($Hex.Gray)]         [/] [$($Hex.Aqua)]$(E $i.LocalFixesFile)[/]"
+        $lines += "[$($Hex.Gray)]         [/] [$($Hex.Gray)]copy them into config/winget-id-overrides.json to share them with every PC[/]"
+    } else {
+        $lines += "[$($Hex.Gray)]         [/] [$($Hex.Gray)]none learned on this PC only[/]"
     }
-}
-
-function Show-RemovedPackages {
-    while ($true) {
-        Show-ManageHeader 'Removed packages'
-        $rem = @(Get-KitRemovedPackages | Sort-Object Name)
-        if (-not $rem.Count) { Say "  [$($Hex.Gray)]Nothing removed.[/]"; Say ''; Wait-Back 'Back to Manage packages'; return }
-        $items = foreach ($p in $rem) {
-            $gs = Get-GroupStyle $p.Group
-            New-PickItem "$($p.Id)" "[$($Hex.Fg)]$(E $p.Name)[/] [$($gs.Color)]$($gs.Icon)[/] [$($Hex.Gray)]$(E $p.Ref) $($Glyph.Dot) $(Get-MethodLabel $p)[/]"
-        }
-        $r = Show-Picker -Title @("[$($Hex.Fg) bold]$($rem.Count) removed[/] [$($Hex.Gray)]- enter restores[/]") -Items @($items) -Pinned @(New-PickItem 'back' "[$($Hex.Gray)]$($Glyph.Left) Back to Manage packages[/]") -Hints @('enter|restore')
-        if ($r.Action -ne 'select') { return }
-        $rid = [int]$r.Key
-        [void](Invoke-ConfigWrite 'Removed packages' { Restore-KitPackage -Id $rid } -Quiet)
-    }
-}
-
-function Show-ManagePackages {
-    if (-not $script:Installed.Count) { Show-Header 'Manage packages'; Invoke-Scan -KeepScanFlag }   # installed badges in the list
-    while ($true) {
-        Show-ManageHeader 'Manage packages'
-        $rem = @(Get-KitRemovedPackages).Count
-        $items = @(
-            @{ Key = 'list';    Label = "[$($Hex.Fg)]Package list[/] [$($Hex.Gray)]- default on/off, remove ($($script:Catalog.Count) packages)[/]" }
-            @{ Key = 'search';  Label = "[$($Hex.Fg)]Add a package[/] [$($Hex.Gray)]- search winget and the Store[/]" }
-            @{ Key = 'id';      Label = "[$($Hex.Fg)]Add by exact winget ID[/]" }
-            @{ Key = 'removed'; Label = "[$($Hex.Fg)]Removed packages[/] [$($Hex.Gray)]- restore ($rem)[/]" }
-        )
-        switch (Select-One -Title "[$($Hex.Fg) bold]Manage packages[/] [$($Hex.Gray)]- config/catalog.json in the GitHub repo[/]" -Items $items -BackLabel 'Back to Settings') {
-            'list'    { Show-PackageList }
-            'search'  { Show-AddBySearch }
-            'id'      { Show-AddById }
-            'removed' { Show-RemovedPackages }
-            default { return }
-        }
-    }
+    $lines += ''
+    $lines += "[$($Hex.Orange)]To change config, edit config/*.json in the my-win-kit repo on GitHub.[/]"
+    return (New-KitPanel ($lines -join "`n") " [$($Hex.Blue) bold]read-only[/] " $Hex.Line)
 }
 
 function Show-Settings {
     while ($true) {
-        Show-ManageHeader 'Settings'
-        $on = "[$($Hex.Green) bold]on[/]"; $off = "[$($Hex.Gray)]off[/]"
-        $sc = if (Get-KitSetting 'removeShortcuts' $true) { $on } else { $off }
-        $drd = if (Get-KitSetting 'dryRunByDefault' $false) { "[$($Hex.Purple) bold]on[/]" } else { $off }
-        $dr = if ($script:DryRunOn) { "[$($Hex.Purple) bold]on[/]" } else { $off }
-        $pend = (Get-KitConfigInfo).Pending
-        $gh = if (-not (Get-KitGh)) { "[$($Hex.Gray)]GitHub CLI not installed[/]" } elseif (Test-KitGhLogin) { "[$($Hex.Green)]signed in as $(E (Get-KitGhUser))[/]" } else { "[$($Hex.Yellow)]not signed in[/]" }
+        Show-Header 'Settings'
+        Out-Render (Get-SettingsPanel)
+        Say ''
+        $dr = if ($script:DryRunOn) { "[$($Hex.Purple) bold]on[/]" } else { "[$($Hex.Gray)]off[/]" }
         $items = @(
-            @{ Key = 'pkgs'; Label = "[$($Hex.Fg)]Manage packages[/] [$($Hex.Gray)]- add, remove, default on/off[/]" }
-            @{ Key = 'sc';   Label = "[$($Hex.Fg)]Remove desktop shortcuts that installers create:[/] $sc [$($Hex.Gray)](all PCs)[/]" }
-            @{ Key = 'drd';  Label = "[$($Hex.Fg)]Start in dry run:[/] $drd [$($Hex.Gray)](all PCs)[/]" }
-            @{ Key = 'dr';   Label = "[$($Hex.Fg)]Dry run now (show what would run, install nothing):[/] $dr [$($Hex.Gray)](this session)[/]" }
+            @{ Key = 'dr';  Label = "[$($Hex.Fg)]Dry run now (show what would run, install nothing):[/] $dr [$($Hex.Gray)](this session)[/]" }
+            @{ Key = 'log'; Label = "[$($Hex.Fg)]Open the log folder[/]" }
         )
-        if ($pend) { $items += @{ Key = 'push'; Label = "[$($Hex.Yellow)]Push $pend learned package-ID fix(es) to GitHub[/] [$($Hex.Gray)](found on this PC while signed out)[/]" } }
-        $items += @{ Key = 'gh';  Label = "[$($Hex.Fg)]GitHub account:[/] $gh" }
-        $items += @{ Key = 'log'; Label = "[$($Hex.Fg)]Open the log folder[/]" }
         $runlog = if ($env:MYWINKIT_RUNLOG) { "[$($Hex.Gray)]run log: $(E $env:MYWINKIT_RUNLOG)[/]" } else { '' }
-        switch (Select-One -Title @("[$($Hex.Fg) bold]Settings[/] [$($Hex.Gray)]($((Get-KitOverrideCount)) learned package-ID fixes in use)[/]", $runlog) -Items $items -BackLabel 'Back to main menu') {
-            'pkgs' { Show-ManagePackages }
-            'sc'   { $v = -not (Get-KitSetting 'removeShortcuts' $true); [void](Invoke-ConfigWrite 'Settings' { Set-KitSetting -Name 'removeShortcuts' -Value $v } -Quiet) }
-            'drd'  { $v = -not (Get-KitSetting 'dryRunByDefault' $false); [void](Invoke-ConfigWrite 'Settings' { Set-KitSetting -Name 'dryRunByDefault' -Value $v } -Quiet) }
-            'dr'   { if (-not $script:Test) { $script:DryRunOn = -not $script:DryRunOn; Set-KitConfigMemoryOnly $script:DryRunOn } }   # smoke tests stay dry
-            'push' { [void](Invoke-ConfigWrite 'Settings' { Push-KitPendingOverrides }) }
-            'gh'   { if (Confirm-GitHubWrite) { Show-Message 'Settings' "  [$($Hex.Green)]$($Glyph.Ok) GitHub CLI ready, signed in as $(E (Get-KitGhUser)).[/]" } }
+        switch (Select-One -Title @("[$($Hex.Fg) bold]Settings[/]", $runlog) -Items $items -BackLabel 'Back to main menu') {
+            'dr'  { if (-not $script:Test) { $script:DryRunOn = -not $script:DryRunOn } }   # smoke tests stay dry
             'log' {
                 $d = Join-Path $env:TEMP 'my-win-kit'
                 if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
@@ -1302,7 +1041,7 @@ try {
             @{ Key = 'install';  Icon = $Glyph.Pointer; Color = $Hex.Orange; Name = 'Install or update apps'; Desc = "pick from $($script:Catalog.Count) apps: install new ones, update the rest" }
             @{ Key = 'ai';       Icon = $Glyph.Up;      Color = $Hex.Aqua;   Name = 'Update AI tools';        Desc = "Claude Code $($Glyph.Dot) Claude Desktop $($Glyph.Dot) agy $($Glyph.Dot) Antigravity, always latest" }
             @{ Key = 'tweaks';   Icon = $Glyph.Sun;     Color = $Hex.Yellow; Name = 'Windows tweaks';         Desc = 'Spotlight icon, lock-screen tips, Start web search, auto-lock' }
-            @{ Key = 'settings'; Icon = $Glyph.Menu;    Color = $Hex.Blue;   Name = 'Settings';               Desc = 'shortcut cleanup, dry run, log folder' }
+            @{ Key = 'settings'; Icon = $Glyph.Menu;    Color = $Hex.Blue;   Name = 'Settings';               Desc = 'config source and values (read-only), dry run, log folder' }
             @{ Key = 'quit';     Icon = $Glyph.Left;    Color = $Hex.Gray;   Name = 'Quit';                   Desc = 'or press q' }
         )
         $items = foreach ($m in $menu) {

@@ -9,7 +9,8 @@
     output contains the expected text, and every screen fitted 30 rows
     (the menu reports "SCREEN-HEIGHTS: name=rows; ..." on exit).
     Covers Esc / Backspace / Left = back from every level, q = quit, "/" search,
-    a/n group toggles. Needs PwshSpectreConsole.
+    a/n group toggles, the read-only Settings screen (an Absent list fails a
+    scenario when removed screens reappear). Needs PwshSpectreConsole.
 .EXAMPLE
     pwsh -NoProfile -File tools\smoke-tui.ps1
 #>
@@ -20,7 +21,10 @@ $root = Split-Path -Parent $PSScriptRoot
 $tui = Join-Path $root 'src\tui-spectre.ps1'
 $fail = 0
 # Empty per-run state folder, so "last selection" items never shift the menus
-$env:MYWINKIT_STATE_DIR = Join-Path ([IO.Path]::GetTempPath()) ("my-win-kit-smoke-" + [guid]::NewGuid())
+$env:MYWINKIT_STATE_DIR = Join-Path ([IO.Path]::GetTempPath()) ("mwk-smoke-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+# One heal "learned on this PC" (a made-up Id no package uses), so Settings shows the local-fix lines
+New-Item -ItemType Directory -Path (Join-Path $env:MYWINKIT_STATE_DIR 'cache') -Force | Out-Null
+[IO.File]::WriteAllText((Join-Path $env:MYWINKIT_STATE_DIR 'cache\local-overrides.json'), "{`n  `"Smoke.Old`": `"Smoke.New`"`n}`n")
 
 $scenarios = @(
     @{ Name = 'install: recommended -> picker -> review -> simulate -> results -> back -> q'
@@ -44,15 +48,10 @@ $scenarios = @(
     @{ Name = 'tweaks: esc back, then open (dry) -> back'
        Keys = 'DownArrow,DownArrow,Enter,Escape,DownArrow,DownArrow,Enter,Enter,Enter,text:q'
        Expect = @('Windows 11 tweaks', 'would run: powershell -File', 'see you next time') }
-    @{ Name = 'settings: toggle, esc back'
-       Keys = 'DownArrow,DownArrow,DownArrow,Enter,DownArrow,Enter,Enter,Escape,text:q'
-       Expect = @('Manage packages', 'Remove desktop shortcuts', 'Start in dry run', 'GitHub account', 'Would commit', 'config: setting removeShortcuts = False', 'run log:', 'see you next time') }
-    @{ Name = 'manage packages: default off, remove (confirm), restore - dry run previews each commit'
-       Keys = 'DownArrow,DownArrow,DownArrow,Enter,Enter,Enter,DownArrow,Spacebar,Enter,text:d,Enter,Enter,Escape,DownArrow,DownArrow,DownArrow,Enter,Enter,Enter,Enter,Escape,Escape,text:q'
-       Expect = @('Package list', 'space default on/off', 'Would commit', 'config: UniGetUI default off', 'Remove it?', 'config: remove UniGetUI', 'config: restore UniGetUI', 'Nothing removed', 'nothing is pushed', 'see you next time') }
-    @{ Name = 'manage packages: esc from every level (list, search box, id box, removed)'
-       Keys = 'DownArrow,DownArrow,DownArrow,Enter,Enter,Enter,Escape,DownArrow,Enter,Escape,DownArrow,DownArrow,Enter,Escape,DownArrow,DownArrow,DownArrow,Enter,Escape,Escape,Escape,text:q'
-       Expect = @('Search winget and the Microsoft Store for', 'Exact winget ID', 'Nothing removed', 'Back to Settings', 'see you next time') }
+    @{ Name = 'settings (read-only): config source, values, local fixes, edit-in-repo line; enter, esc back'
+       Keys = 'DownArrow,DownArrow,DownArrow,Enter,Enter,Escape,text:q'
+       Expect = @('read-only', 'Config', 'removeShortcuts', 'dryRunByDefault', '1 package-ID fix in use (learned when winget', '1 package-ID fix learned on this PC only', 'local-overrides.json', 'To change config, edit config/*.json in the my-win-kit repo on GitHub.', 'Dry run now', 'Open the log folder', 'Back to main menu', 'run log:', 'see you next time')
+       Absent = @('Manage packages', 'GitHub account', 'Would commit', 'gh auth') }
 )
 
 # Needs at least one AI tool installed (first item = "Update all installed"): skipped on CI runners
@@ -63,18 +62,12 @@ if ($hasAi -and -not $env:GITHUB_ACTIONS) {
         Expect = @('Update all installed', 'Updating AI tools', 'would run', 'Summary') }
 }
 
-# Real (read-only) winget search + add by exact Id; the commits are only previewed (dry run).
-# Real commits are tested against a throwaway branch by tools/test-config.ps1 -Write.
-if (Get-Command winget -ErrorAction SilentlyContinue) {
-    $scenarios += @{ Name = 'manage packages: winget search + add, add by exact Id into a new group (dry-run commit preview)'
-        Keys = 'DownArrow,DownArrow,DownArrow,Enter,Enter,DownArrow,Enter,text:7zip,Enter,Enter,Enter,Enter,Enter,DownArrow,DownArrow,Enter,text:Mozilla.Firefox,Enter,End,Enter,text:My tools,Enter,DownArrow,Enter,Enter,Escape,Escape,text:q'
-        Expect = @('Searching winget', 'result(s)', 'Which group?', 'In the recommended set?', 'Would commit', 'config: add', 'Name of the new group', 'config: add Mozilla Firefox', 'see you next time') }
-}
 foreach ($s in $scenarios) {
     $kitRoot = $root
     $out = & pwsh -NoProfile -File $tui -KitRoot $kitRoot -TestKeys $s.Keys 2>&1 | Out-String
     $ec = $LASTEXITCODE
     $missing = @($s.Expect | Where-Object { -not $out.Contains($_) })   # literal, not -like (brackets are wildcards)
+    if ($s.ContainsKey('Absent')) { $missing += @($s.Absent | Where-Object { $out.Contains($_) } | ForEach-Object { "(should be absent) $_" }) }
     $hl = ($out -split "`n" | Where-Object { $_ -like 'SCREEN-HEIGHTS:*' } | Select-Object -Last 1)
     $tall = @()
     if ($hl) { $tall = @(($hl -replace '^SCREEN-HEIGHTS:\s*', '') -split ';\s*' | Where-Object { $_ -match '=(\d+)$' -and [int]$Matches[1] -gt 30 }) }

@@ -2,7 +2,7 @@
 
 Personal Windows workstation kit. `install.cmd` → `install.ps1` (loader) → the modern menu
 (`src/tui-spectre.ps1`, PowerShell 7.4+) or the classic menu (`src/tui-classic.ps1`, 5.1). Both call the engine
-`src/core.psm1`, and the app list and settings live in `config/*.json` on GitHub (read at start, edited from the menu as commits). `win11-tweaks.ps1` is the registry tweaks menu.
+`src/core.psm1`, and the app list and settings live in `config/*.json` on GitHub (read at start; edited by hand in the repo, never by the menu). `win11-tweaks.ps1` is the registry tweaks menu.
 Front door: [README.md](README.md). Docs index and ownership map: [docs/architecture.md](docs/architecture.md#ownership-map).
 
 ## Session continuity: resume without a handover
@@ -84,16 +84,14 @@ Front door: [README.md](README.md). Docs index and ownership map: [docs/architec
   `conhost.exe powershell.exe -File install.ps1 -DryRun`, drive it, screenshot). Any key-sending helper must find
   the kit window by title and abort if it can't; never send keys blind.
 - **Config lives on GitHub, not in the deployed copies.** `config/catalog.json`, `settings.json` and
-  `winget-id-overrides.json` on `main` are the single home. The menu edits them only through
-  `Save-KitConfigChange` (gh contents API, sha + one conflict retry). Never write config into a deployed folder or
-  OneDrive. Every operation must be a re-appliable change on the parsed document (that's what makes the retry safe).
-- **Menu commits are Daniel's commits:** plain messages like `config: add 7-Zip (from ATHENA)`, no co-author line.
-  The kit never stores tokens; gh holds the sign-in. Keep `config/*.json` in canonical form
-  (`ConvertTo-KitJsonDocument`: ASCII, one item per line); `test-config.ps1` fails otherwise.
+  `winget-id-overrides.json` on `main` are the single home; deployed copies only read them (raw URL → cache →
+  bundled copy). Never write config into a deployed folder or OneDrive.
+- **The menu never writes config.** Config changes are made in the repo (`config/*.json`, canonical form via
+  `ConvertTo-KitJsonDocument`: ASCII, one item per line); `test-config.ps1` fails otherwise. Learned winget-ID heals
+  stay on the PC that found them (`cache\local-overrides.json`); they are never pushed.
 - **App `Id`s are never reused:** removing moves an entry to `Removed` (restorable); a new Id is above every Id in
   Packages, Removed and `RetiredIds`.
-- **Tests never write to `main`.** Real commits only via `tools/test-config.ps1 -Write`, on a throwaway branch that
-  it deletes afterwards. Everything else runs offline on scratch folders (`file:///` config/zip URLs).
+- **Tests never write to GitHub.** Everything runs offline on scratch folders (`file:///` config/zip URLs).
 - **Self-update must never strand a PC:** any failure keeps the running copy; under `irm | iex` the loader must
   `return`, never `exit`. Test scripts that start install.ps1 point `MYWINKIT_RAW_URL` at a non-existent file so
   they test *this* copy, not GitHub main.
@@ -109,7 +107,7 @@ powershell -File tools/lint.ps1 -ParseOnly                       # parse under W
 powershell -File tools/test-core.ps1                             # catalogue + engine (add -Online for scan + vendor pages)
 pwsh -File tools/smoke-tui.ps1                                   # Spectre menu, scripted keys
 powershell -ExecutionPolicy Bypass -File tools/smoke-loader.ps1  # loader decisions + classic menu
-powershell -ExecutionPolicy Bypass -File tools/test-config.ps1  # config read/write (dry), self-update, irm|iex (add -Write: throwaway branch)
+powershell -ExecutionPolicy Bypass -File tools/test-config.ps1  # config read chain + canonical form, self-update, irm|iex
 pwsh -File tools/render-screens.ps1 -OutDir <dir>                # capture every screen (.txt + truecolor .ans)
 ```
 

@@ -26,7 +26,8 @@ to the classic menu, or `-DryRun` to see what would run without installing anyth
 
 Most installs need winget (App Installer). If it's missing, the menu opens its Microsoft Store page.
 
-**Without OneDrive:** download the repo zip from GitHub (private: sign in first), unzip, double-click `install.cmd`.
+**Without OneDrive:** download the repo zip from GitHub, unzip, double-click `install.cmd`, or use the one-liner
+under [Updates and installing on a new PC](#updates-and-installing-on-a-new-pc).
 
 ## The modern menu
 
@@ -46,7 +47,9 @@ available, · not installed, × failed, ↔ healed. In dry run every screen carr
 - **Update AI tools:** a table of Claude Code, Claude Desktop, Antigravity, Antigravity IDE and the `agy` CLI with
   installed vs latest versions, then one key updates them all.
 - **Windows tweaks:** opens the tweaks menu (here, or as administrator for all 4 fixes).
-- **Settings:** remove desktop shortcuts that installers create (on by default), dry run, open the log folder.
+- **Settings (read-only):** where the config came from (GitHub, cached copy or bundled copy), the current settings,
+  package-ID fixes this PC learned and the file they are in; plus a dry-run toggle for this session and the log
+  folder.
 
 Each run ends with a results table and writes a log to `%TEMP%\my-win-kit\`.
 
@@ -77,19 +80,17 @@ run it as administrator for that one.
 
 ## Settings and the package list live on GitHub
 
-**Settings → Manage packages** (modern menu): tick packages in or out of the recommended set (Space), remove one
-(`d`, restorable), add one by searching winget and the Microsoft Store or by its exact winget ID (pick a group, new
-or existing, and on/off). Settings also holds the shared options (desktop-shortcut cleanup, start in dry run).
+`config/catalog.json` (the apps), `config/settings.json` (desktop-shortcut cleanup, start in dry run) and
+`config/winget-id-overrides.json` in this repo are the copy that counts. Every PC reads the latest from GitHub when
+the kit starts (falling back to its last cached copy, then to the copy that came with the kit, when offline). No
+sign-in is needed: the repo is public.
 
-Every change is a **commit to `config/*.json` in this GitHub repo**, made from whichever PC you are on, with no
-clone needed. Every PC reads the latest config from GitHub when the kit starts (falling back to its last cached
-copy, then to the copy that came with the kit, when offline). The first save on a PC offers to install the GitHub
-CLI and to sign in (browser + one-time code); the kit never stores tokens itself. In dry run you see the commit that
-would be made, and nothing is pushed.
+**The menu never changes config.** To change it, edit `config/*.json` in the repo (see below), commit and push to
+`main`; every PC picks it up at its next start. Settings in the menu shows read-only what a PC is using.
 
 ## Updates and installing on a new PC
 
-The kit updates itself: when GitHub has a newer version it asks once ("Update kit 2.3.0 -> 2.4.0? [Y/n]"),
+The kit updates itself: when GitHub has a newer version it asks once ("Update kit 2.4.0 -> 2.5.0? [Y/n]"),
 downloads it into `%LOCALAPPDATA%\my-win-kit\app\`, checks it, and runs it. On a PC without the OneDrive folder
 (needs the repo to be public):
 
@@ -98,20 +99,22 @@ irm https://raw.githubusercontent.com/1nst4ll/my-win-kit/main/install.ps1 | iex
 ```
 ## Adding or changing an app in the repo
 
-1. Easiest: Settings → Manage packages in the menu. By hand: edit [config/catalog.json](config/catalog.json), one
-   line per app: `Id` (permanent, never reused), `Name`, `Group`, `On` (in the recommended set), `Method`, `Ref`,
-   `Desc`. Fields: [docs/architecture.md](docs/architecture.md#catalog-fields).
+1. Edit [config/catalog.json](config/catalog.json), one line per app: `Id` (permanent, never reused; to drop an
+   app, move its line to `Removed`), `Name`, `Group`, `On` (in the recommended set), `Method`, `Ref`, `Desc`.
+   Fields: [docs/architecture.md](docs/architecture.md#catalog-fields). Keep one item per line and ASCII only:
+   `tools/test-config.ps1` checks the canonical form.
 2. For winget, find the ID with `winget search <name>`. For a vendor one-liner use `Method = 'script'` and the
    URL. For a download-page installer add a `Direct` entry (page, link regex, signer, silent args).
-3. Run `powershell -File tools\test-core.ps1` (catalogue checks + dry run).
-4. Commit on `main`. The commit hook publishes it to OneDrive.
+3. Run `powershell -File tools\test-core.ps1` (catalogue checks + dry run) and `tools\test-config.ps1`.
+4. Commit on `main` and push. PCs read the new config from GitHub at their next start; the commit hook also
+   publishes the kit files to OneDrive.
 
 ## Self-healing package IDs
 
-When a winget ID stops working, the engine searches for the replacement and retries. It saves each fix to
-`config/winget-id-overrides.json` on GitHub (a commit when the GitHub CLI is signed in; otherwise it waits on that
-PC until you push it from Settings), so every PC gets it. To keep one for good, put the new ID into
-`config/catalog.json` and drop the entry from the overrides file.
+When a winget ID stops working, the engine searches for the replacement and retries. It keeps each fix on that PC
+(`%LOCALAPPDATA%\my-win-kit\cache\local-overrides.json`; Settings shows the count and the file) and uses it at every
+start. To share a fix with every PC, copy it into `config/winget-id-overrides.json` in the repo, or better, put the
+new ID straight into `config/catalog.json`.
 
 ## Working on the kit
 
@@ -128,5 +131,5 @@ pwsh -File tools/lint.ps1                                  # parse + PSScriptAna
 powershell -File tools/test-core.ps1                       # engine + catalogue under 5.1
 pwsh -File tools/smoke-tui.ps1                             # modern menu with scripted keys
 powershell -ExecutionPolicy Bypass -File tools/smoke-loader.ps1   # loader + classic menu
-powershell -ExecutionPolicy Bypass -File tools/test-config.ps1    # GitHub config, self-update, irm | iex (offline)
+powershell -ExecutionPolicy Bypass -File tools/test-config.ps1    # config read chain, self-update, irm | iex (offline)
 ```

@@ -28,8 +28,6 @@ $screens = [ordered]@{
     '4-update-ai'         = 'DownArrow,Enter,End,Enter,Escape,Home,DownArrow,Enter,Enter,text:q'
     '5-tweaks'            = 'DownArrow,DownArrow,Enter,Enter,Enter,text:q'
     '6-settings'          = 'DownArrow,DownArrow,DownArrow,Enter,Escape,text:q'
-    '7-manage-list'       = 'DownArrow,DownArrow,DownArrow,Enter,Enter,Enter,DownArrow,Spacebar,text:d,Escape,Escape,Escape,Escape,text:q'
-    '8-manage-search'     = 'DownArrow,DownArrow,DownArrow,Enter,Enter,DownArrow,Enter,text:telegram,Enter,Escape,Escape,Escape,text:q'
 }
 $esc = [char]27
 foreach ($name in $screens.Keys) {
@@ -49,9 +47,9 @@ foreach ($name in $screens.Keys) {
 $env:MYWINKIT_FORCE_VT = '1'
 $cl = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'install.ps1') -Classic -DryRun -ClassicTestInput '2;I;y;;Q' 2>&1 | Out-String
 $env:MYWINKIT_FORCE_VT = ''
-Set-Content -LiteralPath (Join-Path $OutDir '9-classic.ans') -Value $cl -Encoding utf8
-Set-Content -LiteralPath (Join-Path $OutDir '9-classic.txt') -Value ($cl -replace "$esc\[[0-9;]*m", '') -Encoding utf8
-Write-Host ("  {0,-22} {1,6} chars ansi" -f '9-classic', $cl.Length)
+Set-Content -LiteralPath (Join-Path $OutDir '7-classic.ans') -Value $cl -Encoding utf8
+Set-Content -LiteralPath (Join-Path $OutDir '7-classic.txt') -Value ($cl -replace "$esc\[[0-9;]*m", '') -Encoding utf8
+Write-Host ("  {0,-22} {1,6} chars ansi" -f '7-classic', $cl.Length)
 
 # Rows per screen come from the menu itself (SCREEN-HEIGHTS, budget 30).
 Remove-Item -LiteralPath $env:MYWINKIT_STATE_DIR -Recurse -Force -ErrorAction SilentlyContinue

@@ -2,6 +2,32 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-25: read-only config, menu no longer writes to GitHub, kit v2.4.0 (branch `rebuild-tui`)
+
+- Daniel: "we cannot guarantee this can we at least do github download for deployed version and i will change
+  settings from repo when needed". In-menu saving needed gh installed and signed in plus real keyboard entry on
+  every PC, none of it tested outside this one.
+- **Kept:** deployed copies read `config/*.json` from GitHub (raw URL → cache → bundled copy) and self-update from
+  GitHub (version check, zip download, `irm | iex` bootstrap).
+- **Removed from `src/core.psm1`:** `Save-KitConfigChange`, `Add-KitPackage`, `Set-KitPackageDefault`,
+  `Remove-KitPackage`, `Restore-KitPackage`, `Set-KitSetting`, `Push-KitPendingOverrides`, `Set-KitConfigMemoryOnly`,
+  `Get-KitNextId`, `Get-KitRemovedPackages`, `Find-KitWingetPackages`, `Test-KitWingetId`, and every gh helper
+  (`Get-KitGh`, `Invoke-KitGh`, `Test-KitGhLogin`, `Get-KitGhUser`, `Get-KitGhFile`). The `gh api` read fallback
+  for a private repo went too: the repo is public, so reads never need gh.
+- **Learned heals** stay on the PC that found them (`cache\local-overrides.json`, was `pending-overrides.json`) and
+  are never pushed; Settings shows the count and the file so Daniel can copy them into the repo.
+- **Modern menu:** Manage packages (list, search/add, add by Id, removed list), the editable Settings toggles, the
+  GitHub account row and `Confirm-GitHubWrite` (gh install + `gh auth login`) are gone, with `Read-KitText`.
+  Settings is now one read-only panel: config source, `removeShortcuts` / `dryRunByDefault`, package-ID fixes in
+  use and learned on this PC, and "To change config, edit config/*.json in the my-win-kit repo on GitHub." It keeps
+  the session dry-run toggle and the log folder. Classic menu: only the memory-only call and the `gh` source label.
+- **Tests:** `test-config.ps1` loses the dry-run edit, pending-push and `-Write` (throwaway-branch commits)
+  sections; adds canonical-form checks for all three config files, catalogue Id checks (unique across Packages +
+  Removed, no `RetiredIds` reuse), local-heal checks and "no config-write functions exported". `smoke-tui.ps1`
+  drops the two Manage scenarios and the winget add scenario and gets one read-only Settings scenario with an
+  `Absent` list. `render-screens.ps1` drops the two Manage captures.
+- Docs: README, architecture (Configuration on GitHub is now read-only), CLAUDE.md config rules, STATUS.
+
 ## 2026-11-25: repo public, history cleaned
 
 - Daniel chose "rewrite, then go public" and "delete + recreate". All 12 commits rewritten to the GitHub noreply

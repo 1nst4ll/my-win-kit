@@ -14,15 +14,15 @@
 
     Self-healing winget IDs: a vanished ID is replaced by its successor, and a
     dead installer download falls back to older versions, then to the Store.
-    Heals persist to winget-id-overrides.json next to install.ps1, so they
-    sync to every PC through OneDrive.
+    Heals persist on this PC (cache\local-overrides.json); copy them into
+    config/winget-id-overrides.json in the repo to share them with every PC.
 .NOTES
     Keep ASCII-only and Windows PowerShell 5.1 compatible.
 #>
 
 Set-StrictMode -Version 2.0
 
-$script:KitVersion  = '2.3.0'   # bump with user-visible changes (shown in the menu banner)
+$script:KitVersion  = '2.4.0'   # bump with user-visible changes (shown in the menu banner)
 $script:KitRoot     = $null
 $script:BaseData    = $null
 $script:Catalog     = @()
@@ -51,22 +51,19 @@ function ConvertTo-KitPackage($h, [hashtable]$Order, [string]$Origin = 'config')
     }
 }
 
-# ================================================================ configuration (GitHub is the home)
+# ================================================================ configuration (GitHub is the home, read-only)
 # config/catalog.json, config/settings.json and config/winget-id-overrides.json live in the
-# GitHub repo. Every deployed copy reads the latest from GitHub at start-up and caches it;
-# edits from the menu are commits to the repo (gh api, contents endpoint).
-#   read:  GitHub raw (public repo) -> gh api (private repo, if signed in) -> cache -> bundled copy
-#   write: gh api PUT with the file's sha; on a conflict re-fetch, re-apply, retry once
+# GitHub repo (public). Every deployed copy reads the latest at start-up and caches it.
+# The menu never writes config: changes are made by hand in the repo.
+#   read: GitHub raw URL -> cache -> bundled copy (-> built-in defaults for settings/overrides)
 # Test/override hooks: MYWINKIT_REPO (owner/name), MYWINKIT_BRANCH, MYWINKIT_CONFIG_URL
-# (base URL or file:/// folder for reads), MYWINKIT_TEST_STALE_SHA=1 (forces one conflict).
+# (base URL or file:/// folder for reads).
 
 $script:Repo = if ($env:MYWINKIT_REPO) { $env:MYWINKIT_REPO } else { '1nst4ll/my-win-kit' }
 $script:Branch = if ($env:MYWINKIT_BRANCH) { $env:MYWINKIT_BRANCH } else { 'main' }
 $script:ConfigFiles = @('catalog.json', 'settings.json', 'winget-id-overrides.json')
 $script:Config = @{}          # file name -> parsed document (ordered hashtables)
-$script:ConfigSource = @{}    # file name -> @{ Kind = github|gh|cache|bundled|default; Detail }
-$script:ConfigMemoryOnly = $false
-$script:Removed = @()
+$script:ConfigSource = @{}    # file name -> @{ Kind = github|cache|bundled|default; Detail }
 $script:Warnings = [System.Collections.Generic.List[string]]::new()
 
 function Get-KitConfigBaseUrl {
@@ -146,50 +143,6 @@ function Test-KitConfigDoc([string]$Name, $Doc) {
     return $true
 }
 
-function Get-KitGh {
-    <# gh.exe path (PATH may be stale right after an install), or $null. #>
-    if ($env:MYWINKIT_GH -eq 'none') { return $null }   # tests: simulate 'gh not installed'
-    if ($env:MYWINKIT_GH -and (Test-Path -LiteralPath $env:MYWINKIT_GH)) { return $env:MYWINKIT_GH }
-    $c = Get-Command gh.exe -ErrorAction SilentlyContinue
-    if ($c) { return $c.Source }
-    foreach ($p in @((Join-Path $env:ProgramFiles 'GitHub CLI\gh.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\GitHub CLI\gh.exe'))) { if (Test-Path -LiteralPath $p) { return $p } }
-    return $null
-}
-
-function Invoke-KitGh {
-    <# Run gh with UTF-8 I/O; returns @{ Ec; Out (string) }. #>
-    param([string[]]$GhArgs)
-    $gh = Get-KitGh
-    if (-not $gh) { return @{ Ec = 127; Out = 'gh not installed' } }
-    $oldOut = [Console]::OutputEncoding
-    try {
-        try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch {}
-        $out = (& $gh @GhArgs 2>&1 | ForEach-Object { "$_" }) -join "`n"
-        $ec = $LASTEXITCODE
-    } finally { try { [Console]::OutputEncoding = $oldOut } catch {} }
-    return @{ Ec = [int]$ec; Out = $out }
-}
-
-function Test-KitGhLogin {
-    if (-not (Get-KitGh)) { return $false }
-    return ((Invoke-KitGh @('auth', 'status', '--hostname', 'github.com')).Ec -eq 0)
-}
-
-function Get-KitGhUser {
-    $r = Invoke-KitGh @('api', 'user', '--jq', '.login')
-    if ($r.Ec -eq 0) { return $r.Out.Trim() }
-    return $null
-}
-
-function Get-KitGhFile([string]$Name) {
-    <# Contents API read: @{ Sha; Text } or throws. #>
-    $r = Invoke-KitGh @('api', "repos/$($script:Repo)/contents/config/$($Name)?ref=$($script:Branch)")
-    if ($r.Ec -ne 0) { throw "gh api read failed: $($r.Out)" }
-    $j = $r.Out | ConvertFrom-Json
-    $text = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($j.content -replace '\s', '')))
-    return @{ Sha = [string]$j.sha; Text = $text }
-}
-
 function Read-KitConfigFile([string]$Name, [string]$KitRoot, [switch]$Offline) {
     <# Latest config: GitHub -> cache -> bundled. Updates $script:Config / $script:ConfigSource. #>
     $cache = Join-Path (Get-KitCacheDir) $Name
@@ -208,11 +161,6 @@ function Read-KitConfigFile([string]$Name, [string]$KitRoot, [switch]$Offline) {
             if (-not $is404 -and $base -notlike 'file:*') { $script:NetworkDown = $true }   # offline: skip the other files' timeouts
             Write-KitRunLog "config: $Name from $base failed: $msg"
             $doc = $null
-            # private repo: raw URLs 404 -> authenticated read through gh
-            if ($is404 -and -not $env:MYWINKIT_CONFIG_URL -and (Test-KitGhLogin)) {
-                try { $g = Get-KitGhFile $Name; $doc = ConvertFrom-KitJsonText $g.Text; [void](Test-KitConfigDoc $Name $doc); $src = @{ Kind = 'gh'; Detail = "gh api $($script:Repo)@$($script:Branch)" } }
-                catch { $doc = $null; Write-KitRunLog "config: $Name via gh failed: $($_.Exception.Message)" }
-            }
         }
         if ($doc) {
             try {
@@ -264,15 +212,15 @@ function Initialize-Kit {
 }
 
 function Update-KitOverrides {
-    <# Learned heals = config/winget-id-overrides.json + this PC's not-yet-pushed ones. #>
+    <# Learned heals = config/winget-id-overrides.json + the ones this PC learned itself. #>
     $script:Overrides = @{}
     $o = $script:Config['winget-id-overrides.json']
     if ($o -and $o.Contains('overrides') -and $o['overrides']) { foreach ($k in @($o['overrides'].Keys)) { $script:Overrides[[string]$k] = [string]$o['overrides'][$k] } }
-    foreach ($kv in (Get-KitPendingOverrides).GetEnumerator()) { $script:Overrides[$kv.Key] = $kv.Value }
+    foreach ($kv in (Get-KitLocalOverrides).GetEnumerator()) { $script:Overrides[$kv.Key] = $kv.Value }
 }
 
 function Update-KitCatalog {
-    <# Build groups + package list from the catalog document. Called after every change. #>
+    <# Build groups + package list from the catalog document (Removed entries stay hidden). #>
     $cat = $script:BaseData
     $groups = @($cat['Groups'] | ForEach-Object { [pscustomobject]@{ Key = [string]$_['Key']; Label = [string]$_['Label']; Letter = [string]$_['Letter'] } })
     $post = @($groups | Where-Object Key -eq 'POST')
@@ -294,13 +242,11 @@ function Update-KitCatalog {
         $p
     }
     $script:Catalog = @(foreach ($h in @($cat['Packages'])) { & $mk $h })
-    $script:Removed = @(foreach ($h in @($cat['Removed'])) { if ($h) { & $mk $h } })
 }
 
 function Get-KitVersion { return $script:KitVersion }
 function Get-KitGroups { return $script:Groups }
 function Get-KitCatalog { return $script:Catalog }
-function Get-KitRemovedPackages { return $script:Removed }
 function Get-KitWarnings { return @($script:Warnings) }
 function Get-KitLogPath { return $script:LogPath }
 function Get-KitOverrideCount { return $script:Overrides.Count }
@@ -311,231 +257,24 @@ function Get-KitSetting([string]$Name, $Default = $null) {
 }
 
 function Get-KitConfigInfo {
-    <# Where the config came from and where saves go (for the menu headers). #>
+    <# Where the config came from + the heals this PC learned (for the banner and Settings). #>
     $src = $script:ConfigSource['catalog.json']
     return [pscustomobject]@{
         Repo = $script:Repo; Branch = $script:Branch; Kind = $src.Kind; Detail = $src.Detail
-        MemoryOnly = $script:ConfigMemoryOnly; Pending = (Get-KitPendingOverrides).Count; Warnings = @($script:Warnings)
+        LocalFixes = (Get-KitLocalOverrides).Count; LocalFixesFile = (Get-KitLocalOverridesFile); Warnings = @($script:Warnings)
     }
 }
 
-function Set-KitConfigMemoryOnly {
-    <# Dry run: edits stay in memory for this session; saves only preview the commit. #>
-    param([bool]$On = $true)
-    $script:ConfigMemoryOnly = $On
-}
+function Get-KitLocalOverridesFile { return (Join-Path (Get-KitCacheDir) 'local-overrides.json') }
 
-function Get-KitPendingOverrides {
-    $f = Join-Path (Get-KitCacheDir) 'pending-overrides.json'
+function Get-KitLocalOverrides {
+    <# Heals learned on this PC (old -> new). Never pushed: copy them into config/winget-id-overrides.json by hand. #>
+    $f = Get-KitLocalOverridesFile
     $h = @{}
     if (Test-Path -LiteralPath $f) { try { $d = ConvertFrom-KitJsonText ([IO.File]::ReadAllText($f)); foreach ($k in @($d.Keys)) { $h[[string]$k] = [string]$d[$k] } } catch {} }
     return $h
 }
 
-function Save-KitConfigChange {
-    <#
-    .SYNOPSIS
-        Apply a change to one config file and commit it to GitHub.
-    .DESCRIPTION
-        $Apply is a scriptblock that changes the document in place (it may run
-        twice: after a conflict it re-runs on the freshly fetched file) and may
-        return a short summary. Returns @{ Status; Message; Commit; Preview }:
-          saved   - committed (Commit = commit URL)
-          dryrun  - memory-only mode: applied in memory, Preview = what would be committed
-          nogh / nologin - gh missing / not signed in (nothing changed)
-          failed  - API error or conflict after the retry (nothing changed)
-    #>
-    param([Parameter(Mandatory)][string]$File, [Parameter(Mandatory)][string]$Message, [Parameter(Mandatory)][scriptblock]$Apply)
-    $Message = "$Message (from $env:COMPUTERNAME)"
-    if ($script:ConfigMemoryOnly) {
-        $doc = $script:Config[$File]
-        [void](& $Apply $doc)
-        $script:Config[$File] = $doc; if ($File -eq 'catalog.json') { $script:BaseData = $doc }
-        Update-KitOverrides; Update-KitCatalog
-        Write-KitRunLog "config: DRY RUN would commit '$Message' to $($script:Repo)@$($script:Branch) config/$File"
-        return @{ Status = 'dryrun'; Message = $Message; Commit = ''; Preview = "$($script:Repo) @ $($script:Branch): config/$File - $Message" }
-    }
-    if (-not (Get-KitGh)) { return @{ Status = 'nogh'; Message = 'GitHub CLI (gh) is not installed.'; Commit = ''; Preview = '' } }
-    if (-not (Test-KitGhLogin)) { return @{ Status = 'nologin'; Message = 'gh is not signed in to github.com.'; Commit = ''; Preview = '' } }
-    for ($attempt = 1; $attempt -le 2; $attempt++) {
-        try { $cur = Get-KitGhFile $File; $doc = ConvertFrom-KitJsonText $cur.Text }
-        catch { return @{ Status = 'failed'; Message = "Could not read config/$File from GitHub: $($_.Exception.Message)"; Commit = ''; Preview = '' } }
-        try { [void](& $Apply $doc); [void](Test-KitConfigDoc $File $doc) }
-        catch { return @{ Status = 'failed'; Message = "Change not possible: $($_.Exception.Message)"; Commit = ''; Preview = '' } }
-        $text = ConvertTo-KitJsonDocument $doc
-        $sha = $cur.Sha
-        if ($env:MYWINKIT_TEST_STALE_SHA -eq '1' -and $attempt -eq 1) { $sha = '0000000000000000000000000000000000000000' }   # test hook: force a conflict
-        $body = [ordered]@{ message = $Message; content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text)); sha = $sha; branch = $script:Branch }
-        $tmp = Join-Path $env:TEMP ("my-win-kit-put-{0}.json" -f [guid]::NewGuid())
-        [IO.File]::WriteAllText($tmp, (ConvertTo-KitJsonValue $body), [Text.UTF8Encoding]::new($false))
-        try { $r = Invoke-KitGh @('api', '-X', 'PUT', "repos/$($script:Repo)/contents/config/$File", '--input', $tmp) }
-        finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
-        if ($r.Ec -eq 0) {
-            $url = ''; try { $url = ($r.Out | ConvertFrom-Json).commit.html_url } catch {}
-            $script:Config[$File] = $doc; if ($File -eq 'catalog.json') { $script:BaseData = $doc }
-            try { [IO.File]::WriteAllText((Join-Path (Get-KitCacheDir) $File), $text, [Text.UTF8Encoding]::new($false)) } catch {}
-            $script:ConfigSource[$File] = @{ Kind = 'github'; Detail = 'just saved' }
-            Update-KitOverrides; Update-KitCatalog
-            Write-KitRunLog "config: committed '$Message' to $($script:Repo)@$($script:Branch) config/$File $url (attempt $attempt)"
-            return @{ Status = 'saved'; Message = $Message; Commit = $url; Preview = '' }
-        }
-        $conflict = $r.Out -match 'HTTP 409|HTTP 422|does not match|is at'
-        Write-KitRunLog "config: commit attempt $attempt failed ($(if ($conflict) { 'conflict' } else { 'error' })): $($r.Out)"
-        if (-not $conflict -or $attempt -eq 2) {
-            $why = if ($conflict) { 'config/' + $File + ' changed on GitHub at the same time twice - try again.' } else { "GitHub refused the commit: $($r.Out)" }
-            return @{ Status = 'failed'; Message = $why; Commit = ''; Preview = '' }
-        }
-    }
-}
-
-function Get-KitNextId([System.Collections.IDictionary]$Cat = $script:BaseData) {
-    <# Above every Id ever used: packages, removed packages and RetiredIds. #>
-    $max = 0
-    foreach ($h in @($Cat['Packages']) + @($Cat['Removed'])) { if ($h -and [int]$h['Id'] -gt $max) { $max = [int]$h['Id'] } }
-    foreach ($r in @($Cat['RetiredIds'])) { if ($r -and [int]$r -gt $max) { $max = [int]$r } }
-    return $max + 1
-}
-
-function Add-KitPackage {
-    <#
-    Add a package to config/catalog.json (a commit). -Group = existing key, or
-    -NewGroupLabel to create one. Returns the Save-KitConfigChange result + Ok.
-    #>
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'On', Justification = 'used inside the change scriptblock')]
-    param(
-        [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Ref,
-        [ValidateSet('winget', 'msstore')][string]$Method = 'winget',
-        [string]$Group = 'OTHR', [string]$NewGroupLabel = '', [bool]$On = $false, [string]$Desc = ''
-    )
-    $dup = @($script:Catalog + $script:Removed | Where-Object { $_.Ref -eq $Ref -and $_.Method -eq $Method })
-    if ($dup.Count) {
-        $where = if ($script:Removed -contains $dup[0]) { ' (it is in the removed list - restore it instead)' } else { '' }
-        return @{ Ok = $false; Status = 'failed'; Message = "$Ref is already in the list as '$($dup[0].Name)'$where."; Commit = ''; Preview = '' }
-    }
-    if (-not $NewGroupLabel -and -not @($script:Groups | Where-Object Key -eq $Group).Count) { return @{ Ok = $false; Status = 'failed'; Message = "Unknown group '$Group'."; Commit = ''; Preview = '' } }
-    if (-not $Desc) { $Desc = "$Name ($Method $Ref)" }
-    $script:lastAddedId = 0
-    $apply = {
-        param($cat)
-        if (@($cat['Packages'] | Where-Object { $_['Ref'] -eq $Ref -and $_['Method'] -eq $Method }).Count) { throw "$Ref was added meanwhile" }
-        $g = $Group
-        if ($NewGroupLabel) {
-            $existing = @($cat['Groups'] | Where-Object { $_['Label'] -eq $NewGroupLabel })
-            if ($existing.Count) { $g = $existing[0]['Key'] }
-            else {
-                $n = 1; while (@($cat['Groups'] | Where-Object { $_['Key'] -eq "MY$n" }).Count) { $n++ }
-                $used = @($cat['Groups'] | ForEach-Object { $_['Letter'] })
-                $letter = @('F', 'H', 'J', 'K', 'V', 'Y') | Where-Object { $used -notcontains $_ } | Select-Object -First 1
-                $g = "MY$n"
-                $grp = [ordered]@{ Key = $g; Label = $NewGroupLabel; Letter = [string]$letter }
-                $gl = @($cat['Groups']); $pi = -1; for ($i = 0; $i -lt $gl.Count; $i++) { if ($gl[$i]['Key'] -eq 'POST') { $pi = $i } }
-                $cat['Groups'] = if ($pi -ge 0) { @($gl[0..($pi - 1)]) + @($grp) + @($gl[$pi..($gl.Count - 1)]) } else { $gl + @($grp) }
-            }
-        }
-        $id = Get-KitNextId $cat
-        $script:lastAddedId = $id
-        $cat['Packages'] = @($cat['Packages']) + @([ordered]@{ Id = $id; Name = $Name; Group = $g; On = $On; Method = $Method; Ref = $Ref; Desc = $Desc })
-        "add $Name"
-    }
-    $r = Save-KitConfigChange -File 'catalog.json' -Message "config: add $Name" -Apply $apply
-    $r.Ok = $r.Status -in 'saved', 'dryrun'
-    if ($r.Ok) { $r.Package = @($script:Catalog | Where-Object Id -eq $script:lastAddedId)[0]; $r.Message = "Added $Name (Id $($script:lastAddedId))." }
-    return $r
-}
-
-function Set-KitPackageDefault {
-    <# Recommended-set membership (default on/off): a commit to config/catalog.json. #>
-    param([Parameter(Mandatory)][int]$Id, [Parameter(Mandatory)][bool]$On)
-    $name = @($script:Catalog | Where-Object Id -eq $Id)[0].Name
-    $apply = { param($cat) $p = @($cat['Packages'] | Where-Object { [int]$_['Id'] -eq $Id }); if (-not $p.Count) { throw "no package with Id $Id" }; $p[0]['On'] = $On }
-    return Save-KitConfigChange -File 'catalog.json' -Message "config: $name default $(if ($On) { 'on' } else { 'off' })" -Apply $apply
-}
-
-function Remove-KitPackage {
-    <# Move a package to "Removed" (hidden from both menus, restorable, Id never reused). #>
-    param([Parameter(Mandatory)][int]$Id)
-    $name = @($script:Catalog | Where-Object Id -eq $Id)[0].Name
-    $apply = {
-        param($cat)
-        $p = @($cat['Packages'] | Where-Object { [int]$_['Id'] -eq $Id }); if (-not $p.Count) { throw "no package with Id $Id" }
-        $cat['Packages'] = @($cat['Packages'] | Where-Object { [int]$_['Id'] -ne $Id })
-        if (-not $cat.Contains('Removed')) { $cat['Removed'] = @() }
-        $cat['Removed'] = @($cat['Removed'] | Where-Object { $_ }) + @($p[0])
-    }
-    return Save-KitConfigChange -File 'catalog.json' -Message "config: remove $name" -Apply $apply
-}
-
-function Restore-KitPackage {
-    param([Parameter(Mandatory)][int]$Id)
-    $name = @($script:Removed | Where-Object Id -eq $Id)[0].Name
-    $apply = {
-        param($cat)
-        $p = @($cat['Removed'] | Where-Object { $_ -and [int]$_['Id'] -eq $Id }); if (-not $p.Count) { throw "Id $Id is not in the removed list" }
-        $cat['Removed'] = @($cat['Removed'] | Where-Object { $_ -and [int]$_['Id'] -ne $Id })
-        $cat['Packages'] = @($cat['Packages']) + @($p[0])
-    }
-    return Save-KitConfigChange -File 'catalog.json' -Message "config: restore $name" -Apply $apply
-}
-
-function Set-KitSetting {
-    <# One kit setting in config/settings.json (a commit). #>
-    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)]$Value)
-    $apply = { param($s) $s[$Name] = $Value }
-    return Save-KitConfigChange -File 'settings.json' -Message "config: setting $Name = $Value" -Apply $apply
-}
-
-function Push-KitPendingOverrides {
-    <# Learned heals made on this PC while not signed in -> config/winget-id-overrides.json. #>
-    $pend = Get-KitPendingOverrides
-    if (-not $pend.Count) { return @{ Status = 'saved'; Message = 'nothing to push'; Commit = ''; Preview = '' } }
-    $apply = { param($o) if (-not $o.Contains('overrides') -or -not $o['overrides']) { $o['overrides'] = [ordered]@{} }; foreach ($k in $pend.Keys) { $o['overrides'][$k] = $pend[$k] } }
-    $r = Save-KitConfigChange -File 'winget-id-overrides.json' -Message "config: $($pend.Count) learned package-ID fix(es)" -Apply $apply
-    if ($r.Status -eq 'saved') { Remove-Item -LiteralPath (Join-Path (Get-KitCacheDir) 'pending-overrides.json') -Force -ErrorAction SilentlyContinue; Update-KitOverrides }
-    return $r
-}
-function Find-KitWingetPackages {
-    <# winget search in the winget and msstore sources: Name, Id, Version, Source (read-only). #>
-    param([Parameter(Mandatory)][string]$Query, [int]$Max = 25)
-    $res = [System.Collections.Generic.List[object]]::new()
-    if (-not (Test-KitWinget)) { return @() }
-    foreach ($src in 'winget', 'msstore') {
-        $raw = @(Get-KitWingetRaw @('search', $Query, '--source', $src, '--accept-source-agreements', '--disable-interactivity'))
-        $sep = -1
-        for ($j = 0; $j -lt $raw.Count; $j++) { if ($raw[$j] -match '^-{4,}') { $sep = $j; break } }
-        if ($sep -lt 1) { continue }
-        $hdr = $raw[$sep - 1]
-        $iId = $hdr.IndexOf('Id'); $iVer = $hdr.IndexOf('Version')
-        $iNext = @($hdr.IndexOf('Match'), $hdr.IndexOf('Source'), $hdr.Length) | Where-Object { $_ -gt $iVer } | Sort-Object | Select-Object -First 1
-        if ($iId -lt 1 -or $iVer -le $iId) { continue }
-        $n = 0
-        for ($j = $sep + 1; $j -lt $raw.Count -and $n -lt $Max; $j++) {
-            $ln = $raw[$j]
-            if ($ln.Length -le $iId -or -not $ln.Trim()) { continue }
-            $id = $ln.Substring($iId, [Math]::Min($iVer - $iId, $ln.Length - $iId)).Trim()
-            if (-not $id) { continue }
-            $ver = if ($ln.Length -gt $iVer) { $ln.Substring($iVer, [Math]::Min($iNext - $iVer, $ln.Length - $iVer)).Trim() } else { '' }
-            $res.Add([pscustomobject]@{ Name = $ln.Substring(0, $iId).Trim(); Id = $id; Version = $ver; Source = $src })
-            $n++
-        }
-    }
-    return @($res)
-}
-
-function Test-KitWingetId {
-    <# Exact winget (then Store) Id lookup: @{ Name; Id; Version; Source } or $null. Read-only. #>
-    param([Parameter(Mandatory)][string]$Id)
-    if (-not (Test-KitWinget)) { return $null }
-    foreach ($src in 'winget', 'msstore') {
-        $raw = @(Get-KitWingetRaw @('show', '--id', $Id, '--exact', '--source', $src, '--accept-source-agreements', '--disable-interactivity'))
-        $found = $raw | Where-Object { $_ -match '^Found (.+) \[(.+)\]\s*$' } | Select-Object -First 1
-        if ($found -and $found -match '^Found (.+) \[(.+)\]\s*$') {
-            $name = $Matches[1]; $fid = $Matches[2]
-            $ver = ''; foreach ($l in $raw) { if ($l -match '^\s*Version:\s*(\S+)') { $ver = $Matches[1]; break } }
-            return [pscustomobject]@{ Name = $name; Id = $fid; Version = $ver; Source = $src }
-        }
-    }
-    return $null
-}
 function Get-KitRunOrder {
     <# Selected packages in install order: catalogue group order, POST always last. #>
     param([object[]]$Packages)
@@ -783,20 +522,19 @@ function Get-KitPkgVersion {
 
 function Save-KitOverride {
     <#
-    A learned heal (old -> new). Committed to config/winget-id-overrides.json when
-    gh is signed in; otherwise kept in the local cache (pending-overrides.json)
-    and offered for push on the next signed-in save (Settings).
+    A learned heal (old -> new), kept on this PC only (cache\local-overrides.json)
+    and applied at every start. The kit never pushes it: Settings shows the file,
+    so it can be copied into config/winget-id-overrides.json in the repo.
     #>
     param([string]$Old, [string]$New)
     $script:Overrides[$Old] = $New
-    $pf = Join-Path (Get-KitCacheDir) 'pending-overrides.json'
     try {
-        $pend = Get-KitPendingOverrides; $pend[$Old] = $New
+        $loc = Get-KitLocalOverrides; $loc[$Old] = $New
         if (-not (Test-Path -LiteralPath (Get-KitCacheDir))) { New-Item -ItemType Directory -Path (Get-KitCacheDir) -Force | Out-Null }
-        $o = [ordered]@{}; foreach ($k in ($pend.Keys | Sort-Object)) { $o[$k] = $pend[$k] }
-        [IO.File]::WriteAllText($pf, (ConvertTo-KitJsonDocument $o), [Text.UTF8Encoding]::new($false))
+        $o = [ordered]@{}; foreach ($k in ($loc.Keys | Sort-Object)) { $o[$k] = $loc[$k] }
+        [IO.File]::WriteAllText((Get-KitLocalOverridesFile), (ConvertTo-KitJsonDocument $o), [Text.UTF8Encoding]::new($false))
     } catch {}
-    if (-not $script:ConfigMemoryOnly -and (Test-KitGhLogin)) { [void](Push-KitPendingOverrides) }
+    Write-KitRunLog "heal: learned $Old -> $New (kept on this PC: $(Get-KitLocalOverridesFile))"
 }
 function Find-KitReplacementId {
     <#
@@ -1287,10 +1025,8 @@ function Remove-KitNewShortcuts {
     return $removed
 }
 
-Export-ModuleMember -Function Initialize-Kit, Get-KitVersion, Get-KitUpdates, Get-KitGroups, Get-KitRemovedPackages, Get-KitWarnings,
-    Get-KitSetting, Get-KitConfigInfo, Set-KitConfigMemoryOnly, Save-KitConfigChange, Add-KitPackage, Set-KitPackageDefault,
-    Remove-KitPackage, Restore-KitPackage, Set-KitSetting, Push-KitPendingOverrides, Get-KitPendingOverrides, Get-KitNextId,
-    Find-KitWingetPackages, Test-KitWingetId, Get-KitGh, Test-KitGhLogin, Get-KitGhUser, ConvertTo-KitJsonDocument, ConvertFrom-KitJsonText,
+Export-ModuleMember -Function Initialize-Kit, Get-KitVersion, Get-KitUpdates, Get-KitGroups, Get-KitWarnings,
+    Get-KitSetting, Get-KitConfigInfo, Get-KitLocalOverrides, ConvertTo-KitJsonDocument, ConvertFrom-KitJsonText,
     Get-KitCatalog, Get-KitLogPath, Get-KitOverrideCount,
     Get-KitRunOrder, Test-KitAdmin, Test-KitWinget, Get-KitArch, Update-KitPath, Start-KitLog, Write-KitLog, Write-KitRunLog,
     Get-KitState, Save-KitState, Get-KitInstalled, Get-KitToolVersion, Get-KitVersionText, Resolve-KitDirect,
