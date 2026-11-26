@@ -1,6 +1,8 @@
-# Per-machine learned state written next to install.ps1 by the self-healing
-# package-ID logic. Lives in the OneDrive copy on purpose; never in git.
-winget-id-overrides.json
+# Legacy per-machine files from kit versions before 2.3.0 (live config is config/*.json on GitHub)
+/winget-id-overrides.json
+/my-packages.json
+/my-packages.json.bak
+/my-packages.json.tmp
 
 # Logs / scratch
 *.log

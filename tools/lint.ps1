@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Lint every .ps1 in the repo: parser check + PSScriptAnalyzer.
+    Lint every .ps1/.psm1/.psd1 in the repo: parser check + PSScriptAnalyzer.
 .DESCRIPTION
     The one lint command, used locally and by .github/workflows/lint.yml.
       -ParseOnly   parser check only (CI runs this under Windows PowerShell 5.1
@@ -25,10 +25,7 @@ $Edition  = "PowerShell $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEditio
 
 # Each entry: File (repo-relative, forward slashes) + Check ('Parse51' or a PSSA rule name).
 $KnownIssues = @(
-    # No UTF-8 BOM + non-ASCII box/bullet characters: Windows PowerShell 5.1
-    # reads the file as ANSI and fails to parse it. Fix: re-save with a UTF-8 BOM.
-    @{ File = 'win11-tweaks.ps1'; Check = 'Parse51' }
-    @{ File = 'win11-tweaks.ps1'; Check = 'PSUseBOMForUnicodeEncodedFile' }
+    # (empty - win11-tweaks.ps1 BOM fixed 2026-11-25)
 )
 
 function Test-Known([string]$File, [string]$Check) {
@@ -49,8 +46,8 @@ function Report([string]$File, [int]$Line, [string]$Check, [string]$Message) {
     }
 }
 
-$files = @(Get-ChildItem -LiteralPath $RepoRoot -Recurse -File -Filter '*.ps1' |
-    Where-Object { $_.FullName -notmatch '[\\/]\.git[\\/]' })
+$files = @(Get-ChildItem -LiteralPath $RepoRoot -Recurse -File |
+    Where-Object { $_.Extension -in '.ps1', '.psm1', '.psd1' -and $_.FullName -notmatch '[\\/]\.git[\\/]' })
 
 Write-Host "lint: $($files.Count) script(s) under $Edition"
 

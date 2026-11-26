@@ -1,6 +1,7 @@
 name: lint
 
 # Quality gate only. Delivery to PCs is tools/publish.ps1 (OneDrive), not CI.
+# Nothing here installs software: every test runs the kit in -DryRun mode.
 on:
   push:
     branches: [main]
@@ -11,20 +12,41 @@ permissions:
   contents: read
 
 jobs:
-  parse-ps51:
-    name: Parse (Windows PowerShell 5.1)
+  ps51:
+    name: Windows PowerShell 5.1 (parse, core, loader + classic menu)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
       - name: Parser check under 5.1
         shell: powershell
         run: ./tools/lint.ps1 -ParseOnly
+      - name: Core engine tests (dry run)
+        shell: powershell
+        run: ./tools/test-core.ps1
+      - name: Loader decisions + classic menu (dry run)
+        shell: powershell
+        run: ./tools/smoke-loader.ps1
+      - name: GitHub config, self-update, irm|iex bootstrap (scratch folders, no network writes)
+        shell: powershell
+        run: ./tools/test-config.ps1
 
-  lint-pwsh:
-    name: Parse + PSScriptAnalyzer (pwsh)
+  pwsh:
+    name: PowerShell 7 (lint, core, Spectre menu)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
       - name: Parser check + PSScriptAnalyzer
         shell: pwsh
         run: ./tools/lint.ps1
+      - name: Core engine tests (dry run, resolves vendor download pages)
+        shell: pwsh
+        run: ./tools/test-core.ps1 -Online
+      - name: GitHub config, self-update, irm|iex bootstrap (scratch folders, no network writes)
+        shell: pwsh
+        run: ./tools/test-config.ps1
+      - name: Install PwshSpectreConsole
+        shell: pwsh
+        run: Install-PSResource -Name PwshSpectreConsole -Scope CurrentUser -TrustRepository -Quiet
+      - name: Spectre menu smoke test (scripted keys, dry run)
+        shell: pwsh
+        run: ./tools/smoke-tui.ps1

@@ -1,7 +1,7 @@
 # Architecture: how the kit works
 
-> **Owns:** how the scripts, publish and CI work now (present tense). **Does not cover:** counts, dates or open
-> bugs (→ [STATUS](STATUS.md)), history (→ [CHANGELOG](CHANGELOG.md)), usage (→ [README](../README.md)).
+> **Owns:** how the loader, menus, engine, publish and CI work now (present tense). **Does not cover:** counts,
+> dates or open bugs (→ [STATUS](STATUS.md)), history (→ [CHANGELOG](CHANGELOG.md)), usage (→ [README](../README.md)).
 
 ## Ownership map
 
@@ -9,111 +9,304 @@
 |---|---|---|
 | [README.md](../README.md) | What the kit is, how to run it, how to add a package. | Internals, counts. |
 | [CLAUDE.md](../CLAUDE.md) | Constraints, drift rules, continuity protocol, lint exclusions. | Current state. |
-| [STATUS.md](STATUS.md) | Every volatile fact: counts, last publish, row budget, open bugs, next step. | How it works. |
+| [STATUS.md](STATUS.md) | Every volatile fact: counts, last publish, open bugs, next step. | How it works. |
 | [CHANGELOG.md](CHANGELOG.md) | Dated history, append-only. | Current state. |
-| architecture.md (this) | How the scripts, publish and CI work. | Counts, history. |
-| `$pk` in [install.ps1](../install.ps1#L92) | The package catalogue (names, IDs, groups, defaults). | Never copy it into docs. |
+| architecture.md (this) | How the loader, menus, engine, publish and CI work. | Counts, history. |
+| [config/catalog.json](../config/catalog.json) **on GitHub `main`** | The app catalogue: groups, packages (name, method, Id/URL, default on/off, detection), removed packages, `RetiredIds`, the direct-download rules. Edited by hand in the repo (the menu never writes it). Every PC reads the live copy at start. Fields: [Catalog fields](#catalog-fields). | Never copy it into docs. |
+| [config/settings.json](../config/settings.json) **on GitHub `main`** | Kit settings shared by every PC (`removeShortcuts`, `dryRunByDefault`). Edited by hand in the repo; Settings shows them read-only. | Per-PC state (last selection, last failures: `%LOCALAPPDATA%\my-win-kit\state.json`). |
+| [config/winget-id-overrides.json](../config/winget-id-overrides.json) **on GitHub `main`** | Shared winget-ID heals (old → new, `msstore:` prefix = Store). Edited by hand. Heals a PC learns itself stay in that PC's `cache\local-overrides.json` until copied in here. | |
+| `$script:KitVersion` in [src/core.psm1](../src/core.psm1) | The kit version. The loader compares it with GitHub `main` for the self-update. | |
 | `$script:Fixes` in [win11-tweaks.ps1](../win11-tweaks.ps1#L87) | The tweak catalogue (registry keys, apply/check/revert). | |
 
 ## Repo layout and delivery
 
 ```
-install.cmd  install.ps1  win11-tweaks.ps1   # the kit: published to OneDrive, run on PCs
-tools/publish.ps1                            # repo → OneDrive copy (one way)
-tools/lint.ps1  PSScriptAnalyzerSettings.psd1
+install.cmd  install.ps1           # launcher + loader (Windows PowerShell 5.1, zero deps)
+config/catalog.json settings.json winget-id-overrides.json   # live config (GitHub main is the home)
+src/core.psm1                      # install engine, shared by both menus (5.1-compatible)
+src/tui-spectre.ps1                # modern menu (PowerShell 7.4+ + PwshSpectreConsole)
+src/tui-classic.ps1                # fallback menu (Windows PowerShell 5.1)
+win11-tweaks.ps1                   # registry tweaks menu (launched from both menus or on its own)
+tools/publish.ps1                  # repo → OneDrive copy (one way)
+tools/lint.ps1  tools/test-core.ps1  tools/smoke-tui.ps1  tools/smoke-loader.ps1
+PSScriptAnalyzerSettings.psd1
 .githooks/post-commit  post-merge  publish-on-main
-.github/workflows/lint.yml                   # quality gate only
+.github/workflows/lint.yml         # quality gate only
 docs/
 ```
 
-The kit files stay at the repo root. `install.cmd` launches `%~dpn0.ps1` (its own name with `.ps1`), so it must
-sit beside `install.ps1`, and the published folder is flat.
+`install.cmd` launches `%~dpn0.ps1` (its own name with `.ps1`), so it sits beside `install.ps1`. The published
+folder mirrors the repo: kit files at the top, `src/` beside them.
 
 | Channel | What | How | Trigger |
 |---|---|---|---|
-| OneDrive publish | the 3 kit files | `tools/publish.ps1` → `$env:OneDrive\[98] Shortcuts`, then OneDrive syncs every PC | git hook on commit/merge on `main` |
-| CI | lint | GitHub Actions, `windows-latest` | push to `main`, PRs |
+| OneDrive publish | `src/*`, `win11-tweaks.ps1`, `install.cmd`, `install.ps1` | `tools/publish.ps1` → `$env:OneDrive\[98] Shortcuts`, then OneDrive syncs every PC | git hook on commit/merge on `main` |
+| CI | lint + dry-run tests | GitHub Actions, `windows-latest` | push to `main`, PRs |
 | GitHub | source of truth + backup | `git push` | by hand |
 
-### publish.ps1
+## Start-up: install.ps1 (the loader)
 
-- Copies only `install.cmd`, `install.ps1` and `win11-tweaks.ps1`. It never deletes anything in the target or
-  touches other files there. In particular it leaves `winget-id-overrides.json` alone: installs run from
-  OneDrive write it there, and it syncs to every PC on purpose.
-- It skips files with identical SHA-256 (computed through .NET, because `Get-FileHash` fails to load in 5.1
-  when a git hook inherits a PowerShell 7 `PSModulePath`).
-- It skips kit files with uncommitted changes, so only committed content ships.
-- **Drift guard:** if a target file differs from the repo copy and its `LastWriteTime` is newer, it was edited on
-  another PC. Publish doesn't overwrite it: it warns, names the file and exits 2. `-Force` overrides. The guard
-  is time-based: if the repo file is edited again *after* the stray OneDrive edit, the repo copy is newer and
-  wins without a warning.
-- `Copy-Item` keeps the source timestamp, so after a publish both copies have the same `LastWriteTime`.
-- Every path call uses `-LiteralPath`, because `[98]` contains wildcard characters.
-- Exit codes: 0 = done, 1 = error, 2 = drift blocked.
+Runs on stock Windows PowerShell 5.1 with nothing installed.
 
-The hooks are POSIX `sh` (Git for Windows). They run `publish-on-main`, which exits early off `main`, calls
-`powershell.exe` (5.1, the same engine a fresh PC has), prints the result and always exits 0, so a publish
-problem never blocks a commit. They are turned on per clone with `git config core.hooksPath .githooks`.
+1. **Bootstrap:** TLS 1.2, `Unblock-File` on every kit file (mark-of-the-web), recreate `install.cmd` if missing.
+2. **Find PowerShell 7** (`Find-Pwsh`): checks `pwsh` on PATH plus the known install paths (PATH is stale right
+   after an install) and asks each candidate for its version. The best one wins.
+3. **Decide:**
+   - pwsh **7.4+** → `pwsh -NoProfile -ExecutionPolicy Bypass -File src\tui-spectre.ps1 -KitRoot <folder>`.
+     If that exits **3** (Spectre module unavailable) → classic menu.
+   - missing or older → asks "Install PowerShell 7 now? [Y/n]" (Enter = yes). `Install-Pwsh` tries
+     `winget install Microsoft.PowerShell`, then the official MSI from the latest GitHub release (its
+     Authenticode signer must be Microsoft Corporation; installs elevated). Then it re-finds pwsh by path and
+     starts the modern menu.
+   - declined or failed → `src\tui-classic.ps1` in the same 5.1 process.
+4. Test switches (no effect on normal use): `-NoPwsh` / env `MYWINKIT_SIMULATE_NO_PWSH=1` pretend pwsh is
+   absent, `-WhatIfLoader` prints the decision, `-Answer` answers the question, `-ClassicTestInput` feeds the
+   classic menu, `-Classic` forces it, `-DryRun` passes through to either menu.
 
-### lint.ps1 / CI
+## The engine: src/core.psm1
 
-`tools/lint.ps1` is the single lint entry point. It runs a parser check on every `.ps1`, then
-PSScriptAnalyzer (unless `-ParseOnly`). CI runs it twice. The 5.1 parse job matters because Windows PowerShell
-5.1 decodes BOM-less files as ANSI. `$KnownIssues` downgrades listed findings to warnings
-(`::warning` annotations in CI).
+No UI. Both menus call the same functions, so behaviour is identical in both.
 
-## install.ps1
+- **`Initialize-Kit -KitRoot`** loads `config/catalog.json` (see [Configuration on GitHub](#configuration-on-github-read-only)), turns each entry
+  into an object with a mutable `On`, and applies learned heals from `config/winget-id-overrides.json` plus this
+  PC's `cache\local-overrides.json` (old→new chains up to 5 hops; `msstore:` prefix switches channel).
+- **`Get-KitInstalled`** returns `Id → version` for everything installed: one `winget export --include-versions`
+  for all winget/Store IDs, plus per-package checks: `Appx` name (MSIX apps such as Claude Desktop), `Uninstall`
+  DisplayName regex (direct installers), `Exe` path + `Version` command (script installs such as `claude`,
+  `agy`). Odd winget version strings (`> 280.4`, `ad 9.8.0`) are reduced to the dotted number.
+- **`Invoke-KitPackage -Package -Installed -Mode install|update -DryRun -OnStatus`** is the single entry point.
+  It returns a result object (`Status` = installed | updated | current | done | failed | dryrun, `From`, `To`,
+  `Detail`, `Healed`, `Seconds`) and writes everything to a log in `%TEMP%\my-win-kit\`. By method:
+  - **winget / msstore:** `winget install --exact --silent`. `Get-KitWingetOutcome` classifies the exit: 0 = ok
+    (then `winget list` reads the new version); only winget's "nothing to do" codes = up to date
+    (`0x8A15002B` UPDATE_NOT_APPLICABLE, `0x8A15004F` UPGRADE_VERSION_NOT_NEWER, `0x8A150061`
+    PACKAGE_ALREADY_INSTALLED, `0x8A15010E` INSTALL_DOWNGRADE; `$script:WG_NOTHING_TO_DO`). Any other non-zero
+    exit is **failed**, installed or not (e.g. an upgrade whose installer failed), with the output line that
+    names the problem plus the code as `Detail` ("Installer failed with exit code: 1 (winget 0x8A150006)").
+    Self-healing: ID vanished (`0x8A150014`) → `Find-KitReplacementId` scores search hits (prefix/version
+    split +6, same tail +4, exact name +3, pre-release −3; ≥ 3 wins) and retries; download dead (404, hash
+    mismatch, nothing installed) → two previous versions, then the Store channel. Heals are saved on
+    this PC only (`cache\local-overrides.json`).
+  - **script:** the vendor's official `irm <url> | iex`, always in a **child** `powershell.exe`, so a vendor
+    `exit`/`throw` can't close the menu. When the tool is already installed and has an `Update` command
+    (`claude update`, `agy update`), that runs instead. `Interactive` scripts (MAS, WinUtil) share the console.
+  - **direct:** `Resolve-KitDirect` fetches the vendor's download page and pulls the current installer link with
+    the catalogue regex (per CPU arch), so every run gets the vendor's latest release. If the installed version
+    is already ≥ that, it reports up to date and downloads nothing. Otherwise it downloads to `%TEMP%`, requires
+    a **valid Authenticode signature from the catalogue's signer** (Google LLC), runs it silently and waits for
+    that process only. If the page no longer matches, it falls back to the `Fallback` winget ID for that run.
+  - **npm:** `npm install -g` (needs Node). **builtin:** `enable-rdp` (registry + NLA + firewall group,
+    elevated via UAC when needed; prints the Tailscale IP if present).
+  - `Requires` (git, npm) is checked after reloading PATH from the registry, so a tool installed earlier in the
+    same run is found.
+- **Child processes: `Invoke-KitProcess`.** Every non-interactive native program (winget, `claude`/`agy`
+  version and update, npm, the non-interactive `irm | iex` child, the RDP helper) runs through it, never through
+  `& exe`. It starts the program with `ProcessStartInfo` (`CreateNoWindow`, stdin/stdout/stderr redirected, both
+  streams read at once, UTF-8), so the child gets its own hidden console and returns `Ec`, `Out`, `Err` and
+  `Started`. `.cmd`/`.bat` files run via `cmd.exe /d /s /c`. Reason: PowerShell 7 in a conhost window switches
+  the console's VT processing off for as long as a `&`-started program runs, and Spectre's live progress and
+  spinners then print raw escape codes. Only `Interactive` scripts (MAS, WinUtil) and the tweaks menu ("Open
+  here") still share the console; nothing live is drawn while they run. `Enable-KitConsoleVt` switches VT back on (best effort, no-op when output is not a
+  console); both menus call it after the scan and after each package.
+- **`Get-KitRunOrder`** sorts by catalogue group order, then Id, with POST always last.
+- **`Get-KitLatestVersion`** (direct = vendor page, winget = `winget show`) feeds the "Update AI tools" table.
+- **State** (`%LOCALAPPDATA%\my-win-kit\state.json`, per PC, never synced): last selection, last failures,
+  the desktop-shortcut setting. `MYWINKIT_STATE_DIR` overrides the folder (tests).
+- **Desktop shortcuts:** snapshot before a run, delete new `.lnk` files after (setting, on by default).
 
-Top to bottom:
+## Modern menu: src/tui-spectre.ps1
 
-1. **Bootstrap** (L12): forces TLS 1.2, unblocks itself (removes mark-of-the-web), and recreates `install.cmd`
-   next to itself if it's missing.
-2. **Layout + palette** (L33–90): fixed 120-column layout, 4 content columns at x = 6/34/62/90, Gruvbox-mapped
-   console colours, and one colour per group header.
-3. **Catalogue** (`$pk`, L92): `[pscustomobject]` rows `Id, On, N, W, S, G`. `$grpOrder` sets the group order
-   and install order. `$gk` maps hotkey letters to groups, and `$gl` holds the group labels. A snapshot of the
-   defaults backs the `Z` key.
-4. **ID overrides** (L187–222): loads `winget-id-overrides.json` from beside the script (or `%LOCALAPPDATA%` when
-   there's no script path). It follows old→new chains up to 5 hops. A value with the `msstore:` prefix switches
-   the source.
-5. **Buffered rendering** (L224–292): when the host supports VT, `X`/`XNL`/`Pad`/`Bar` append ANSI-coloured text
-   to a StringBuilder, and each frame goes out in one `[Console]::Write`. Without VT (e.g. ISE) they fall back
-   to per-call `Write-Host`. `$script:col` tracks the cursor column for padding.
-6. **Masonry menu** (`Build-Masonry`, L322): DEV is pinned as the column-4 sidebar. The other app groups pack
-   into columns 1–3 by height (first-fit-decreasing), and POST drops into the shortest of those columns. The
-   result is computed once. `Show-Menu` repaints in place (cursor home) and does a full clear only on first
-   paint, after sub-screens, or after a window resize.
-7. **Input grammar** (main loop, L1035): the standalone commands are `I`, `Q`, `N` and `Z`. Everything else is
-   tokens split on spaces or commas: a number toggles, `a-b` toggles a range, a group letter toggles the group
-   (all on if any is off), `*` turns everything on except POST, and `0` turns everything off. Unknown tokens
-   are flashed as "Ignored".
-8. **Install pipeline** (`Run-Install`, L896): sorts the selection by group order then Id, starts a transcript
-   in `%TEMP%`, and runs `winget source update`. It snapshots desktop `.lnk` files, runs `Inst` for each package
-   (POST always last, under a banner), deletes new shortcuts if `N` = DELETE, and prints a summary. Packages
-   that succeed are deselected, and failures stay selected so `I` retries them.
-9. **Per package** (`Inst`, L692): winget installs run in a background job behind a spinner
-   (`Invoke-JobSpinner`). `Get-PkgInfo` reads the installed version before and after, so the result shows
-   INSTALLED, UPDATED vX → vY, or up to date.
-10. **Self-healing:**
-    - **ID vanished** (exit `0x8A150014`): `Find-ReplacementId` searches winget and scores the candidates
-      (prefix or version split +6, same tail segment +4, exact name +3, pre-release −3). A score of 3 or more
-      wins, then it retries.
-    - **Download dead** (404 or hash mismatch, nothing installed yet): it tries the two previous versions, then
-      the Microsoft Store channel.
-    - Heals are saved with `Save-IdOverride`.
-11. **Custom installers** (`switch ($P.Id)`, L707): official `irm … | iex` installers via `RunCustom`, an npm
-    global install (needs Node), a check that Git is present first, and the RDP host enable. The RDP step writes
-    a temp script and runs it elevated (UAC prompt if needed): registry, NLA and firewall group. If Tailscale is
-    installed it prints the Tailscale IP.
-12. **Guards** (L997–1033): no winget → it opens the App Installer Store page and exits. It tries to grow the
-    console to the layout size and warns if the host refuses.
+PowerShell 7.4+ with **PwshSpectreConsole** (installed on first run with `Install-PSResource -Scope CurrentUser
+-TrustRepository`, falling back to `Install-Module`; exit 3 if neither works, and the reason goes to the screen
+and the run log). Spectre.Console .NET types draw everything (`Table`, `Rule`, `Panel`, `Status`, `Progress`,
+`FigletText`). **Input never uses Spectre prompts** (they have no Esc/back key): it comes from the kit's own
+picker, `Show-Picker`, built on `[Console]::ReadKey`.
+
+- **Console set-up (order matters):** the script switches the console to UTF-8 *before* importing the module,
+  because Spectre decides Unicode support once, when its console is created (a fresh console is code page 437:
+  too late = every glyph prints as `?`). It then creates Spectre's console explicitly with TrueColor + ANSI +
+  Unicode. Spectre's own detection turns colour off whenever `NO_COLOR` is set, and dev tools/agent shells export
+  `NO_COLOR=1` to every window they start, so the kit ignores `NO_COLOR` (logged) and only drops colour for its
+  own `MYWINKIT_NO_COLOR=1`. Window title: `my-win-kit · modern (PowerShell 7)`; the banner subtitle names the
+  engine (`modern · PowerShell 7.x · Spectre 2.x`).
+- **The picker (`Show-Picker`):** single- or multi-select. Keys: ↑↓ PgUp PgDn Home End move; Enter selects
+  (multi: continue); **Esc, Backspace or ← = back** on every screen (with a filter active, the first press clears
+  it); `/` = type-to-filter (multi-selects and search lists); multi: Space toggles (on a group header: the whole
+  group), `a`/`n` = whole group on/off; main menu: `q` quits (Esc does nothing there). **Pinned rows** (« Back,
+  and ► Continue on multi-selects) sit above the list and are never filtered or paged out. A footer always shows
+  the keys, including `esc back`. **Sizing:** the list height = window height − rows already used on the screen
+  − title/pinned/footer rows, so the whole picker always fits. In a real console it reserves its rows (printing
+  newlines scrolls the window if needed) and then redraws in place (`SetCursorPosition` + `ESC[J`). Each row is
+  cut to the window width with `Limit-Markup` (markup-aware, never wraps), because Spectre grids still wrap.
+- **Tall tables are trimmed** so the action list stays on screen: the review table keeps window − 20 rows (new
+  and updates first), the results table window − 21 rows (failures, heals and changes first), each with a
+  "N more not shown" caption; the full list is in the log. Results get their own screen after the progress view.
+
+- **Look:** truecolor gruvbox (hex styles, never the 16 console colours). The main menu opens with a "MY WIN KIT"
+  Figlet banner (Spectre's built-in font, rendered once into a capture console, ~11 ms, then coloured column by
+  column along an orange → yellow → green → aqua gradient), a subtitle (kit version, PC, PowerShell, admin) and,
+  in dry run, a purple **DRY RUN** badge plus a full-width purple rule on every screen. Sub-screens use one
+  gradient title rule. Tables and panels are rounded with coloured borders; each catalogue group has its own
+  accent colour + icon (`$script:GroupStyle`). Quitting prints a gradient goodbye bar.
+- **Glyphs:** only characters present in **both Consolas and Cascadia Mono** (verified with WPF `GlyphTypeface`),
+  so classic conhost renders them without font fallback. Badges, used the same way in picker, review, progress
+  and results: `√` installed (green), `↑` update available / updated (yellow / green), `·` not installed (grey),
+  `×` failed (red), `↔` healed (aqua), `○` dry run (purple), `=` up to date (aqua). ✓ ✗ ↻ are missing from Consolas
+  (and ✗ ↻ from Cascadia Mono), so they are not used. The spinner is Spectre's `Point` (`∙●∙`); the default
+  `Dots` spinner uses Braille, which Consolas lacks.
+
+- **Update badges:** `Get-KitUpdates` (one `winget upgrade`, ~2-3 s, plus the vendor page for direct apps) runs
+  with the installed scan when the install screen opens, so the picker can show `↑ old → new`.
+- **Main menu:** Install or update apps · Update AI tools · Windows tweaks · Settings · Quit, each with an icon
+  and a one-line description.
+- **Install flow:**
+  1. scan installed apps (spinner);
+  2. "Start from": recommended set / recommended but only what's missing / everything with an update / retry
+     last failures / last selection / empty;
+  3. grouped multi-select (a group header toggles the whole group), preselected, with each app's badge,
+     installed version (→ available) and non-winget method;
+  4. review table (App · Group · How · On this PC · Will) with actions: install now / search to add or remove
+     (the picker opened in filter mode) / change the full list / main menu. Esc goes back one level each time:
+     review → app list → start from → main menu;
+  5. run: a Spectre `Progress` view (coloured `Point` spinner, description with live step text from `OnStatus`,
+     gruvbox progress bar, percentage, elapsed time): an overall task plus the current app (completed tasks
+     hide). Each finished app prints a badge line above the live view. Interactive items run after it, outside
+     the progress view. Then a rounded results table (badge, app, result, version from → to, time, note) and a
+     summary panel (`√ ok · ↔ healed · × failed · total time`, log path, removed shortcuts; purple in dry run,
+     red with failures, green otherwise).
+- **Update AI tools:** table of every `AI = $true` app (installed, latest, how it updates), then update all
+  installed or pick (missing ones get installed). Runs with `-Mode update`.
+- **Windows tweaks:** describes the 4 fixes and runs `win11-tweaks.ps1` here or elevated in a new window.
+- **Settings:** read-only (see [Configuration on GitHub](#configuration-on-github-read-only)); session dry-run
+  toggle, open the log folder.
+- **Smoke-test hook:** `-TestKeys` swaps `AnsiConsole.Console` for Spectre's `TestConsole` (120 × 30) and feeds
+  the keys to the picker; it forces dry run and locks it on, and prints `SCREEN-HEIGHTS: name=rows; ...` on exit
+  so tests can prove every screen fits 30 rows.
+
+## Configuration on GitHub (read-only)
+
+**Decision (2026-11-25, Daniel):** in-menu saving to GitHub can't be relied on (gh install, sign-in and real
+keyboard entry are untested on other PCs), so the menu never writes config. GitHub is the single home:
+`config/catalog.json`, `config/settings.json` and `config/winget-id-overrides.json` on `main`. Daniel edits them
+by hand in the repo; every deployed copy reads the latest at start-up. There is no local overlay, no import step and
+no GitHub CLI dependency.
+
+- **Read (`Read-KitConfigFile`, per file):** `https://raw.githubusercontent.com/<repo>/<branch>/config/<file>`
+  (4 s timeout, public repo, no sign-in) → `%LOCALAPPDATA%\my-win-kit\cache\<file>` (last good copy) → the copy
+  bundled with the kit (`config/` next to install.ps1) → built-in defaults (settings/overrides only). A network
+  failure skips the other files' timeouts. Every fetched copy is validated before it is used or cached; a damaged
+  cache is reported and skipped. The banner and the Settings screen show the source (GitHub, cached <time>,
+  bundled).
+- **Settings screen (modern menu):** read-only panel with the config source, the current values of
+  `removeShortcuts` and `dryRunByDefault`, the number of package-ID fixes in use and the ones learned on this PC
+  (with their file), and the line "To change config, edit config/*.json in the my-win-kit repo on GitHub." Its
+  only actions are session-level: the dry-run toggle and opening the log folder.
+- **Learned heals:** `Save-KitOverride` keeps each heal on the PC that found it
+  (`cache\local-overrides.json`, `Get-KitLocalOverrides`) and applies it at every start on top of
+  `config/winget-id-overrides.json`. Nothing is pushed; to share a heal, copy it into the repo file (or fix the
+  `Ref` in `catalog.json`).
+- **Hand edits:** keep the files in the canonical form `ConvertTo-KitJsonDocument` writes: ASCII-only JSON
+  (`\uXXXX` escapes), one group / package / direct rule per line. `test-config.ps1` fails when a file is not in
+  that form, when two packages (incl. `Removed`) share an Id, or when a package uses a `RetiredIds` entry. To drop
+  an app, move its line to `Removed` (hidden, Id kept); a new app takes an Id above every Id in Packages, Removed
+  and `RetiredIds` (the next free one is in STATUS).
+- **Test hooks:** `MYWINKIT_REPO`, `MYWINKIT_BRANCH`, `MYWINKIT_CONFIG_URL` (another base, or a `file:///` folder).
+
+### Catalog fields
+
+`Groups`: `Key`, `Label`, `Letter` (classic-menu hotkey). `Packages` (and `Removed`), required: `Id` (permanent,
+never renumbered or reused), `Name` (unique), `Group`, `On` (in the recommended set), `Method` (`winget` | `msstore`
+| `script` | `direct` | `npm` | `builtin`), `Ref` (winget ID | Store product ID | script URL | Direct key | npm
+package | builtin name), `Desc`. Optional: `AI` (listed under Update AI tools), `Interactive` (needs the console,
+never under a spinner), `Exe` (file that proves a script/npm install, env vars expanded), `Version` (command whose
+output has the installed version), `Update` (native updater, e.g. `claude update`), `Appx` (MSIX package name),
+`Uninstall` (regex on the uninstall DisplayName), `Fallback` (winget ID when a direct download can't be resolved),
+`Requires` (command that must exist first). `RetiredIds`: Ids that must never be reused. `Direct.<key>`: `Page`,
+`Pattern` (regex with `{arch}` / `{arch2}`), `Arch`, `Arch2`, `Signer` (Authenticode subject), `Args` (silent
+switches). Claude Desktop stays on winget on purpose: Anthropic's latest-download link refuses scripted clients.
+
+## Self-update and the one-line install
+
+The loader (Windows PowerShell 5.1) keeps every PC on the newest kit without git or OneDrive changes:
+
+- **Version check:** `KitVersion` from `src/core.psm1` on GitHub `main` (raw URL, 3 s timeout). Newer than the
+  running copy → "Update kit 2.4.0 -> 2.5.0? [Y/n]" once per version (a "no" is remembered in
+  `%LOCALAPPDATA%\my-win-kit\update.json`; no question when input is redirected, e.g. CI).
+- **Install:** the repo zip (`codeload.github.com/<repo>/zip/refs/heads/main`) → extract → verify (required files,
+  every script parses, catalog.json parses, version matches) → `%LOCALAPPDATA%\my-win-kit\app\<version>` (the three
+  newest kept). The loader then re-runs that copy's `install.ps1 -NoUpdate` with the same arguments. Any failure
+  (offline, private repo, bad zip) keeps the running copy. A newer copy already downloaded is used without asking.
+- **`irm https://raw.githubusercontent.com/1nst4ll/my-win-kit/main/install.ps1 | iex`** (fresh PC, public repo):
+  `$PSScriptRoot` is empty, so the loader downloads the kit into `app\<version>` the same way, starts it as a child
+  `powershell.exe`, and returns (never `exit`, which would close the user's window).
+- `OneDrive\[98] Shortcuts\install.cmd` keeps working as the launcher: it runs the published copy, which updates
+  itself from GitHub.
+- The repo is public, so none of this needs a sign-in. If it ever went private, the raw/zip URLs would return 404:
+  no self-update, no `irm | iex`, and config would come from the cache or the bundled copy.
+- Test hooks: `MYWINKIT_RAW_URL`, `MYWINKIT_ZIP_URL` (`file:///` allowed), `MYWINKIT_BOOTSTRAP_ARGS`,
+  `-UpdateAnswer`.
+
+## Run log (which front-end ran)
+
+One file per run in `%LOCALAPPDATA%\my-win-kit\logs\run-<date>-<pid>.log` (newest 30 kept; `MYWINKIT_STATE_DIR`
+moves it). The loader creates it and passes the path in `MYWINKIT_RUNLOG`; both menus append through
+`Write-KitRunLog`. It records the loader's PowerShell, the pwsh it found (path, version), the decision
+(modern / offer install / classic + reason), the front-end that actually started (with PwshSpectreConsole
+version, console colour system, Unicode, encoding, `NO_COLOR`), each main-menu choice, run summaries, the exit
+code, and any fallback reason. The loader also prints "Starting modern menu · PowerShell 7.x · Spectre" (or
+"Starting classic menu · …") before it hands off.
+
+## Classic menu: src/tui-classic.ps1
+
+Windows PowerShell 5.1, deliberately simple, fits 120 × 30. A 2-row block-letter banner (█ ▀ ▄) in the gradient,
+then one row block per group: `letter icon GROUP` and up to 4 cells `[x] 12 Name √` (badges as in the modern
+menu; updates come from `Get-KitUpdates`). Colour is 24-bit through VT escape codes when the host supports VT
+(`$Host.UI.SupportsVirtualTerminal` or Windows Terminal), otherwise the 16 console colours
+(`MYWINKIT_FORCE_VT=1` forces VT for captures). One prompt line takes tokens: numbers, ranges `a-b`, group letters, `*` (all
+except POST), `0` (none). Commands use letters that aren't group letters: `Z` recommended, `N` only missing,
+`I` install, `L` latest AI tools, `W` Windows tweaks, `Q` quit. Runs print one line per app using the same
+engine; failures stay selected for a retry. `-TestInput "a;b;c"` feeds answers (tests).
 
 ## win11-tweaks.ps1
 
-- StrictMode + `$ErrorActionPreference = 'Stop'`, 76-column layout, its own palette.
+- StrictMode + `$ErrorActionPreference = 'Stop'`, 76-column layout, its own palette. UTF-8 with BOM (it
+  contains box-drawing characters, and 5.1 needs the BOM to read them).
 - `$script:Fixes` (L87) is a list of hashtables `Id, Name, Description, Scope (HKCU|HKLM), Reboot, Apply,
-  Check, Revert`. Adding a tweak means adding an entry. Note that the menu's `'1','2','3','4'` switch case is
-  hard-coded.
+  Check, Revert`. The menu's `'1','2','3','4'` switch case is hard-coded.
 - `Show-Menu` runs each fix's `Check` live to show ON/OFF. `Invoke-Toggle` runs `Apply` or `Revert`, and
-  refuses HKLM fixes when not elevated.
-- `A`/`R` turn everything on or off. `Q` offers a reboot if any toggled fix has `Reboot = $true`.
+  refuses HKLM fixes when not elevated. `A`/`R` = all on/off. `Q` offers a reboot if needed.
+
+## publish.ps1
+
+- Copies only the kit file set: `src/*.ps1|psm1|psd1` first, then `config/*.json` (the bundled offline fallback;
+  live config is read from GitHub), `win11-tweaks.ps1`, `install.cmd`, and `install.ps1` **last**, so a PC that
+  syncs mid-publish never gets a loader whose `src/` is missing. It creates `src\` / `config\` in the target when
+  needed. It never deletes anything or touches other files there; `` names legacy root files from older
+  versions (`my-packages.json*`, `winget-id-overrides.json`) that must never be written.
+- Skips files with identical SHA-256 (computed through .NET: `Get-FileHash` fails to load in 5.1 when a git hook
+  inherits a PowerShell 7 `PSModulePath`) and files with uncommitted changes.
+- **Drift guard:** a target file that differs and is newer than the repo copy was edited on another PC: not
+  overwritten, named, exit 2. `-Force` overrides. Time-based: a later repo edit wins without a warning.
+- Every path call uses `-LiteralPath` (`[98]` contains wildcard characters). Exit codes: 0 done, 1 error,
+  2 drift blocked.
+
+The hooks are POSIX `sh` (Git for Windows). `publish-on-main` exits early off `main`, runs `publish.ps1` with
+`powershell.exe` (5.1, the engine a fresh PC has) and always exits 0, so a publish problem never blocks a
+commit. Turn them on per clone with `git config core.hooksPath .githooks`.
+
+## Tests and CI
+
+All tests run the kit in dry-run mode; nothing installs.
+
+| Script | Engine | Covers |
+|---|---|---|
+| `tools/lint.ps1` | 5.1 (`-ParseOnly`) + pwsh | parser check of every `.ps1/.psm1/.psd1`; PSScriptAnalyzer (pwsh) |
+| `tools/test-core.ps1` | 5.1 + pwsh | catalogue sanity (unique Ids/names, groups, methods, DEV/POST off, POST interactive), dry run of every package, version compare; `-Online` adds the installed scan and vendor-page resolution |
+| `tools/smoke-tui.ps1` | pwsh | the Spectre menu driven by scripted keys: install flow, search, AI table, read-only settings (incl. a seeded local fix; fails if removed screens reappear) + tweaks (+ "update all" when an AI tool is installed, local only) |
+| `tools/smoke-loader.ps1` | 5.1 | loader decisions (pwsh present / absent / forced classic), declining and dry-run accepting the PowerShell 7 install, a classic-menu run |
+| `tools/test-config.ps1` | 5.1 + pwsh | config read chain (remote / cache / corrupt cache / bundled / defaults), JSON writer (ASCII, round trip) and canonical form of all three `config/*.json`, catalogue Ids (unique across Packages + Removed, no `RetiredIds` reuse), heals kept local, no config-write functions exported, publish, self-update (accept / reuse / decline / broken zip), `irm \| iex` bootstrap |
+| `tools/render-screens.ps1 -OutDir <dir>` | pwsh (+5.1 for classic) | not a test: captures every screen as `.txt` (layout) and truecolor `.ans` (view with `Get-Content x.ans -Raw` in Windows Terminal) at 120 × 30, and prints the main-menu height |
+
+`.github/workflows/lint.yml` runs two jobs on `windows-latest`: **ps51** (parse, test-core, smoke-loader, test-config) and
+**pwsh** (lint, test-core -Online, test-config, install PwshSpectreConsole, smoke-tui). `$KnownIssues` in `lint.ps1`
+downgrades listed findings to warnings; it is empty.
