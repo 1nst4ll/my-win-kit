@@ -90,8 +90,9 @@ Write-KitRunLog ("modern: console ColorSystem={0} Ansi={1} Unicode={2} OutputEnc
     $cap0.ColorSystem, $cap0.Ansi, $cap0.Unicode, [Console]::OutputEncoding.WebName, $env:NO_COLOR, $env:MYWINKIT_NO_COLOR)
 $script:EngineLabel = "modern $(C 0x00B7) PowerShell $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor) $(C 0x00B7) Spectre $($script:SpectreVersion)"
 $wsz = ''; try { $wsz = "$([Console]::WindowWidth)x$([Console]::WindowHeight)" } catch {}
-Write-KitRunLog ("frontend: MODERN started (src\tui-spectre.ps1) - PowerShell {0} at {1}, PwshSpectreConsole {2}, host window {3}, Windows Terminal={4}, dryrun={5}, test={6}" -f `
-    $PSVersionTable.PSVersion, (Get-Process -Id $PID).Path, $script:SpectreVersion, $wsz, [bool]$env:WT_SESSION, [bool]$DryRun, [bool]$TestKeys)
+$script:Admin = Test-KitAdmin
+Write-KitRunLog ("frontend: MODERN started (src\tui-spectre.ps1) - PowerShell {0} at {1}, PwshSpectreConsole {2}, host window {3}, Windows Terminal={4}, dryrun={5}, test={6}, elevated={7}" -f `
+    $PSVersionTable.PSVersion, (Get-Process -Id $PID).Path, $script:SpectreVersion, $wsz, [bool]$env:WT_SESSION, [bool]$DryRun, [bool]$TestKeys, $(if ($script:Admin) { 'yes' } else { 'no' }))
 
 # ---------------------------------------------------------------- look
 
@@ -257,11 +258,11 @@ function Show-Banner {
     <# Main menu: gradient Figlet banner + subtitle naming the engine (+ dry-run band). #>
     Clear-Screen 'main menu'
     foreach ($l in (Get-BannerLines)) { Say " $l" }
-    $admin = if (Test-KitAdmin) { "[$($Hex.Green)]yes[/]" } else { "[$($Hex.Gray)]no[/]" }
     $ci = Get-KitConfigInfo
     $cfg = switch ($ci.Kind) { 'github' { 'config GitHub' } 'cache' { "config cached $($ci.Detail)" } 'bundled' { 'config bundled' } default { 'config ?' } }
     $cfgColor = if ($ci.Kind -eq 'github') { $Hex.Green } else { $Hex.Yellow }
-    $s = " [$($Hex.Gray)]v$(Get-KitVersion) $($Glyph.Dot)[/] [$($Hex.Aqua) bold]$(E $script:EngineLabel)[/] [$($Hex.Gray)]$($Glyph.Dot)[/] [$cfgColor]$(E $cfg)[/] [$($Hex.Gray)]$($Glyph.Dot) $(E $env:COMPUTERNAME) $($Glyph.Dot) admin[/] $admin"
+    $s = " [$($Hex.Gray)]v$(Get-KitVersion) $($Glyph.Dot)[/] [$($Hex.Aqua) bold]$(E $script:EngineLabel)[/] [$($Hex.Gray)]$($Glyph.Dot)[/] [$cfgColor]$(E $cfg)[/] [$($Hex.Gray)]$($Glyph.Dot) $(E $env:COMPUTERNAME)[/]"
+    if ($script:Admin) { $s += "  [#282828 on $($Hex.Orange) bold] ADMIN [/]" } else { $s += " [$($Hex.Gray)]$($Glyph.Dot) not admin[/]" }
     if ($script:DryRunOn) { $s += "  [#282828 on $($Hex.Purple) bold] $($Glyph.Dry) DRY RUN [/]" }
     Say $s
     Show-DryRunBand
@@ -273,6 +274,7 @@ function Show-Header([string]$Screen = '') {
     <# Sub-screens: one gradient title rule (+ dry-run band). #>
     Clear-Screen $Screen
     $t = "$(ConvertTo-Gradient 'my-win-kit' 10 1) [$($Hex.Line)]$($Glyph.Tri)[/] [$($Hex.Fg) bold]$(E $Screen)[/]  [$($Hex.Gray)]$(E $script:EngineLabel)[/]"
+    if ($script:Admin) { $t += "  [#282828 on $($Hex.Orange) bold] ADMIN [/]" }
     if ($script:DryRunOn) { $t += "  [#282828 on $($Hex.Purple) bold] DRY RUN [/]" }
     $r = [Spectre.Console.Rule]::new($t)
     $r.Justification = [Spectre.Console.Justify]::Left
@@ -338,7 +340,8 @@ function Show-Picker {
     $width = (Get-WindowWidth) - 1
     $fixed = $Title.Count + $Pinned.Count + 3        # + "more" line + 2 footer lines
     $room = (Get-WindowHeight) - (Get-LinesUsed) - 1
-    $rows = [Math]::Max(3, [Math]::Min($Items.Count, $room - $fixed))
+    # no items (Wait-Back): only the pinned row, no empty list lines
+    $rows = if ($Items.Count) { [Math]::Max(3, [Math]::Min($Items.Count, $room - $fixed)) } else { 0 }
     $reserve = $fixed + $rows
     $start = -1
     $cursor = if ($Cursor -ge 0) { $Cursor } elseif ($Items.Count) { $Pinned.Count } else { 0 }   # first real item
@@ -382,7 +385,7 @@ function Show-Picker {
             $lines.Add("$mark$box$label")
         }
         $below = $vis.Count - $offset - $rows
-        $more = if ($below -gt 0) { "[$($Hex.Gray)]  $($Glyph.Down) $below more[/]" } elseif ($vis.Count -eq 0) { "[$($Hex.Gray)]  (no match)[/]" } else { '' }
+        $more = if ($below -gt 0) { "[$($Hex.Gray)]  $($Glyph.Down) $below more[/]" } elseif ($vis.Count -eq 0 -and $Items.Count) { "[$($Hex.Gray)]  (no match)[/]" } else { '' }
         $lines.Add($more)
         if ($searching) {
             $lines.Add("[$($Hex.Orange) bold]  / [/][$($Hex.Fg)]$(E $filter)[/][$($Hex.Orange)]$($Glyph.Full)[/]  $(Get-KeyHint @('type|filter', 'enter|done', 'esc|clear'))")
@@ -489,7 +492,8 @@ function Select-One {
 }
 
 function Wait-Back([string]$Label = 'Back to main menu') {
-    [void](Select-One -Title @() -Items @(@{ Key = 'ok'; Label = "[$($Hex.Orange) bold]$($Glyph.Left) $(E $Label)[/]" }) -BackLabel $Label)
+    <# One pinned Back row only (cursor on it): Enter or Esc returns. #>
+    [void](Select-One -Title @() -Items @() -BackLabel $Label)
 }
 
 # ---------------------------------------------------------------- tables, panels, labels
@@ -779,7 +783,7 @@ function Invoke-Run {
         if ($r.Healed) { $note = "[$($Hex.Aqua)]$($Glyph.Heal) $(E $r.Healed)[/]" }
         elseif ($r.Status -in 'failed', 'dryrun' -and $r.Detail) { $note = "[$($Hex.Gray)]$(E $r.Detail)[/]" }
         # one line per row, so the screen height stays predictable (details are in the log)
-        Add-KitRow $t @((Get-ResultBadge $r), "[$($Hex.Fg)]$(E $r.Name)[/]", (Get-ResultText $r), (Get-VersionMarkup $r), "[$($Hex.Gray)]$($r.Seconds)s[/]", (Limit-Markup $note 46))
+        Add-KitRow $t @((Get-ResultBadge $r), (Limit-Markup "[$($Hex.Fg)]$(E $r.Name)[/]" 26), (Get-ResultText $r), (Limit-Markup (Get-VersionMarkup $r) 22), "[$($Hex.Gray)]$($r.Seconds)s[/]", (Limit-Markup $note 34))
     }
     if ($trim.Hidden) { $t.Caption = [Spectre.Console.TableTitle]::new("[$($Hex.Gray)]$($trim.Hidden) more not shown (failures and changes first) - full list in the log[/]") }
     Out-Render $t
@@ -791,8 +795,9 @@ function Invoke-Run {
     $border = if ($script:DryRunOn) { $Hex.Purple } elseif ($fl) { $Hex.Red } else { $Hex.Green }
     Out-Render (New-KitPanel $sum " [$border bold]Summary[/] " $border)
 
-    $script:State.LastSelection = @($Selection | ForEach-Object Id)
-    $script:State.LastFailed = @($results | Where-Object Status -eq 'failed' | ForEach-Object Id)
+    # rest-of-PC upgrades (negative Ids) are not catalogue apps: never remembered as a selection
+    $script:State.LastSelection = @($Selection | Where-Object { $_.Id -gt 0 } | ForEach-Object Id)
+    $script:State.LastFailed = @($results | Where-Object { $_.Status -eq 'failed' -and $_.Id -gt 0 } | ForEach-Object Id)
     if (-not $script:DryRunOn) { Save-KitState $script:State }
     return $results
 }
@@ -800,12 +805,12 @@ function Invoke-Run {
 # ---------------------------------------------------------------- screens
 
 function Show-Install {
-    if (-not $script:ScanDone) { Show-Header 'Install or update apps'; Invoke-Scan -Updates }
+    if (-not $script:ScanDone) { Show-Header 'Install apps'; Invoke-Scan -Updates }
     $step = 'start'; $sel = @()
     while ($true) {
         switch ($step) {
             'start' {
-                Show-Header 'Install or update apps'
+                Show-Header 'Install apps'
                 $def = @($script:Catalog | Where-Object Default)
                 $missing = @($def | Where-Object { -not $script:Installed.ContainsKey($_.Id) })
                 $upd = @($script:Catalog | Where-Object { $script:Updates.ContainsKey($_.Id) })
@@ -913,15 +918,15 @@ function Show-UpdateAI {
         $t.Caption = [Spectre.Console.TableTitle]::new($cap)
         Out-Render $t
         Say ''
-        # Only installed tools are updated here; the AI flag never installs anything (use Install or update apps for that).
+        # Only installed tools are updated here; the AI flag never installs anything (use Install apps for that).
         $have = @(Get-KitAiUpdateSet -Installed $script:Installed -Packages $ai)
         $items = @()
         if ($have.Count) {
             $items += @{ Key = 'all'; Label = "[$($Hex.Orange) bold]$($Glyph.Pointer) Update all installed[/] [$($Hex.Gray)]($(Get-Plural $have.Count "tool"))[/]" }
             $items += @{ Key = 'pick'; Label = "[$($Hex.Fg)]Pick which installed tools to update[/]" }
         }
-        $title = if ($have.Count) { "[$($Hex.Fg) bold]Update[/] [$($Hex.Gray)](installed tools only; new ones: Install or update apps)[/]" } else { "[$($Hex.Fg) bold]No AI tools installed on this PC[/] [$($Hex.Gray)](install them from Install or update apps)[/]" }
-        $choice = Select-One -Title $title -Items $items -BackLabel 'Back to main menu'
+        $title = if ($have.Count) { "[$($Hex.Fg) bold]Update[/] [$($Hex.Gray)](installed tools only; new ones: Install apps)[/]" } else { "[$($Hex.Fg) bold]No AI tools installed on this PC[/] [$($Hex.Gray)](install them from Install apps)[/]" }
+        $choice = Select-One -Title $title -Items $items -BackLabel 'Back'
         $sel = $null
         switch ($choice) {
             'all'  { $sel = $have }
@@ -942,7 +947,84 @@ function Show-UpdateAI {
         if (-not $sel -or $sel.Count -eq 0) { continue }
         [void](Invoke-Run -Selection $sel -Mode 'update' -Title 'Updating AI tools')
         Wait-Back
-        return
+        return 'ran'
+    }
+}
+
+function Show-UpdateAll {
+    <# Update everything: catalogue apps with updates (AI tools too) + every other app winget can upgrade. Review first. #>
+    Show-Header 'Update everything'
+    $script:plan = $null
+    [void](Enable-KitConsoleVt)
+    $st = [Spectre.Console.AnsiConsole]::Status()
+    $st.Spinner = [Spectre.Console.Spinner+Known]::Point
+    $st.SpinnerStyle = St $Hex.Orange
+    $st.Start("[$($Hex.Fg)]Checking what's installed on this PC...[/]", [Action[Spectre.Console.StatusContext]] {
+        param($ctx)
+        $script:Installed = Get-KitInstalled
+        $ctx.Status = "[$($Hex.Fg)]Looking for updates (catalogue + winget upgrade)...[/]"
+        $script:Updates = Get-KitUpdates -Installed $script:Installed
+        $script:plan = Get-KitUpdateAllPlan -Installed $script:Installed -Updates $script:Updates
+    })
+    [void](Enable-KitConsoleVt)
+    $script:ScanDone = $true
+    $plan = $script:plan
+    while ($true) {
+        Show-Header 'Update everything'
+        if ($plan.Run.Count) {
+            # rows that fit: window - header(3) - table frame + caption(5) - blank(1) - action list(~9) - spare(2)
+            $rows = @(@($plan.Kit | ForEach-Object { @{ Kind = 'kit'; P = $_ } }) + @($plan.Other | ForEach-Object { @{ Kind = 'pc'; P = $_ } }))
+            $trim = Get-TrimmedRows $rows ([Math]::Max(4, (Get-WindowHeight) - 20)) { if ($_.Kind -eq 'kit') { 0 } else { 1 } }
+            $t = New-KitTable @(' ', 'App', 'From', 'To', 'Where', 'How') $Hex.Aqua
+            foreach ($r in $trim.Rows) {
+                $p = $r.P
+                if ($r.Kind -eq 'kit') {
+                    $from = $script:Installed[$p.Id]; if (-not $from) { $from = 'installed' }
+                    $to = if ($script:Updates.ContainsKey($p.Id)) { "[$($Hex.Yellow)]$(E $script:Updates[$p.Id])[/]" } elseif ($p.Update) { "[$($Hex.Gray)]its own updater[/]" } else { "[$($Hex.Gray)]latest[/]" }
+                    Add-KitRow $t @("[$($Hex.Yellow) bold]$($Glyph.Up)[/]", (Limit-Markup "[$($Hex.Fg)]$(E $p.Name)[/]" 30), (Limit-Markup (E $from) 18), $to, "[$($Hex.Orange)]kit app[/]", (Get-MethodLabel $p))
+                } else {
+                    Add-KitRow $t @("[$($Hex.Yellow) bold]$($Glyph.Up)[/]", (Limit-Markup "[$($Hex.Fg)]$(E $p.Name)[/]" 30), (Limit-Markup (E $p.Current) 18), (Limit-Markup "[$($Hex.Yellow)]$(E $p.Latest)[/]" 18), "[$($Hex.Blue)]other on this PC[/]", 'winget upgrade')
+                }
+            }
+            $cap = "[$($Hex.Orange)]$(Get-Plural $plan.Kit.Count 'kit app')[/] [$($Hex.Gray)]$($Glyph.Dot)[/] [$($Hex.Blue)]$(Get-Plural $plan.Other.Count 'other app') on this PC[/]"
+            if ($plan.Excluded.Count) { $cap += " [$($Hex.Gray)]$($Glyph.Dot) $(@($plan.Excluded | Where-Object Why -ne 'in the catalogue').Count) skipped (pinned / unknown version)[/]" }
+            if ($trim.Hidden) { $cap += " [$($Hex.Gray)]$($Glyph.Dot) $($trim.Hidden) more not shown[/]" }
+            $t.Caption = [Spectre.Console.TableTitle]::new($cap)
+            Out-Render $t
+        } else {
+            Say "  [$($Hex.Green)]$($Glyph.Ok) Everything is up to date[/] [$($Hex.Gray)](0 kit apps, 0 other apps on this PC)[/]"
+        }
+        Say ''
+        $items = @()
+        if ($plan.Run.Count) {
+            $verb = if ($script:DryRunOn) { 'Simulate' } else { 'Update' }
+            $items += @{ Key = 'go'; Label = "[$($Hex.Orange) bold]$($Glyph.Pointer) $verb all now[/] [$($Hex.Gray)]($(Get-Plural $plan.Run.Count 'app'): $($plan.Kit.Count) kit + $($plan.Other.Count) other)[/]" }
+        }
+        switch (Select-One -Title "[$($Hex.Fg) bold]Review[/] [$($Hex.Gray)](interactive and post-install items are never part of this)[/]" -Items $items -BackLabel 'Back') {
+            'go' {
+                [void](Invoke-Run -Selection $plan.Run -Mode 'update' -Title 'Updating everything')
+                $script:ScanDone = $false
+                Wait-Back
+                return 'ran'
+            }
+            default { return }
+        }
+    }
+}
+
+function Show-Update {
+    <# Update submenu: everything (kit apps + rest of PC) or AI tools only. Esc = back to the main menu. #>
+    while ($true) {
+        Show-Header 'Update'
+        $items = @(
+            @{ Key = 'all'; Label = "[$($Hex.Orange) bold]$($Glyph.Up)[/] [$($Hex.Fg) bold]$(E 'Update everything'.PadRight(18))[/] [$($Hex.Gray)]installed kit apps with a newer version (AI tools too) + every other app winget can upgrade[/]" }
+            @{ Key = 'ai';  Label = "[$($Hex.Aqua) bold]$($Glyph.Up)[/] [$($Hex.Fg) bold]$(E 'Update AI tools'.PadRight(18))[/] [$($Hex.Gray)]only the AI tools installed here: Claude, Codex, Cursor, Antigravity $($Glyph.Ell)[/]" }
+        )
+        switch (Select-One -Title "[$($Hex.Fg) bold]Update[/]" -Items $items -BackLabel 'Back to main menu') {
+            'all' { if ((Show-UpdateAll) -eq 'ran') { return } }
+            'ai'  { if ((Show-UpdateAI) -eq 'ran') { return } }
+            default { return }
+        }
     }
 }
 
@@ -997,6 +1079,7 @@ function Get-SettingsPanel {
         @{ Name = 'removeShortcuts'; Default = $true;  Desc = 'remove desktop shortcuts that installers create' }
         @{ Name = 'dryRunByDefault'; Default = $false; Desc = 'start every run in dry run' }
         @{ Name = 'autoInstallPwsh'; Default = $true;  Desc = 'loader installs PowerShell 7 + Terminal unasked (each PC can override)' }
+        @{ Name = 'elevateAtStart';  Default = $true;  Desc = 'ask for admin once at start, then nothing else asks (each PC can override)' }
     )
     $first = $true
     foreach ($s in $known) {
@@ -1028,8 +1111,12 @@ function Show-Settings {
         $ap = Get-KitAutoInstallPwsh
         $apv = if ($ap.On) { "[$($Hex.Green) bold]on[/]" } else { "[$($Hex.Gray)]off[/]" }
         $aps = if ($ap.Source -eq 'this PC') { '(this PC)' } else { '(this PC: shared default)' }
+        $el = Get-KitElevateAtStart
+        $elv = if ($el.On) { "[$($Hex.Green) bold]on[/]" } else { "[$($Hex.Gray)]off[/]" }
+        $els = if ($el.Source -eq 'this PC') { '(this PC, from the next start)' } else { '(this PC: shared default)' }
         $items = @(
             @{ Key = 'auto'; Label = "[$($Hex.Fg)]Auto-install PowerShell 7 + Terminal on start:[/] $apv [$($Hex.Gray)]$aps[/]" }
+            @{ Key = 'elev'; Label = "[$($Hex.Fg)]Ask for administrator rights once at start:[/] $elv [$($Hex.Gray)]$els[/]" }
             @{ Key = 'dr';   Label = "[$($Hex.Fg)]Dry run now (show what would run, install nothing):[/] $dr [$($Hex.Gray)](this session)[/]" }
             @{ Key = 'log';  Label = "[$($Hex.Fg)]Open the log folder[/]" }
         )
@@ -1037,6 +1124,7 @@ function Show-Settings {
         switch (Select-One -Title @("[$($Hex.Fg) bold]Settings[/]", $runlog) -Items $items -BackLabel 'Back to main menu') {
             # per-PC preference in local-settings.json (never GitHub); tests only write into their scratch state folder
             'auto' { if (-not $script:Test -or $env:MYWINKIT_STATE_DIR) { Set-KitLocalPref -Name 'autoInstallPwsh' -Value (-not $ap.On) } }
+            'elev' { if (-not $script:Test -or $env:MYWINKIT_STATE_DIR) { Set-KitLocalPref -Name 'elevateAtStart' -Value (-not $el.On) } }
             'dr'  { if (-not $script:Test) { $script:DryRunOn = -not $script:DryRunOn } }   # smoke tests stay dry
             'log' {
                 $d = Join-Path $env:TEMP 'my-win-kit'
@@ -1064,8 +1152,8 @@ try {
     while ($true) {
         Show-Banner
         $menu = @(
-            @{ Key = 'install';  Icon = $Glyph.Pointer; Color = $Hex.Orange; Name = 'Install or update apps'; Desc = "pick from $($script:Catalog.Count) apps: install new ones, update the rest" }
-            @{ Key = 'ai';       Icon = $Glyph.Up;      Color = $Hex.Aqua;   Name = 'Update AI tools';        Desc = "the AI tools installed here to latest: Claude, Codex, Cursor, Antigravity $($Glyph.Ell)" }
+            @{ Key = 'install';  Icon = $Glyph.Pointer; Color = $Hex.Orange; Name = 'Install apps';           Desc = "pick from $($script:Catalog.Count) apps: add new ones (installed ones update too)" }
+            @{ Key = 'update';   Icon = $Glyph.Up;      Color = $Hex.Aqua;   Name = 'Update';                 Desc = 'everything installed (kit apps + the rest of the PC), or just the AI tools' }
             @{ Key = 'tweaks';   Icon = $Glyph.Sun;     Color = $Hex.Yellow; Name = 'Windows tweaks';         Desc = 'Spotlight icon, lock-screen tips, Start web search, auto-lock' }
             @{ Key = 'settings'; Icon = $Glyph.Menu;    Color = $Hex.Blue;   Name = 'Settings';               Desc = 'config (read-only), auto PowerShell 7 on this PC, dry run, log folder' }
             @{ Key = 'quit';     Icon = $Glyph.Left;    Color = $Hex.Gray;   Name = 'Quit';                   Desc = 'or press q' }
@@ -1077,7 +1165,7 @@ try {
         Write-KitRunLog "menu: $k"
         switch ($k) {
             'install'  { Show-Install }
-            'ai'       { Show-UpdateAI }
+            'update'   { Show-Update }
             'tweaks'   { Show-Tweaks }
             'settings' { Show-Settings }
             default {

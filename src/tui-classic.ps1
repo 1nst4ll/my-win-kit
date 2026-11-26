@@ -15,6 +15,13 @@
 .PARAMETER TestInput
     Smoke test: answers separated by ";" fed to the prompts in order (then Q).
     Forces -DryRun. One string because `powershell -File` cannot pass arrays.
+.PARAMETER Auto
+    Unattended run (install.cmd /auto): no menu, no questions. Installs the
+    recommended apps that are missing and updates the installed ones
+    (Get-KitAutoPlan), skips what needs a person, prints the summary and
+    exits 0 (all ok) or 1 (something failed).
+.PARAMETER Pause
+    With -Auto: wait for Enter at the end.
 .NOTES
     Keep ASCII-only (glyphs come from [char] codes, all present in Consolas and
     Cascadia Mono) and Windows PowerShell 5.1 compatible.
@@ -24,7 +31,9 @@
 param(
     [Parameter(Mandatory)][string]$KitRoot,
     [switch]$DryRun,
-    [string]$TestInput
+    [string]$TestInput,
+    [switch]$Auto,
+    [switch]$Pause
 )
 
 $ErrorActionPreference = 'Continue'
@@ -97,7 +106,8 @@ $script:Banner = @(
     '# ^ #  #    ^_^_^ # # ^#   # # #  # '
 ) | ForEach-Object { $_.Replace('#', (C 0x2588)).Replace('^', (C 0x2580)).Replace('_', (C 0x2584)) }
 
-Write-KitRunLog ("frontend: CLASSIC started (src\tui-classic.ps1) - PowerShell {0} ({1}), truecolor VT={2}, dryrun={3}, test={4}" -f $PSVersionTable.PSVersion, $PSVersionTable.PSEdition, $script:VT, [bool]$DryRun, $script:Testing)
+$script:Admin = Test-KitAdmin
+Write-KitRunLog ("frontend: {5} started (src\tui-classic.ps1) - PowerShell {0} ({1}), truecolor VT={2}, dryrun={3}, test={4}, elevated={6}" -f $PSVersionTable.PSVersion, $PSVersionTable.PSEdition, $script:VT, [bool]$DryRun, $script:Testing, $(if ($Auto) { 'UNATTENDED (classic -Auto)' } else { 'CLASSIC' }), $(if ($script:Admin) { 'yes' } else { 'no' }))
 
 # ---------------------------------------------------------------- helpers
 
@@ -123,7 +133,7 @@ function Write-Badge($p) {
 if (-not (Test-KitWinget)) {
     Write-C '  winget (App Installer) is missing - most installs need it.' $Pal.Red
     Write-C '  Opening its Microsoft Store page; install it, then run install.cmd again.' $Pal.Fg
-    if (-not $script:Testing) { try { Start-Process 'ms-windows-store://pdp/?ProductId=9NBLGGH4NNS1' } catch {} }
+    if (-not $script:Testing -and -not $Auto) { try { Start-Process 'ms-windows-store://pdp/?ProductId=9NBLGGH4NNS1' } catch {} }
 }
 
 Write-C '  Checking what is installed on this PC and looking for updates...' $Pal.Gray
@@ -135,11 +145,12 @@ function Show-Menu {
     Clear-Kit
     $on = @($cat | Where-Object On).Count
     foreach ($b in $script:Banner) { Write-Host '  ' -NoNewline; Write-Gradient $b $b.Length }
-    Write-C "  v$(Get-KitVersion) $($Gl.Dot) classic menu $($Gl.Dot) Windows PowerShell $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor) $($Gl.Dot) " $Pal.Gray -NoNewline
+    Write-C "  v$(Get-KitVersion) $($Gl.Dot) classic menu $($Gl.Dot) PowerShell $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor) $($Gl.Dot) " $Pal.Gray -NoNewline
     Write-C "$on selected" $Pal.Orange -NoNewline
     $ci = Get-KitConfigInfo; $cfg = switch ($ci.Kind) { 'github' { 'config GitHub' } 'cache' { "config cached $($ci.Detail)" } default { "config $($ci.Kind)" } }
     Write-C " $($Gl.Dot) $cfg" $(if ($ci.Kind -eq 'github') { $Pal.Green } else { $Pal.Yellow }) -NoNewline
-    if ($DryRun) { Write-C "   $($Gl.Dry) DRY RUN - nothing will be installed" $Pal.Purple } else { Write-Host '' }
+    if ($script:Admin) { Write-C " $($Gl.Dot) " $Pal.Gray -NoNewline; Write-C 'ADMIN' $Pal.Orange -NoNewline }
+    if ($DryRun) { Write-C "   $($Gl.Dry) DRY RUN - nothing installs" $Pal.Purple } else { Write-Host '' }
     Write-Rule
     # One row block per group: header column (22) + 4 cells of 22
     foreach ($g in $groups) {
@@ -166,18 +177,20 @@ function Show-Menu {
     Write-Rule
     Write-C "  $($Gl.Ok) installed  " $Pal.Green -NoNewline; Write-C "$($Gl.Up) update  " $Pal.Yellow -NoNewline; Write-C "$($Gl.Not) not installed    " $Pal.Gray -NoNewline
     Write-C 'toggle  1 5 12  20-27  letter  * all but X  0 none  Z recommended  N only new' $Pal.Gray
-    Write-C '  I' $Pal.Orange -NoNewline; Write-C ' install   ' $Pal.Fg -NoNewline; Write-C 'L' $Pal.Orange -NoNewline; Write-C ' latest AI tools   ' $Pal.Fg -NoNewline
-    Write-C 'W' $Pal.Orange -NoNewline; Write-C ' Windows tweaks   ' $Pal.Fg -NoNewline
-    $ap = Get-KitAutoInstallPwsh
-    Write-C 'K' $Pal.Orange -NoNewline; Write-C ' auto PowerShell 7 + Terminal: ' $Pal.Fg -NoNewline
-    Write-C $(if ($ap.On) { 'on' } else { 'off' }) $(if ($ap.On) { $Pal.Green } else { $Pal.Gray }) -NoNewline
-    Write-C $(if ($ap.Source -eq 'this PC') { ' (this PC)   ' } else { ' (shared)   ' }) $Pal.Gray -NoNewline
+    Write-C '  I' $Pal.Orange -NoNewline; Write-C ' install  ' $Pal.Fg -NoNewline; Write-C 'L' $Pal.Orange -NoNewline; Write-C ' update  ' $Pal.Fg -NoNewline
+    Write-C 'W' $Pal.Orange -NoNewline; Write-C ' tweaks  ' $Pal.Fg -NoNewline
+    # per-PC switches: value + where it comes from
+    foreach ($tg in @(@{ Key = 'K'; Label = ' auto PS7 + Terminal: '; Val = (Get-KitAutoInstallPwsh) }, @{ Key = 'V'; Label = ' admin at start: '; Val = (Get-KitElevateAtStart) })) {
+        Write-C $tg.Key $Pal.Orange -NoNewline; Write-C $tg.Label $Pal.Fg -NoNewline
+        Write-C $(if ($tg.Val.On) { 'on' } else { 'off' }) $(if ($tg.Val.On) { $Pal.Green } else { $Pal.Gray }) -NoNewline
+        Write-C $(if ($tg.Val.Source -eq 'this PC') { ' (this PC)  ' } else { ' (shared)  ' }) $Pal.Gray -NoNewline
+    }
     Write-C 'Q' $Pal.Orange -NoNewline; Write-C ' quit' $Pal.Fg
 }
 
-function Invoke-ClassicRun([object[]]$Selection, [string]$Mode = 'install') {
+function Invoke-ClassicRun([object[]]$Selection, [string]$Mode = 'install', [switch]$Unattended) {
     $order = @(Get-KitRunOrder $Selection)
-    Clear-Kit
+    if (-not $Unattended) { Clear-Kit }
     $log = Start-KitLog
     $before = @(); if (Get-KitSetting 'removeShortcuts' $true) { $before = @(Get-KitDesktopShortcuts) }
     $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -189,7 +202,7 @@ function Invoke-ClassicRun([object[]]$Selection, [string]$Mode = 'install') {
         $inst = $null; if ($installed.ContainsKey($p.Id)) { $inst = $installed[$p.Id] }
         Write-C ('  [{0}/{1}] ' -f ($i + 1), $order.Count) $Pal.Orange -NoNewline
         Write-C ('{0,-24} ' -f $p.Name) $Pal.Fg -NoNewline
-        Write-C ('{0,-8} ' -f $p.Method) $Pal.Gray -NoNewline
+        Write-C ('{0,-8} ' -f $(if ($p.Method -eq 'winget-upgrade') { 'upgrade' } else { $p.Method })) $Pal.Gray -NoNewline
         if ($p.Interactive -and -not $DryRun) { Write-C 'interactive - answer its prompts' $Pal.Purple }
         $onStatus = $null
         if ($p.Interactive -and -not $DryRun) { $onStatus = { param($m) Write-C "         $m" $Pal.Gray } }
@@ -223,14 +236,44 @@ function Invoke-ClassicRun([object[]]$Selection, [string]$Mode = 'install') {
     Write-C "$($Gl.Fail) $fl failed   " $Pal.Red -NoNewline
     Write-C ('{0:0.0}s' -f $sw.Elapsed.TotalSeconds) $Pal.Fg
     Write-C "  Log: $log" $Pal.Gray
-    if ($fl) { Write-C '  Failed apps stay selected - press I to retry.' $Pal.Yellow }
-    $state.LastSelection = @($Selection | ForEach-Object Id)
-    $state.LastFailed = @($results | Where-Object Status -eq 'failed' | ForEach-Object Id)
+    $script:LastResults = @($results)
+    if ($fl -and -not $Unattended) { Write-C '  Failed apps stay selected - press I to retry.' $Pal.Yellow }
+    $state.LastSelection = @($Selection | Where-Object { $_.Id -gt 0 } | ForEach-Object Id)   # rest-of-PC upgrades have negative Ids
+    $state.LastFailed = @($results | Where-Object { $_.Status -eq 'failed' -and $_.Id -gt 0 } | ForEach-Object Id)
     if (-not $DryRun) { Save-KitState $state }
+    if ($Unattended) { return }
     [void](Read-Answer 'Press Enter to continue')
     $script:installed = Get-KitInstalled
     $script:updates = Get-KitUpdates -Installed $script:installed
     Restore-Vt
+}
+
+if ($Auto) {
+    # ------------------------------------------------------------ unattended run (install.cmd /auto): no menu, no questions
+    $plan = Get-KitAutoPlan -Installed $installed -Updates $updates -Packages $cat
+    Write-Host ''
+    Write-Gradient '  my-win-kit - unattended run' 30
+    $adm = if ($script:Admin) { 'as administrator (nothing else will ask)' } else { 'without administrator rights (installers may ask)' }
+    Write-C "  v$(Get-KitVersion) $($Gl.Dot) $adm $($Gl.Dot) $($plan.Install.Count) to install, $($plan.Update.Count) kit apps + $($plan.Other.Count) other apps to update" $Pal.Gray
+    Write-KitRunLog "auto: elevated=$(if ($script:Admin) { 'yes' } else { 'no' }); install [$(@($plan.Install | ForEach-Object Name) -join ', ')]; update [$(@($plan.Update | ForEach-Object Name) -join ', ')]; other PC apps [$(@($plan.Other | ForEach-Object Ref) -join ', ')]; skipped [$(@($plan.Skipped | ForEach-Object Name) -join ', ')]"
+    $results = @()
+    if ($plan.Run.Count) {
+        Invoke-ClassicRun $plan.Run 'install' -Unattended
+        $results = @($script:LastResults)
+    } else {
+        Write-C "  Nothing to do: every recommended app is installed and nothing on this PC has an update." $Pal.Green
+        Write-C "  Log: $(Start-KitLog)" $Pal.Gray
+    }
+    if ($plan.Skipped.Count) {
+        Write-C "  Skipped (needs you): $(@($plan.Skipped | ForEach-Object Name) -join ', ')" $Pal.Yellow
+        Write-C '  Run install.cmd without /auto to do these.' $Pal.Gray
+    }
+    $code = Get-KitAutoExitCode -Results $results
+    if ($env:MYWINKIT_RUNLOG) { Write-C "  Run log: $env:MYWINKIT_RUNLOG" $Pal.Gray }
+    Write-C "  Exit code $code ($(if ($code) { 'something failed' } else { 'all ok' }))" $(if ($code) { $Pal.Red } else { $Pal.Green })
+    Write-KitRunLog "auto: finished, $(@($results | Where-Object Status -eq 'failed').Count) failed of $($results.Count), exit $code"
+    if ($Pause -and -not $script:Testing) { [void](Read-Host '  Press Enter to close') }
+    exit $code
 }
 
 $letters = @{}; foreach ($g in $groups) { $letters[$g.Letter] = $g.Key }
@@ -240,7 +283,7 @@ while ($true) {
     $ans = Read-Answer '>'
     if ([string]::IsNullOrWhiteSpace($ans)) { continue }
     $u = $ans.Trim().ToUpper()
-    # Commands use letters that are NOT group letters (U A B C P M R S E T G O D X): Q I L W K Z N
+    # Commands use letters that are NOT group letters (U A B C P M R S E T G O D X): Q I L W K V Z N
     if ($u -eq 'Q') {
         Write-Host ''
         $bye = ((C 0x2591) + (C 0x2592) + (C 0x2593)) + ((C 0x2550) * 20) + ' see you next time ' + ((C 0x2550) * 20) + ((C 0x2593) + (C 0x2592) + (C 0x2591))
@@ -256,11 +299,29 @@ while ($true) {
         continue
     }
     if ($u -eq 'L') {
-        $ai = @(Get-KitAiUpdateSet -Installed $installed -Packages $cat)   # installed AI tools only, never new ones
-        if ($ai.Count -gt 0) {
-            Write-C "  AI tools installed here: $(($ai | ForEach-Object { "$($_.Name) $($installed[$_.Id])" }) -join ', ')" $Pal.Fg
-            $ok = Read-Answer 'Update them to the latest versions? [Y/n]'
-            if ($ok -notmatch '^[Nn]') { Invoke-ClassicRun $ai 'update' }
+        # Update submenu: 1 everything (kit apps + the rest of the PC), 2 AI tools only; Enter = back
+        Write-C '  Update: ' $Pal.Fg -NoNewline; Write-C '1' $Pal.Orange -NoNewline; Write-C ' everything (kit apps + rest of PC)   ' $Pal.Fg -NoNewline
+        Write-C '2' $Pal.Orange -NoNewline; Write-C ' AI tools only   ' $Pal.Fg -NoNewline; Write-C 'Enter back' $Pal.Gray
+        $sub = Read-Answer '>'
+        if ($sub -eq '1') {
+            Write-C '  Looking for updates (catalogue + winget upgrade)...' $Pal.Gray
+            $script:updates = Get-KitUpdates -Installed $installed
+            $plan = Get-KitUpdateAllPlan -Installed $installed -Updates $script:updates -Packages $cat
+            Restore-Vt
+            $cut = { param($list) $n = @($list | ForEach-Object Name); if ($n.Count -gt 8) { (($n | Select-Object -First 8) -join ', ') + " $($Gl.Ell) +$($n.Count - 8)" } else { $n -join ', ' } }
+            Write-C "  Kit apps ($($plan.Kit.Count)): $(& $cut $plan.Kit)" $Pal.Fg
+            Write-C "  Other apps on this PC ($($plan.Other.Count)): $(& $cut $plan.Other)" $Pal.Fg
+            if ($plan.Run.Count) {
+                $ok = Read-Answer "Update all $($plan.Run.Count)? [Y/n]"
+                if ($ok -notmatch '^[Nn]') { Invoke-ClassicRun $plan.Run 'update' }
+            } else { [void](Read-Answer 'Everything is up to date. Press Enter') }
+        } elseif ($sub -eq '2') {
+            $ai = @(Get-KitAiUpdateSet -Installed $installed -Packages $cat)   # installed AI tools only, never new ones
+            if ($ai.Count -gt 0) {
+                Write-C "  AI tools installed here: $(($ai | ForEach-Object { "$($_.Name) $($installed[$_.Id])" }) -join ', ')" $Pal.Fg
+                $ok = Read-Answer 'Update them to the latest versions? [Y/n]'
+                if ($ok -notmatch '^[Nn]') { Invoke-ClassicRun $ai 'update' }
+            } else { [void](Read-Answer 'No AI tools installed here. Press Enter') }
         }
         continue
     }
@@ -273,6 +334,11 @@ while ($true) {
     if ($u -eq 'K') {
         # per-PC preference (local-settings.json, never GitHub); tests only write into their scratch state folder
         if (-not $script:Testing -or $env:MYWINKIT_STATE_DIR) { Set-KitLocalPref -Name 'autoInstallPwsh' -Value (-not (Get-KitAutoInstallPwsh).On) }
+        continue
+    }
+    if ($u -eq 'V') {
+        # per-PC: ask for administrator rights once at start (takes effect at the next start)
+        if (-not $script:Testing -or $env:MYWINKIT_STATE_DIR) { Set-KitLocalPref -Name 'elevateAtStart' -Value (-not (Get-KitElevateAtStart).On) }
         continue
     }
     if ($u -eq 'Z') { foreach ($p in $cat) { $p.On = $p.Default }; continue }

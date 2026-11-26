@@ -132,6 +132,109 @@ Check ($lf -like "$($env:MYWINKIT_STATE_DIR)*" -and ([IO.File]::ReadAllText($lf)
 Set-KitLocalPref -Name 'autoInstallPwsh' -Value $true
 Check ((Get-KitAutoInstallPwsh).On) 'local choice back on'
 
+Write-Host 'per-PC preference: elevateAtStart (local override > settings.json > on):'
+$e = Get-KitElevateAtStart
+Check ($e.On -and $e.Source -in 'shared', 'default') "no local choice -> settings.json value, else on ($($e.On), $($e.Source))"
+Set-KitLocalPref -Name 'elevateAtStart' -Value $false
+$e = Get-KitElevateAtStart
+Check (-not $e.On -and $e.Source -eq 'this PC' -and (Get-KitAutoInstallPwsh).On) "local choice off wins, autoInstallPwsh untouched ($($e.On), $($e.Source))"
+Set-KitLocalPref -Name 'elevateAtStart' -Value $true
+
+Write-Host 'NoAdmin: installers that must not run as administrator (de-elevated from an elevated kit):'
+$noAdmin = @($cat | Where-Object NoAdmin | ForEach-Object Id | Sort-Object)
+Check (($noAdmin -join ',') -eq '10,36,38,53') "NoAdmin set = OneDrive, VS Code, GitHub Desktop, Cursor ($(@($cat | Where-Object NoAdmin | ForEach-Object Name) -join ', '))"
+Check (@($cat | Where-Object { $_.NoAdmin -and ($_.Interactive -or $_.Elevated) }).Count -eq 0) 'NoAdmin is never on an Interactive or Elevated item'
+$vs = $byId[36]; $np = $byId[2]
+Check (Test-KitDeElevate -Package $vs -IsAdmin $true) 'routing: NoAdmin + elevated kit -> de-elevated'
+Check (-not (Test-KitDeElevate -Package $vs -IsAdmin $false)) 'routing: NoAdmin + not elevated -> runs normally (already normal rights)'
+Check (-not (Test-KitDeElevate -Package $np -IsAdmin $true)) 'routing: no NoAdmin + elevated -> runs elevated (no prompt)'
+$fakeInter = [pscustomobject]@{ NoAdmin = $true; Interactive = $true }
+Check (-not (Test-KitDeElevate -Package $fakeInter -IsAdmin $true)) 'routing: Interactive items are never de-elevated (they need the console)'
+$keepAdm = $env:MYWINKIT_SIMULATE_ADMIN
+$env:MYWINKIT_SIMULATE_ADMIN = '1'
+$r = Invoke-KitPackage -Package $vs -Installed $null -DryRun
+Check ($r.Status -eq 'dryrun' -and $r.Detail -like '*at normal user rights*') "dry run as admin says it runs at normal rights: $($r.Detail)"
+$r = Invoke-KitPackage -Package $np -Installed $null -DryRun
+Check ($r.Detail -notlike '*normal user rights*') "dry run as admin, ordinary app: $($r.Detail)"
+$env:MYWINKIT_SIMULATE_ADMIN = '0'
+$r = Invoke-KitPackage -Package $vs -Installed $null -DryRun
+Check ($r.Detail -notlike '*normal user rights*') "dry run not elevated: no de-elevation ($($r.Detail))"
+$env:MYWINKIT_SIMULATE_ADMIN = $keepAdm
+$keepDe = $env:MYWINKIT_SIMULATE_DEELEVATE
+$env:MYWINKIT_SIMULATE_DEELEVATE = 'ok'
+$d = Invoke-KitDeElevated -FilePath 'winget' -ArgumentList @('install', '--id', 'X')
+Check ($d.Started -and $d.Ec -eq 0 -and "$($d.Out)" -like '*simulated*') 'de-elevation helper (simulated ok): exit 0, no task created'
+$env:MYWINKIT_SIMULATE_DEELEVATE = 'fail'
+Check ((Invoke-KitDeElevated -FilePath 'winget').Ec -eq 1) 'de-elevation helper (simulated fail): exit 1'
+$env:MYWINKIT_SIMULATE_DEELEVATE = $keepDe
+# The script a de-elevated task runs: run it directly here (normal child process, no task) and read its files back
+$dt = Join-Path ([IO.Path]::GetTempPath()) ('my-win-kit-deel-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $dt | Out-Null
+try {
+    $txt = Get-KitDeElevatedCommand -FilePath 'cmd.exe' -ArgumentList @('/d', '/c', "echo it's `"quoted`" & exit 5") -OutFile (Join-Path $dt 'o.txt') -EcFile (Join-Path $dt 'e.txt')
+    $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($txt))
+    $pr = Invoke-KitProcess -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $enc)
+    $oTxt = if (Test-Path (Join-Path $dt 'o.txt')) { [IO.File]::ReadAllText((Join-Path $dt 'o.txt')).Trim() } else { '' }
+    $eTxt = if (Test-Path (Join-Path $dt 'e.txt')) { [IO.File]::ReadAllText((Join-Path $dt 'e.txt')).Trim() } else { '' }
+    Check ($pr.Ec -eq 5 -and $eTxt -eq '5' -and $oTxt -like "*it's*quoted*") "de-elevated task script: output + exit code written (ec=$($pr.Ec), file ec=$eTxt, out=$oTxt)"
+} finally { Remove-Item -LiteralPath $dt -Recurse -Force -ErrorAction SilentlyContinue }
+
+Write-Host 'unattended run plan (Get-KitAutoPlan on injected data, no scan):'
+$inj = @{ 2 = '8.1'; 36 = '1.100'; 46 = '2.0.1'; 47 = '1.0.0'; 59 = ''; 61 = '24.04' }
+$plan = Get-KitAutoPlan -Installed $inj -Updates @{ 2 = '8.9' } -UpgradeLines @() -Pinned @() -Packages $cat
+$inIds = @($plan.Install | ForEach-Object Id); $upIds = @($plan.Update | ForEach-Object Id); $skIds = @($plan.Skipped | ForEach-Object Id)
+$recMissing = @($cat | Where-Object { $_.Default -and -not $inj.ContainsKey($_.Id) } | ForEach-Object Id)
+Check (($inIds | Sort-Object) -join ',' -eq (($recMissing | Sort-Object) -join ',')) "installs every recommended app that is missing ($($inIds.Count))"
+Check (($upIds | Sort-Object) -join ',' -eq '2,46,47') "updates: winget app with an update (2), script tool with a native updater (46), npm tool (47) -> [$($upIds -join ',')]"
+Check ($upIds -notcontains 36) 'an installed app with no update is left alone (36)'
+Check (($skIds | Sort-Object) -join ',' -eq '59,61') "skipped (needs you): installed Interactive items (Chris Titus prompt 59, WSL 61) -> [$($skIds -join ',')]"
+Check (@($plan.Run | Where-Object { $_.Interactive -or $_.Group -eq 'POST' }).Count -eq 0) 'never runs an Interactive or POST item'
+Check (@($plan.Run).Count -eq $inIds.Count + $upIds.Count) 'run list = install + update'
+Check ((Get-KitAutoExitCode -Results @([pscustomobject]@{ Status = 'installed' }, [pscustomobject]@{ Status = 'current' })) -eq 0) 'exit code 0 when nothing failed'
+Check ((Get-KitAutoExitCode -Results @([pscustomobject]@{ Status = 'installed' }, [pscustomobject]@{ Status = 'failed' })) -eq 1) 'exit code 1 when anything failed'
+Check ((Get-KitAutoExitCode -Results @()) -eq 0) 'exit code 0 when there was nothing to do'
+
+Write-Host 'update everything (Get-KitUpdateAllPlan on sample winget upgrade output, no winget run):'
+$wu = @(
+    '   - \ ',
+    'Name                               Id                          Version        Available      Source',
+    '---------------------------------------------------------------------------------------------------',
+    'Git                                Git.Git                     2.55.0.5       2.56.1         winget',
+    'Microsoft Visual Studio Code       Microsoft.VisualStudioCode  1.140.0        1.148.0        winget',
+    'FFmpeg                             Gyan.FFmpeg                 9.0.2          9.1            winget',
+    'Node.js                            OpenJS.NodeJS               24.19.0        24.22.3        winget',
+    'Pinned Tool                        Some.Pinned                 1.0            2.0            winget',
+    'Odd App                            Odd.Unknown                 Unknown        3.0            winget',
+    'Range App                          Range.App                   < 5.0          5.1            winget',
+    'WhatsApp                           9NKSQGP7F2NH                2.2540.1.0     2.2546.3.0     msstore',
+    '8 upgrades available.',
+    '',
+    'The following packages have an upgrade available, but require explicit targeting for upgrade:',
+    'Name        Id               Version  Available Source',
+    '------------------------------------------------------',
+    'Explicit    Explicit.Only    1.0      2.0       winget'
+)
+$rows = @(ConvertFrom-KitWingetUpgradeText -Lines $wu)
+Check ($rows.Count -eq 8 -and $rows[2].Id -eq 'Gyan.FFmpeg' -and $rows[2].Version -eq '9.0.2' -and $rows[2].Available -eq '9.1' -and $rows[2].Source -eq 'winget') "parses the first table only ($($rows.Count) rows; footer and explicit-targeting table left out)"
+$ap = Get-KitUpdateAllPlan -Installed @{ 37 = '2.55.0.5'; 36 = '1.140.0'; 18 = '2.2540.1.0'; 46 = '2.0.1'; 59 = '' } -Updates @{ 37 = '2.56.1'; 36 = '1.148.0'; 18 = '2.2546.3.0' } -UpgradeLines $wu -Pinned @('Some.Pinned') -Packages $cat
+$kitIds = @($ap.Kit | ForEach-Object Id | Sort-Object); $oth = @($ap.Other | ForEach-Object Ref)
+Check (($kitIds -join ',') -eq '18,36,37,46') "kit half: catalogue apps with updates + native updater, not the Interactive Chris Titus prompt -> [$($kitIds -join ',')]"
+Check (($oth -join ',') -eq 'Gyan.FFmpeg,OpenJS.NodeJS') "rest of PC: only rows outside the catalogue -> [$($oth -join ', ')]"
+$exc = @{}; foreach ($x in $ap.Excluded) { $exc[$x.Id] = $x.Why }
+Check ($exc['Git.Git'] -eq 'in the catalogue' -and $exc['9NKSQGP7F2NH'] -eq 'in the catalogue' -and $exc['Some.Pinned'] -eq 'pinned' -and $exc['Odd.Unknown'] -eq 'unknown version' -and $exc['Range.App'] -eq 'unknown version') 'left out: catalogue IDs (winget + Store), pinned, unknown and ranged versions'
+Check (@($ap.Other | Where-Object { $_.Id -ge 0 -or $_.Method -ne 'winget-upgrade' }).Count -eq 0 -and @($ap.Run).Count -eq 6 -and $ap.Run[-1].Method -eq 'winget-upgrade') 'other apps: negative Ids, Method winget-upgrade, run after the kit apps'
+$ff = $ap.Other[0]
+$r = Invoke-KitPackage -Package $ff -DryRun
+Check ($r.Status -eq 'dryrun' -and $r.From -eq '9.0.2' -and $r.To -eq '9.1' -and $r.Detail -eq 'winget upgrade Gyan.FFmpeg') "dry run of an other app: $($r.Detail) ($($r.From) -> $($r.To))"
+Check (@(Get-KitUpdateAllPlan -Installed @{} -UpgradeLines @() -Pinned @() -Packages $cat).Run.Count -eq 0) 'nothing installed, nothing to upgrade -> empty plan'
+
+Write-Host 'failure reasons (a short line instead of "see log"):'
+$fl = & (Get-Module core) { Get-KitFailLine -Out @('Updating Hermes Agent...', "Program 'hermes.exe' failed to run: An Application Control policy has blocked this file.", '') }
+Check ($fl -like '*Application Control policy has blocked*') "picks the line that names the problem: $fl"
+$fake = [pscustomobject]@{ Id = 990; Name = 'Fake updater'; Group = 'DEV'; GroupOrder = 0; Method = 'script'; Ref = 'https://example.invalid/x.ps1'; Update = 'my-win-kit-no-such-tool update'; Exe = $null; Requires = $null; Interactive = $false; Elevated = $false; Shell = $null; NoAdmin = $false; Version = $null; Detect = $null }
+$r = Invoke-KitPackage -Package $fake -Installed '1.0'
+Check ($r.Status -eq 'failed' -and $r.Detail -notlike '*see log*' -and $r.Detail -like '*(exit 1)') "a failed updater reports its reason: $($r.Detail)"
+
 Write-Host 'winget exit codes (Get-KitWingetOutcome, no winget run):'
 $o = Get-KitWingetOutcome -ExitCode 0 -Out @('Successfully installed')
 Check ($o.Status -eq 'ok') "exit 0 is ok ($($o.Status))"

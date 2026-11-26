@@ -13,7 +13,7 @@
 | [CHANGELOG.md](CHANGELOG.md) | Dated history, append-only. | Current state. |
 | architecture.md (this) | How the loader, menus, engine, publish and CI work. | Counts, history. |
 | [config/catalog.json](../config/catalog.json) **on GitHub `main`** | The app catalogue: groups, packages (name, method, Id/URL, default on/off, detection), removed packages, `RetiredIds`, the direct-download rules. Edited by hand in the repo (the menu never writes it). Every PC reads the live copy at start. Fields: [Catalog fields](#catalog-fields). | Never copy it into docs. |
-| [config/settings.json](../config/settings.json) **on GitHub `main`** | Kit settings shared by every PC (`removeShortcuts`, `dryRunByDefault`, `autoInstallPwsh`). Edited by hand in the repo; Settings shows them read-only. | Per-PC state (last selection, last failures: `%LOCALAPPDATA%\my-win-kit\state.json`) and per-PC preferences (`local-settings.json`, e.g. this PC's `autoInstallPwsh` override). |
+| [config/settings.json](../config/settings.json) **on GitHub `main`** | Kit settings shared by every PC (`removeShortcuts`, `dryRunByDefault`, `autoInstallPwsh`, `elevateAtStart`). Edited by hand in the repo; Settings shows them read-only. | Per-PC state (last selection, last failures: `%LOCALAPPDATA%\my-win-kit\state.json`) and per-PC preferences (`local-settings.json`, e.g. this PC's `autoInstallPwsh` / `elevateAtStart` override). |
 | [config/winget-id-overrides.json](../config/winget-id-overrides.json) **on GitHub `main`** | Shared winget-ID heals (old → new, `msstore:` prefix = Store). Edited by hand. Heals a PC learns itself stay in that PC's `cache\local-overrides.json` until copied in here. | |
 | `$script:KitVersion` in [src/core.psm1](../src/core.psm1) | The kit version. The loader compares it with GitHub `main` for the self-update. | |
 | `$script:Fixes` in [win11-tweaks.ps1](../win11-tweaks.ps1#L87) | The tweak catalogue (registry keys, apply/check/revert). | |
@@ -35,7 +35,7 @@ PSScriptAnalyzerSettings.psd1
 docs/
 ```
 
-`install.cmd` launches `%~dpn0.ps1` (its own name with `.ps1`), so it sits beside `install.ps1`. The published
+`install.cmd` launches `%~dpn0.ps1` (its own name with `.ps1`) with its arguments (`%*`), so it sits beside `install.ps1`. The published
 folder mirrors the repo: kit files at the top, `src/` beside them.
 
 | Channel | What | How | Trigger |
@@ -48,7 +48,31 @@ folder mirrors the repo: kit files at the top, `src/` beside them.
 
 Runs on stock Windows PowerShell 5.1 with nothing installed.
 
+0. **Arguments:** `install.cmd` passes its own; slash forms `/auto /pause /dryrun /classic /noelevate` map to the
+   switches (`ValueFromRemainingArguments`, `PositionalBinding = $false`); anything else is named and ignored.
+   Self-update ([below](#self-update-and-the-one-line-install)) runs first.
 1. **Bootstrap:** TLS 1.2, `Unblock-File` on every kit file (mark-of-the-web), recreate `install.cmd` if missing.
+1a. **Administrator rights, once** (`elevateAtStart`, read like `autoInstallPwsh`: this PC's `local-settings.json`,
+   else the cached / bundled `settings.json`, else on; `Get-LoaderSwitch`):
+   - already elevated → nothing to do (a warning when the elevated account is not the signed-in user);
+   - off, or `-NoElevate` → installers ask for admin one by one, as before;
+   - **standard account** (`Get-ElevationKind`: the current token has no `S-1-5-32-544` claim; an administrator's
+     filtered token carries it as a deny-only group) → no whole-kit elevation, because Windows would ask for
+     another account and per-user installs (Store, user-scope winget, `%USERPROFILE%` tools, npm globals) would
+     land in that account's profile (over-the-shoulder);
+   - otherwise → `Start-Process powershell.exe -Verb RunAs` on this copy's `install.ps1` with the same arguments
+     plus `-NoUpdate -ElevatedChild -KitEnv <base64 MYWINKIT_* variables>` (an elevated process doesn't inherit
+     the environment; the run log path travels this way), wait for it, exit with its code. UAC declined (the
+     start throws) → one line, carry on non-elevated.
+   - **The elevated copy** compares its account SID with the owner of `explorer.exe` in its session
+     (`Get-SessionUserSid`, CIM `GetOwnerSid`). Different → exit 75, and the waiting parent carries on
+     non-elevated. The run log records `elevate: elevated = yes|no - <why>`.
+   - Ordering: elevation comes before the PowerShell 7 / Terminal install, so those run elevated (no prompt) and
+     `pwsh` started for the modern menu inherits the token.
+   - Never a real prompt in tests: in test mode (`-WhatIfLoader`, `-ClassicTestInput`, `-Answer`, `-UpdateAnswer`,
+     or `MYWINKIT_STATE_DIR` set) the step is skipped unless `MYWINKIT_SIMULATE_UAC=accept|decline` simulates it
+     (`accept` runs the child copy in the same console with `MYWINKIT_SIMULATE_ADMIN=1`). Other hooks:
+     `MYWINKIT_SIMULATE_ADMIN=1|0`, `MYWINKIT_SIMULATE_ELEVATION=same|other`, `MYWINKIT_SIMULATE_SESSION_USER=same|other`.
 2. **Find PowerShell 7** (`Find-Pwsh`): checks `pwsh` on PATH plus the known install paths (PATH is stale right
    after an install) and asks each candidate for its version. The best one wins.
 3. **Read the auto-install setting** (`Get-AutoPwshSetting`): this PC's `<state>\local-settings.json`
@@ -70,10 +94,13 @@ Runs on stock Windows PowerShell 5.1 with nothing installed.
      same `Install-Pwsh` and modern menu.
    - declined or failed → `src\tui-classic.ps1` in the same 5.1 process.
    - `-Classic` skips all of this.
+   - **`-Auto`** (`/auto`): the same steps without a question (`autoInstallPwsh` off and no PowerShell 7 → no
+     question, no install), then always `src\tui-classic.ps1 -Auto` in this 5.1 process instead of a menu
+     (`Start-Auto`), exit code passed through.
 5. Test switches (no effect on normal use): `-NoPwsh` / env `MYWINKIT_SIMULATE_NO_PWSH=1` pretend pwsh is
    absent, `-NoTerminal` / `MYWINKIT_SIMULATE_WT=absent|present` fake Windows Terminal, `MYWINKIT_SIMULATE_INSTALL=ok|fail`
    makes both installs report that result without running anything, `-WhatIfLoader` prints the decision
-   (modern / auto-install / offer-install / classic), `-Answer` answers the question, `-ClassicTestInput` feeds
+   (modern / auto-install / offer-install / classic; also `elevate: ...` and, with `-Auto`, `front-end: unattended`), `-Answer` answers the question, `-ClassicTestInput` feeds
    the classic menu, `-Classic` forces it, `-DryRun` passes through to either menu (in auto mode it prints what
    would be installed, no question).
 
@@ -152,14 +179,46 @@ No UI. Both menus call the same functions, so behaviour is identical in both.
 - **`Get-KitRunOrder`** sorts by catalogue group order, then Id, with POST always last.
 - **`Get-KitLatestVersion`** (direct = vendor page, winget = `winget show`, npm = `npm view`) feeds the "Update
   AI tools" table, for installed tools only.
-- **`Get-KitAiUpdateSet -Installed`**: what "Update AI tools" (and classic `L`) updates: `AI`-flagged apps that
+- **`Get-KitAiUpdateSet -Installed`**: what "Update AI tools" (and classic `L` `2`) updates: `AI`-flagged apps that
   are installed. The `AI` flag never installs anything and never ticks an app (Cursor and Codex CLI are AI-flagged
   and off by default).
 - **State** (`%LOCALAPPDATA%\my-win-kit\state.json`, per PC, never synced): last selection, last failures,
   the desktop-shortcut setting. `MYWINKIT_STATE_DIR` overrides the folder (tests).
 - **Per-PC preferences** (`%LOCALAPPDATA%\my-win-kit\local-settings.json`, canonical JSON, never synced):
-  `Get-KitLocalPrefs` / `Set-KitLocalPref`. Today one key, `autoInstallPwsh`; `Get-KitAutoInstallPwsh` returns
-  the effective value and its source (`this PC` / `shared` / `default`).
+  `Get-KitLocalPrefs` / `Set-KitLocalPref`. Keys `autoInstallPwsh` and `elevateAtStart`; `Get-KitLocalSwitch`
+  (wrapped by `Get-KitAutoInstallPwsh` / `Get-KitElevateAtStart`) returns the effective value and its source
+  (`this PC` / `shared` / `default`).
+- **NoAdmin installs from an elevated kit:** `Test-KitDeElevate` = the package has `NoAdmin`, the kit is elevated
+  (`Test-KitAdmin`, which honours `MYWINKIT_SIMULATE_ADMIN`) and it isn't Interactive. Then its install command
+  (winget, script, native updater, npm, direct installer) goes through `Invoke-KitDeElevated` instead of
+  `Invoke-KitProcess` (`Invoke-KitChild` picks one). **Method:** a one-shot scheduled task through the Task
+  Scheduler COM API (`Schedule.Service`, no module): principal = the session user (`Get-KitSessionUser`, owner of
+  `explorer.exe` in this session), `LogonType` 3 (interactive token), `RunLevel` 0 (LUA). Task Scheduler starts it
+  with that user's filtered token, the same one Explorer has, so it runs at medium integrity in the user's own
+  profile. The action is `conhost.exe --headless powershell.exe -EncodedCommand <script>` (no window, also with
+  Windows Terminal as the default terminal); the script (`Get-KitDeElevatedCommand`) runs the program, writes its
+  output and exit code to `%TEMP%\my-win-kit\deelevated-<id>.out|.ec`, and the kit polls for them (2 h limit),
+  then deletes the task. `runas /trustlevel` is not used: it gives a restricted token, not a normal one. Separately, any
+  winget run as admin that exits `0x8A150056` (installer prohibits elevation, manifest `elevationProhibited`) or
+  `0x8A15007D` (admin context prohibited for a user-scope package) is retried once de-elevated, catalogue flag or
+  not. `MYWINKIT_SIMULATE_DEELEVATE=ok|fail` fakes the result (tests).
+- **Update everything:** `Get-KitUpdateAllPlan -Installed -Updates` returns `Kit` (`Get-KitCatalogUpdateSet`:
+  installed catalogue apps with a known newer version, plus script tools with a native updater and npm tools,
+  whose updates winget doesn't list; never Interactive or POST) and `Other`: the rows of `winget upgrade`
+  (`ConvertFrom-KitWingetUpgradeText`: first table only, so the "require explicit targeting" table and the footer
+  are left out; the raw lines are reused from the last `Get-KitUpdates`) minus catalogue winget / Store / fallback
+  IDs, `winget pin` pins (`Get-KitWingetPins`), unknown or ranged versions and cut-off Ids (`Excluded` says why).
+  Other rows become items with `Method = 'winget-upgrade'`, a negative Id and group `PC` (`New-KitPcUpgrade`);
+  `Invoke-KitPackage` runs them as `winget upgrade --id <Id> --exact --silent --accept-package-agreements
+  --accept-source-agreements --disable-interactivity [--source]` through `Invoke-KitWinget` and classifies the exit
+  with `Get-KitWingetOutcome` (ok = updated, nothing-to-do codes = current, anything else = failed). Menus never
+  remember negative Ids as a selection or failure.
+- **Unattended plan:** `Get-KitAutoPlan` = recommended apps that are missing (`Install`) + the update-everything
+  plan (`Update` = its kit half, `Other` = the rest of the PC); `Skipped` = Interactive / POST items it would otherwise touch
+  (recommended or installed). `Get-KitAutoExitCode` = 1 when any result failed.
+- **Failure reasons:** `Get-KitFailLine` picks the last output line that names a problem; winget, scripts and native
+  updaters use it, so a result says e.g. "An Application Control policy has blocked this file (exit 1)" rather than
+  "see log".
 - **Desktop shortcuts:** snapshot before a run, delete new `.lnk` files after (setting, on by default).
 
 ## Modern menu: src/tui-spectre.ps1
@@ -193,7 +252,8 @@ picker, `Show-Picker`, built on `[Console]::ReadKey`.
 - **Look:** truecolor gruvbox (hex styles, never the 16 console colours). The main menu opens with a "MY WIN KIT"
   Figlet banner (Spectre's built-in font, rendered once into a capture console, ~11 ms, then coloured column by
   column along an orange → yellow → green → aqua gradient), a subtitle (kit version, PC, PowerShell, admin) and,
-  in dry run, a purple **DRY RUN** badge plus a full-width purple rule on every screen. Sub-screens use one
+  in dry run, a purple **DRY RUN** badge plus a full-width purple rule on every screen. Elevated: an orange **ADMIN**
+  badge on the banner and on every sub-screen's title rule (`not admin` in grey on the banner otherwise). Sub-screens use one
   gradient title rule. Tables and panels are rounded with coloured borders; each catalogue group has its own
   accent colour + icon (`$script:GroupStyle`). Quitting prints a gradient goodbye bar.
 - **Glyphs:** only characters present in **both Consolas and Cascadia Mono** (verified with WPF `GlyphTypeface`),
@@ -205,8 +265,12 @@ picker, `Show-Picker`, built on `[Console]::ReadKey`.
 
 - **Update badges:** `Get-KitUpdates` (one `winget upgrade`, ~2-3 s, plus the vendor page for direct apps) runs
   with the installed scan when the install screen opens, so the picker can show `↑ old → new`.
-- **Main menu:** Install or update apps · Update AI tools · Windows tweaks · Settings · Quit, each with an icon
-  and a one-line description.
+- **Main menu:** Install apps · Update · Windows tweaks · Settings · Quit, each with an icon and a one-line
+  description.
+- **Update** (submenu, « Back = main menu): **Update everything** (spinner: scan + `Get-KitUpdates` +
+  `Get-KitUpdateAllPlan`, then a Review table of both groups, kit apps first, trimmed to window − 20 rows, with
+  counts and the number skipped; Esc = back; "Update all now" / "Simulate all now" runs `Invoke-Run` with the plan's
+  `Run` list) and **Update AI tools** (below). After a run, back goes to the main menu.
 - **Install flow:**
   1. scan installed apps (spinner);
   2. "Start from": recommended set / recommended but only what's missing / everything with an update / retry
@@ -222,15 +286,16 @@ picker, `Show-Picker`, built on `[Console]::ReadKey`.
      the progress view. Then a rounded results table (badge, app, result, version from → to, time, note) and a
      summary panel (`√ ok · ↔ healed · × failed · total time`, log path, removed shortcuts; purple in dry run,
      red with failures, green otherwise).
-- **Update AI tools:** table of every `AI = $true` app (installed, latest, how it updates: winget upgrade, npm,
+- **Update AI tools** (under Update; « Back returns to the Update submenu): table of every `AI = $true` app (installed, latest, how it updates: winget upgrade, npm,
   official updater or download page; trimmed to window − 17 rows, installed first), then "Update all installed"
   or "Pick which installed tools to update". Both use `Get-KitAiUpdateSet`, so a tool that isn't installed is
   never installed from here (the title says so; with none installed only « Back is offered). Runs with
   `-Mode update`; latest versions are looked up for installed tools only.
 - **Windows tweaks:** describes the 4 fixes and runs `win11-tweaks.ps1` here or elevated in a new window.
 - **Settings:** read-only shared config (see [Configuration on GitHub](#configuration-on-github-read-only)); this
-  PC's "Auto-install PowerShell 7 + Terminal on start" toggle (`local-settings.json`; the row says whether the
-  value is this PC's own or the shared default), session dry-run toggle, open the log folder.
+  PC's "Auto-install PowerShell 7 + Terminal on start" and "Ask for administrator rights once at start" toggles
+  (`local-settings.json`; each row says whether the value is this PC's own or the shared default; the admin one
+  takes effect at the next start), session dry-run toggle, open the log folder.
 - **Interactive items** (POST, Chris Titus prompt, WSL + Ubuntu) run after the progress view; their `OnStatus`
   steps print as grey lines above the child's own output (e.g. "type exit to come back here").
 - **Smoke-test hook:** `-TestKeys` swaps `AnsiConsole.Console` for Spectre's `TestConsole` (120 × 30) and feeds
@@ -280,7 +345,9 @@ under a spinner), `Elevated` (script: runs as administrator, own window when the
 expanded), `Version` (command whose
 output has the installed version), `Update` (native updater, e.g. `claude update`), `Appx` (MSIX package name),
 `Uninstall` (regex on the uninstall DisplayName), `Fallback` (winget ID when a direct download can't be resolved),
-`Requires` (command that must exist first). `RetiredIds`: Ids that must never be reused. `Direct.<key>`: `Page`,
+`Requires` (command that must exist first), `NoAdmin` (the installer must not run as administrator: from an
+elevated kit it runs at the signed-in user's normal rights, see [the engine](#the-engine-srccorepsm1); never on an
+Interactive or Elevated item). `RetiredIds`: Ids that must never be reused. `Direct.<key>`: `Page`,
 `Pattern` (regex with `{arch}` / `{arch2}`), `Arch`, `Arch2`, `Signer` (Authenticode subject), `Args` (silent
 switches). Claude Desktop stays on winget on purpose: Anthropic's latest-download link refuses scripted clients.
 
@@ -290,14 +357,16 @@ The loader (Windows PowerShell 5.1) keeps every PC on the newest kit without git
 
 - **Version check:** `KitVersion` from `src/core.psm1` on GitHub `main` (raw URL, 3 s timeout). Newer than the
   running copy → "Update kit 2.4.0 -> 2.5.0? [Y/n]" once per version (a "no" is remembered in
-  `%LOCALAPPDATA%\my-win-kit\update.json`; no question when input is redirected, e.g. CI).
+  `%LOCALAPPDATA%\my-win-kit\update.json`; no question when input is redirected, e.g. CI). `-Auto` takes the
+  newer version without asking (an earlier "no" doesn't apply); a failure still keeps the running copy.
 - **Install:** the repo zip (`codeload.github.com/<repo>/zip/refs/heads/main`) → extract → verify (required files,
   every script parses, catalog.json parses, version matches) → `%LOCALAPPDATA%\my-win-kit\app\<version>` (the three
   newest kept). The loader then re-runs that copy's `install.ps1 -NoUpdate` with the same arguments. Any failure
   (offline, private repo, bad zip) keeps the running copy. A newer copy already downloaded is used without asking.
 - **`irm https://raw.githubusercontent.com/1nst4ll/my-win-kit/main/install.ps1 | iex`** (fresh PC, public repo):
   `$PSScriptRoot` is empty, so the loader downloads the kit into `app\<version>` the same way, starts it as a child
-  `powershell.exe`, and returns (never `exit`, which would close the user's window).
+  `powershell.exe` (which asks for administrator rights itself and waits for its elevated copy), and returns (never
+  `exit`, which would close the user's window). `& ([scriptblock]::Create((irm <url>))) -Auto` passes arguments on.
 - `OneDrive\[98] Shortcuts\install.cmd` keeps working as the launcher: it runs the published copy, which updates
   itself from GitHub.
 - The repo is public, so none of this needs a sign-in. If it ever went private, the raw/zip URLs would return 404:
@@ -310,7 +379,8 @@ The loader (Windows PowerShell 5.1) keeps every PC on the newest kit without git
 One file per run in `%LOCALAPPDATA%\my-win-kit\logs\run-<date>-<pid>.log` (newest 30 kept; `MYWINKIT_STATE_DIR`
 moves it). The loader creates it and passes the path in `MYWINKIT_RUNLOG`; both menus append through
 `Write-KitRunLog`. It records the loader's PowerShell, the pwsh it found (path, version), the decision
-(modern / offer install / classic + reason), the front-end that actually started (with PwshSpectreConsole
+(modern / offer install / classic + reason), `elevate: elevated = yes|no - <why>` (and the elevated copy's own
+lines, in the same file), the front-end that actually started (`elevated=yes|no`) (with PwshSpectreConsole
 version, console colour system, Unicode, encoding, `NO_COLOR`), each main-menu choice, run summaries, the exit
 code, and any fallback reason. The loader also prints "Starting modern menu · PowerShell 7.x · Spectre" (or
 "Starting classic menu · …") before it hands off.
@@ -323,8 +393,12 @@ menu; updates come from `Get-KitUpdates`). Colour is 24-bit through VT escape co
 (`$Host.UI.SupportsVirtualTerminal` or Windows Terminal), otherwise the 16 console colours
 (`MYWINKIT_FORCE_VT=1` forces VT for captures). One prompt line takes tokens: numbers, ranges `a-b`, group letters, `*` (all
 except POST), `0` (none). Commands use letters that aren't group letters: `Z` recommended, `N` only missing,
-`I` install, `L` latest AI tools (`Get-KitAiUpdateSet`: installed ones only), `W` Windows tweaks, `K` this PC's
-auto-install of PowerShell 7 + Terminal on/off (shown on the command line with its source), `Q` quit. Runs print one line per app using the same
+`I` install, `L` update (a one-line submenu: `1` everything = `Get-KitUpdateAllPlan` with both groups listed and one
+[Y/n], `2` AI tools = `Get-KitAiUpdateSet`, installed ones only; Enter = back), `W` Windows tweaks, `K` this PC's
+auto-install of PowerShell 7 + Terminal on/off, `V` this PC's admin at start on/off (both shown on the command
+line with their source), `Q` quit. `ADMIN` on the subtitle when elevated. **`-Auto`** (from the loader's `/auto`):
+no menu and no questions: `Get-KitAutoPlan`, the same run loop without the "Press Enter" (`-Unattended`), a
+"Skipped (needs you)" line, the run log path and `exit 0|1`; `-Pause` waits for Enter at the end. Runs print one line per app using the same
 engine; failures stay selected for a retry. `-TestInput "a;b;c"` feeds answers (tests).
 
 ## win11-tweaks.ps1
@@ -361,9 +435,9 @@ All tests run the kit in dry-run mode; nothing installs.
 | Script | Engine | Covers |
 |---|---|---|
 | `tools/lint.ps1` | 5.1 (`-ParseOnly`) + pwsh | parser check of every `.ps1/.psm1/.psd1`; PSScriptAnalyzer (pwsh) |
-| `tools/test-core.ps1` | 5.1 + pwsh | catalogue sanity (unique Ids/names, groups, methods, DEV/POST off, POST interactive), the 2026-11-26 catalogue changes (removed apps, Obsidian off, Cursor/Codex AI-flagged and off, the three new entries), `Get-KitAiUpdateSet` (installed only), dev-folder path choice (injected D: types), WSL distro picker on sample `wsl --list --online` text (plain and UTF-16-as-UTF-8), restart detection, per-PC `autoInstallPwsh` precedence, dry run of every package, version compare; `-Online` adds the installed scan and vendor-page resolution |
-| `tools/smoke-tui.ps1` | pwsh | the Spectre menu driven by scripted keys: install flow, search, AI table (every AI tool listed, never "installs missing ones"), settings (read-only panel, a seeded local fix, the per-PC auto-install toggle; fails if removed screens reappear) + tweaks (+ "update all" and "pick installed" when an AI tool is installed, local only) |
-| `tools/smoke-loader.ps1` | 5.1 | loader decisions (pwsh/Terminal present / absent / forced classic); auto mode installs without the question (dry run, simulated ok and failed installs end in the classic menu; a failed Terminal install isn't retried the same day); auto off via `local-settings.json`: declining and dry-run accepting the PowerShell 7 install; classic `K` toggles the override; a classic-menu run |
+| `tools/test-core.ps1` | 5.1 + pwsh | per-PC `elevateAtStart`, NoAdmin set + routing (`Test-KitDeElevate`), the de-elevation helper (simulated) and its task script (run directly, no task), the `/auto` plan and exit code, the update-everything plan on sample `winget upgrade` output (kit IDs, pins, unknown versions left out; explicit-targeting table ignored), failure reasons; catalogue sanity (unique Ids/names, groups, methods, DEV/POST off, POST interactive), the 2026-11-26 catalogue changes (removed apps, Obsidian off, Cursor/Codex AI-flagged and off, the three new entries), `Get-KitAiUpdateSet` (installed only), dev-folder path choice (injected D: types), WSL distro picker on sample `wsl --list --online` text (plain and UTF-16-as-UTF-8), restart detection, per-PC `autoInstallPwsh` precedence, dry run of every package, version compare; `-Online` adds the installed scan and vendor-page resolution |
+| `tools/smoke-tui.ps1` | pwsh | the Spectre menu driven by scripted keys (`MYWINKIT_SIMULATE_ADMIN=0` unless a scenario sets it): Update submenu, Update everything review (+ a dry run when this PC has updates, local only), exactly one Back row on a results screen, the ADMIN badge, the admin-at-start Settings row, install flow, search, AI table (every AI tool listed, never "installs missing ones"), settings (read-only panel, a seeded local fix, the per-PC auto-install toggle; fails if removed screens reappear) + tweaks (+ "update all" and "pick installed" when an AI tool is installed, local only) |
+| `tools/smoke-loader.ps1` | 5.1 | elevation (simulated: relaunch / already admin / declined / standard account / other account handed back / setting off / `/noelevate`, arguments kept, classic `V`, ADMIN); `/auto` with stdin closed and a time limit (exit 0, no prompt, run log, with a simulated elevation; `autoInstallPwsh` off asks nothing); `install.cmd` argument pass-through; classic `L` submenu; loader decisions (pwsh/Terminal present / absent / forced classic); auto mode installs without the question (dry run, simulated ok and failed installs end in the classic menu; a failed Terminal install isn't retried the same day); auto off via `local-settings.json`: declining and dry-run accepting the PowerShell 7 install; classic `K` toggles the override; a classic-menu run |
 | `tools/test-config.ps1` | 5.1 + pwsh | config read chain (remote / cache / corrupt cache / bundled / defaults), JSON writer (ASCII, round trip) and canonical form of all three `config/*.json`, catalogue Ids (unique across Packages + Removed, no `RetiredIds` reuse), heals kept local, no config-write functions exported, publish, self-update (accept / reuse / decline / broken zip), `irm \| iex` bootstrap |
 | `tools/render-screens.ps1 -OutDir <dir>` | pwsh (+5.1 for classic) | not a test: captures every screen as `.txt` (layout) and truecolor `.ans` (view with `Get-Content x.ans -Raw` in Windows Terminal) at 120 × 30, and prints the main-menu height |
 
