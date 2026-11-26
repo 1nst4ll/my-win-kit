@@ -7,42 +7,33 @@
 
 _A new session can start from this line, no handover needed._
 
-- **Branch `rebuild-tui` is ready to merge** (PR #1 into `main`): loader + Spectre menu +
-  classic fallback + shared engine, always-latest AI tools, **config read from GitHub** (`config/*.json`) and
-  **self-update** from GitHub. Since v2.4.0 **the menu reads config from GitHub and never writes it**: Daniel edits
-  `config/*.json` in the repo by hand, every PC picks the change up at its next start, and Settings is read-only.
-  Merging publishes to every PC through OneDrive (Daniel's go is given, see below).
-- **Repo is public since 2026-11-25** (Daniel's go). History was rewritten to the GitHub noreply address and
-  scrubbed of the personal email and Windows user path; the repo was recreated so no old commits stay reachable.
-  The pre-rewrite repo (`my-win-kit-old`) was deleted on 2026-11-25. GitHub account: "Keep my email private"
-  and "Block command line pushes that expose my email" are both on.
-  Raw-URL config reads, self-update and `irm | iex` read from `main`, so they go live at the merge.
-- **Ready for merge: Daniel gave his go on 2026-11-25** ("fix both and merge comit push to mainn"). v2.4.2 is
-  on the branch: a failed winget upgrade on an installed app is now reported as failed (it was counted as
-  current: Git 2.55.0.5 → 2.56.1 failed at the admin prompt in Daniel's run), and CLAUDE.md's key-sending rule
-  now targets only the helper's own window (PID → handle). The coordinator merges after review.
-  v2.4.1 fixed the raw escape text in the progress view and scan spinner (conhost + pwsh). Daniel's own v2.4.0
-  session on 2026-11-25 ran a real install of 21 apps (reported 21 ok; really 20 ok + Git's failed upgrade) and
-  an Update AI tools run. Untested so far: real keyboard on the app search (`/`), PS7 install on a PC without it.
+- **The rebuild is live (kit v2.4.2).** PR #1 merged into `main` on 2026-11-25 with Daniel's go ("fix both and
+  merge comit push to mainn"); the post-merge publish copied 8 files to OneDrive. Every PC now gets the modern
+  menu + classic fallback, always-latest AI tools, **config read from GitHub `main`** at each start (raw URL →
+  cache → bundled copy) and **self-update** from GitHub. The menu never writes config: Daniel edits
+  `config/*.json` in the repo and commits to `main`; PCs pick it up at their next start (raw CDN can lag ~5 min).
+- **Repo is public since 2026-11-25** (history rewritten to the noreply address; old repo deleted).
+- **Next:** try it on a second PC: `install.cmd` from the OneDrive folder, or
+  `irm https://raw.githubusercontent.com/1nst4ll/my-win-kit/main/install.ps1 | iex` on a fresh one.
+  Untested so far: real keyboard on the app search (`/`), PS7 install on a PC without it.
 - Git on Daniel's PC is still 2.55.0.5: its upgrade needs the admin prompt answered (run the kit again, or
   `winget upgrade Git.Git` from an elevated shell).
-- Before merging, Daniel tries it by hand (steps in the PR). If anything looks wrong, read the newest
-  `%LOCALAPPDATA%\my-win-kit\logs\run-*.log` first.
-- After the merge: the post-merge publish copies `src/`, `config/` and the kit files; check its output.
-- Watch-outs: `main` auto-publishes. This clone has `core.hooksPath=.githooks`; other clones need it too.
+- If anything looks wrong, read the newest `%LOCALAPPDATA%\my-win-kit\logs\run-*.log` first.
+- Watch-outs: `main` auto-publishes; do multi-step work on a branch. This clone has `core.hooksPath=.githooks`;
+  other clones need it too.
 
 ## What's live
 
 | Fact | Value |
 |---|---|
-| Repo | github.com/1nst4ll/my-win-kit (**public**). `main` = old single-file installer; `rebuild-tui` = the rebuild |
-| Config home | `config/catalog.json`, `config/settings.json`, `config/winget-id-overrides.json` on GitHub `main`, edited by hand (not on `main` yet: arrives with the merge) |
+| Repo | github.com/1nst4ll/my-win-kit (**public**). `main` = the rebuild (merged 2026-11-25); `rebuild-tui` merged, can be deleted |
+| Config home | `config/catalog.json`, `config/settings.json`, `config/winget-id-overrides.json` on GitHub `main`, edited by hand |
 | Publish target | `$env:OneDrive\[98] Shortcuts` (the OneDrive folder every PC syncs) |
-| Last publish | 2026-11-24: nothing changed (old 3-file kit). The rebuild is not published yet |
-| Apps in `config/catalog.json` (branch) | 58 total: 35 in the recommended set, 20 DEV (off), 3 POST (off); 0 removed |
-| By method (branch) | 45 winget, 4 Store, 5 script, 2 direct, 1 npm, 1 builtin. AI-flagged (Update AI tools): 5 |
+| Last publish | 2026-11-25: merge of PR #1, 8 files copied (`src/*`, `config/*`, `win11-tweaks.ps1`, `install.ps1`; `install.cmd` unchanged) |
+| Apps in `config/catalog.json` | 58 total: 35 in the recommended set, 20 DEV (off), 3 POST (off); 0 removed |
+| By method | 45 winget, 4 Store, 5 script, 2 direct, 1 npm, 1 builtin. AI-flagged (Update AI tools): 5 |
 | Next free app Id | 59 (above every Id in Packages, Removed, RetiredIds; use it when adding an app to `config/catalog.json` by hand) |
-| Kit version (branch) | 2.4.2 (`$script:KitVersion` in src/core.psm1) |
+| Kit version | 2.4.2 (`$script:KitVersion` in src/core.psm1) |
 | Modern menu needs | PowerShell 7.4+, PwshSpectreConsole ≥ 2.3 (tested with 2.6.3 on pwsh 7.7.0); no GitHub CLI or sign-in |
 | Startup (this PC) | ~750 ms launch → banner → quit, plus the config fetch (3 small files) |
 | Screen heights (120 × 30) | main 17, start 14, app picker 29, review ≤ 29, results ≤ 28, AI 22, tweaks ≤ 27, settings 22 (24 with local fixes), classic 26 |
@@ -52,19 +43,18 @@ _A new session can start from this line, no handover needed._
 
 ## Open items (priority order)
 
-1. **Merge `rebuild-tui`** (Daniel's go given 2026-11-25; the coordinator merges after reviewing v2.4.2).
-2. **Untested for real (needs a person, a spare PC, or the merge):** an actual install through each method;
+1. **Untested for real (needs a person or a spare PC):** an actual install through each method;
    PowerShell 7 install from the loader on a PC without it; first-run PwshSpectreConsole install; the elevated
-   tweaks window; self-update and `irm | iex` against the real GitHub URLs (tested with `file:///` stand-ins);
-   raw-URL config reads (tested with a `file:///` stand-in; `config/` reaches GitHub `main` only with the merge).
-3. **Self-update under an inherited PowerShell 7 `PSModulePath`:** when Windows PowerShell 5.1 is started from a
+   tweaks window; self-update and `irm | iex` against the real GitHub URLs (tested with `file:///` stand-ins).
+   Raw-URL config read from `main` answers HTTP 200 since the merge.
+2. **Self-update under an inherited PowerShell 7 `PSModulePath`:** when Windows PowerShell 5.1 is started from a
    shell that inherited pwsh's module path, `Expand-Archive` fails ("Cannot find an overload for
    ExtractToDirectory") and the update is skipped; the running copy is kept, so nothing strands. Seen in local test
    runs (`test-config.ps1` under 5.1 passes with a clean `PSModulePath`); `install.cmd` from Explorer is not
    affected. Not fixed yet.
-4. Claude Desktop stays on winget: Anthropic's latest-download redirect returns HTTP 403 to scripted clients.
+3. Claude Desktop stays on winget: Anthropic's latest-download redirect returns HTTP 403 to scripted clients.
 
 ## What's next
 
-- After the merge: run `irm https://raw.githubusercontent.com/1nst4ll/my-win-kit/main/install.ps1 | iex`
+- Run `irm https://raw.githubusercontent.com/1nst4ll/my-win-kit/main/install.ps1 | iex`
   on a spare PC, and bump `KitVersion` once to see the update prompt on a second PC.

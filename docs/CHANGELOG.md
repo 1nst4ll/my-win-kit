@@ -2,6 +2,13 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-25: rebuild merged to `main` and published (kit v2.4.2)
+
+- Daniel: "fix both and merge comit push to mainn". PR #1 (`rebuild-tui`) merged into `main` after review of
+  v2.4.2; CI green on both jobs. The post-merge publish copied 8 files to OneDrive (`src/*`, `config/*`,
+  `win11-tweaks.ps1`, `install.ps1`; `install.cmd` unchanged). `config/catalog.json` on `main` answers HTTP 200
+  from raw.githubusercontent.com, so every PC now reads the committed list at start-up.
+
 ## 2026-11-25: failed winget upgrades are reported as failed, key-sending rule, kit v2.4.2 (branch `rebuild-tui`)
 
 - Daniel: "fix both and merge comit push to mainn".
