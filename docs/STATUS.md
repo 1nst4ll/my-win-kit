@@ -11,10 +11,9 @@ _A new session can start from this line, no handover needed._
   "Checking what's installed" on a laptop: `hermes --version` ran a git fetch that never finished, and
   `Invoke-KitProcess` had no time limit (see CHANGELOG). Now: Hermes's version is read from its package metadata
   (`Detect: hermes`) and scans/probes have time limits. Merging publishes it to every PC.
-  - **Manual cleanup, not done:** that laptop has 2.05 GB of leftover `tmp_pack_*` files in
-    `%LOCALAPPDATA%\hermes\hermes-agent\.git\objects\pack` from the hung fetches, plus `git fetch` processes from
-    the hung scan that may still be running. Close the kit, end the `hermes.exe`/`git.exe` processes, then delete the
-    `tmp_pack_*` files.
+  - **Laptop cleaned 2026-11-26** (Daniel: "clean stacy"): the hung `hermes --version` scans and their `git fetch`
+    processes ended, 8 leftover `tmp_pack_*` files (2.55 GB) deleted from Hermes's `.git\objects\pack`; its real
+    packs untouched. Until v2.8.1 is merged, a kit scan on that laptop hangs again and starts a new fetch.
   - `tools/test-config.ps1` has 4 failures (self-update / `irm | iex` checks) that also fail on unchanged `main`, so
     v2.8.1 did not cause them; not yet looked into.
 - **Session paused 2026-11-26 (Daniel: "commit and push and close this session").** `main` = kit v2.8.0, published;
