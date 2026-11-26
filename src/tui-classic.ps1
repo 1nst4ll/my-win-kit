@@ -167,7 +167,12 @@ function Show-Menu {
     Write-C "  $($Gl.Ok) installed  " $Pal.Green -NoNewline; Write-C "$($Gl.Up) update  " $Pal.Yellow -NoNewline; Write-C "$($Gl.Not) not installed    " $Pal.Gray -NoNewline
     Write-C 'toggle  1 5 12  20-27  letter  * all but X  0 none  Z recommended  N only new' $Pal.Gray
     Write-C '  I' $Pal.Orange -NoNewline; Write-C ' install   ' $Pal.Fg -NoNewline; Write-C 'L' $Pal.Orange -NoNewline; Write-C ' latest AI tools   ' $Pal.Fg -NoNewline
-    Write-C 'W' $Pal.Orange -NoNewline; Write-C ' Windows tweaks   ' $Pal.Fg -NoNewline; Write-C 'Q' $Pal.Orange -NoNewline; Write-C ' quit' $Pal.Fg
+    Write-C 'W' $Pal.Orange -NoNewline; Write-C ' Windows tweaks   ' $Pal.Fg -NoNewline
+    $ap = Get-KitAutoInstallPwsh
+    Write-C 'K' $Pal.Orange -NoNewline; Write-C ' auto PowerShell 7 + Terminal: ' $Pal.Fg -NoNewline
+    Write-C $(if ($ap.On) { 'on' } else { 'off' }) $(if ($ap.On) { $Pal.Green } else { $Pal.Gray }) -NoNewline
+    Write-C $(if ($ap.Source -eq 'this PC') { ' (this PC)   ' } else { ' (shared)   ' }) $Pal.Gray -NoNewline
+    Write-C 'Q' $Pal.Orange -NoNewline; Write-C ' quit' $Pal.Fg
 }
 
 function Invoke-ClassicRun([object[]]$Selection, [string]$Mode = 'install') {
@@ -186,7 +191,9 @@ function Invoke-ClassicRun([object[]]$Selection, [string]$Mode = 'install') {
         Write-C ('{0,-24} ' -f $p.Name) $Pal.Fg -NoNewline
         Write-C ('{0,-8} ' -f $p.Method) $Pal.Gray -NoNewline
         if ($p.Interactive -and -not $DryRun) { Write-C 'interactive - answer its prompts' $Pal.Purple }
-        $r = Invoke-KitPackage -Package $p -Installed $inst -Mode $Mode -DryRun:$DryRun
+        $onStatus = $null
+        if ($p.Interactive -and -not $DryRun) { $onStatus = { param($m) Write-C "         $m" $Pal.Gray } }
+        $r = Invoke-KitPackage -Package $p -Installed $inst -Mode $Mode -DryRun:$DryRun -OnStatus $onStatus
         Restore-Vt
         if ($p.Interactive -and -not $DryRun) { Write-Host (' ' * 43) -NoNewline }
         $badge, $role = switch ($r.Status) {
@@ -233,7 +240,7 @@ while ($true) {
     $ans = Read-Answer '>'
     if ([string]::IsNullOrWhiteSpace($ans)) { continue }
     $u = $ans.Trim().ToUpper()
-    # Commands use letters that are NOT group letters (U A B C P M R S E T G O D X)
+    # Commands use letters that are NOT group letters (U A B C P M R S E T G O D X): Q I L W K Z N
     if ($u -eq 'Q') {
         Write-Host ''
         $bye = ((C 0x2591) + (C 0x2592) + (C 0x2593)) + ((C 0x2550) * 20) + ' see you next time ' + ((C 0x2550) * 20) + ((C 0x2593) + (C 0x2592) + (C 0x2591))
@@ -249,7 +256,7 @@ while ($true) {
         continue
     }
     if ($u -eq 'L') {
-        $ai = @($cat | Where-Object { $_.AI -and $installed.ContainsKey($_.Id) })
+        $ai = @(Get-KitAiUpdateSet -Installed $installed -Packages $cat)   # installed AI tools only, never new ones
         if ($ai.Count -gt 0) {
             Write-C "  AI tools installed here: $(($ai | ForEach-Object { "$($_.Name) $($installed[$_.Id])" }) -join ', ')" $Pal.Fg
             $ok = Read-Answer 'Update them to the latest versions? [Y/n]'
@@ -261,6 +268,11 @@ while ($true) {
         $tw = Join-Path $KitRoot 'win11-tweaks.ps1'
         if ($DryRun) { Write-C "  $($Gl.Dry) would run: powershell -File $tw" $Pal.Purple; [void](Read-Answer 'Press Enter') }
         else { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $tw }
+        continue
+    }
+    if ($u -eq 'K') {
+        # per-PC preference (local-settings.json, never GitHub); tests only write into their scratch state folder
+        if (-not $script:Testing -or $env:MYWINKIT_STATE_DIR) { Set-KitLocalPref -Name 'autoInstallPwsh' -Value (-not (Get-KitAutoInstallPwsh).On) }
         continue
     }
     if ($u -eq 'Z') { foreach ($p in $cat) { $p.On = $p.Default }; continue }

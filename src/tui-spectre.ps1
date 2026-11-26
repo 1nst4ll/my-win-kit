@@ -756,7 +756,7 @@ function Invoke-Run {
         $r = [Spectre.Console.Rule]::new("[$($Hex.Purple) bold]$($Glyph.Warn) $(E $p.Name)[/] [$($Hex.Gray)]interactive - answer its prompts[/]")
         $r.Justification = [Spectre.Console.Justify]::Left; $r.Style = St $Hex.Purple; Out-Render $r
         $inst = $null; if ($script:Installed.ContainsKey($p.Id)) { $inst = $script:Installed[$p.Id] }
-        $res = Invoke-KitPackage -Package $p -Installed $inst -Mode $Mode
+        $res = Invoke-KitPackage -Package $p -Installed $inst -Mode $Mode -OnStatus { param($m) Say "  [$($Hex.Gray)]$($Glyph.Tri) $(E $m)[/]" }
         [void](Enable-KitConsoleVt)   # interactive children share the console
         $script:runResults.Add($res)
         Write-ResultLine $res
@@ -882,6 +882,7 @@ function Show-UpdateAI {
         $script:Installed = Get-KitInstalled
         $script:Updates = @{}
         foreach ($p in $ai) {
+            if (-not $script:Installed.ContainsKey($p.Id)) { continue }   # only installed tools are updated here
             $lt = Get-KitLatestVersion -Package $p
             $script:latest[$p.Id] = $lt
             if ($lt -and $script:Installed.ContainsKey($p.Id) -and -not (Test-KitVersionCurrent -Installed $script:Installed[$p.Id] -Latest $lt)) { $script:Updates[$p.Id] = $lt }
@@ -893,31 +894,40 @@ function Show-UpdateAI {
     while ($true) {
         Show-Header 'Update AI tools'
         $t = New-KitTable @(' ', 'Tool', 'Installed', 'Latest', 'How it updates') $Hex.Aqua
-        foreach ($p in $ai) {
+        # rows that fit: window - header(3) - table frame + caption(5) - blank(1) - action list(~8)
+        $trim = Get-TrimmedRows $ai ([Math]::Max(4, (Get-WindowHeight) - 17)) { if ($script:Updates.ContainsKey($_.Id)) { 0 } elseif ($script:Installed.ContainsKey($_.Id)) { 1 } else { 2 } }
+        foreach ($p in $trim.Rows) {
             $inst = if ($script:Installed.ContainsKey($p.Id)) { $v = $script:Installed[$p.Id]; if ($v) { E $v } else { 'installed' } } else { "[$($Hex.Gray)]not installed[/]" }
             $lt = $script:latest[$p.Id]
             $latest = if ($script:Updates.ContainsKey($p.Id)) { "[$($Hex.Yellow) bold]$(E $lt)[/]" } elseif ($lt) { "[$($Hex.Green)]$(E $lt)[/]" } elseif ($p.Update) { "[$($Hex.Gray)]checked by $(E $p.Update)[/]" } else { "[$($Hex.Gray)]-[/]" }
             $how = switch ($p.Method) {
                 'script' { if ($p.Update) { "[$($Hex.Aqua)]$(E $p.Update)[/] [$($Hex.Gray)](official updater)[/]" } else { 'official installer' } }
                 'direct' { "[$($Hex.Aqua)]official download page[/] [$($Hex.Gray)](signed)[/]" }
-                default  { if ($p.Appx) { 'winget + updates itself' } else { 'winget' } }
+                'npm'    { 'npm install -g (latest)' }
+                default  { if ($p.Appx) { 'winget + updates itself' } else { 'winget upgrade' } }
             }
             Add-KitRow $t @((Get-StateBadge $p), "[$($Hex.Fg)]$(E $p.Name)[/]", $inst, $latest, $how)
         }
-        $t.Caption = [Spectre.Console.TableTitle]::new((Get-LegendMarkup))
+        $cap = Get-LegendMarkup
+        if ($trim.Hidden) { $cap += "  [$($Hex.Gray)]$($Glyph.Dot) $($trim.Hidden) more not installed[/]" }
+        $t.Caption = [Spectre.Console.TableTitle]::new($cap)
         Out-Render $t
         Say ''
-        $have = @($ai | Where-Object { $script:Installed.ContainsKey($_.Id) })
+        # Only installed tools are updated here; the AI flag never installs anything (use Install or update apps for that).
+        $have = @(Get-KitAiUpdateSet -Installed $script:Installed -Packages $ai)
         $items = @()
-        if ($have.Count) { $items += @{ Key = 'all'; Label = "[$($Hex.Orange) bold]$($Glyph.Pointer) Update all installed[/] [$($Hex.Gray)]($(Get-Plural $have.Count "tool"))[/]" } }
-        $items += @{ Key = 'pick'; Label = "[$($Hex.Fg)]Pick tools (also installs missing ones)[/]" }
-        $choice = Select-One -Title "[$($Hex.Fg) bold]Update[/]" -Items $items -BackLabel 'Back to main menu'
+        if ($have.Count) {
+            $items += @{ Key = 'all'; Label = "[$($Hex.Orange) bold]$($Glyph.Pointer) Update all installed[/] [$($Hex.Gray)]($(Get-Plural $have.Count "tool"))[/]" }
+            $items += @{ Key = 'pick'; Label = "[$($Hex.Fg)]Pick which installed tools to update[/]" }
+        }
+        $title = if ($have.Count) { "[$($Hex.Fg) bold]Update[/] [$($Hex.Gray)](installed tools only; new ones: Install or update apps)[/]" } else { "[$($Hex.Fg) bold]No AI tools installed on this PC[/] [$($Hex.Gray)](install them from Install or update apps)[/]" }
+        $choice = Select-One -Title $title -Items $items -BackLabel 'Back to main menu'
         $sel = $null
         switch ($choice) {
             'all'  { $sel = $have }
             'pick' {
                 Show-Header 'Choose AI tools'
-                $pitems = foreach ($x in $ai) { New-PickItem "$($x.Id)" (Get-AppLabel $x) -Text $x.Name -Group 'AI' -On:($script:Installed.ContainsKey($x.Id)) }
+                $pitems = foreach ($x in $have) { New-PickItem "$($x.Id)" (Get-AppLabel $x) -Text $x.Name -Group 'AI' -On }
                 $pinned = @(
                     New-PickItem 'done' "[$($Hex.Orange) bold]$($Glyph.Pointer) Continue[/] [$($Hex.Gray)](enter)[/]"
                     New-PickItem 'back' "[$($Hex.Gray)]$($Glyph.Left) Back[/]"
@@ -925,7 +935,7 @@ function Show-UpdateAI {
                 $r = Show-Picker -Title @("[$($Hex.Fg) bold]Choose AI tools[/]") -Items @($pitems) -Pinned $pinned -Multi
                 if ($r.Action -eq 'back' -or ($r.Action -eq 'pinned' -and $r.Key -eq 'back')) { continue }
                 $ids = @($r.Selected | ForEach-Object { [int]$_ })
-                $sel = @($ai | Where-Object { $ids -contains $_.Id })
+                $sel = @($have | Where-Object { $ids -contains $_.Id })
             }
             default { return }
         }
@@ -986,6 +996,7 @@ function Get-SettingsPanel {
     $known = @(
         @{ Name = 'removeShortcuts'; Default = $true;  Desc = 'remove desktop shortcuts that installers create' }
         @{ Name = 'dryRunByDefault'; Default = $false; Desc = 'start every run in dry run' }
+        @{ Name = 'autoInstallPwsh'; Default = $true;  Desc = 'loader installs PowerShell 7 + Terminal unasked (each PC can override)' }
     )
     $first = $true
     foreach ($s in $known) {
@@ -1014,12 +1025,18 @@ function Show-Settings {
         Out-Render (Get-SettingsPanel)
         Say ''
         $dr = if ($script:DryRunOn) { "[$($Hex.Purple) bold]on[/]" } else { "[$($Hex.Gray)]off[/]" }
+        $ap = Get-KitAutoInstallPwsh
+        $apv = if ($ap.On) { "[$($Hex.Green) bold]on[/]" } else { "[$($Hex.Gray)]off[/]" }
+        $aps = if ($ap.Source -eq 'this PC') { '(this PC)' } else { '(this PC: shared default)' }
         $items = @(
-            @{ Key = 'dr';  Label = "[$($Hex.Fg)]Dry run now (show what would run, install nothing):[/] $dr [$($Hex.Gray)](this session)[/]" }
-            @{ Key = 'log'; Label = "[$($Hex.Fg)]Open the log folder[/]" }
+            @{ Key = 'auto'; Label = "[$($Hex.Fg)]Auto-install PowerShell 7 + Terminal on start:[/] $apv [$($Hex.Gray)]$aps[/]" }
+            @{ Key = 'dr';   Label = "[$($Hex.Fg)]Dry run now (show what would run, install nothing):[/] $dr [$($Hex.Gray)](this session)[/]" }
+            @{ Key = 'log';  Label = "[$($Hex.Fg)]Open the log folder[/]" }
         )
         $runlog = if ($env:MYWINKIT_RUNLOG) { "[$($Hex.Gray)]run log: $(E $env:MYWINKIT_RUNLOG)[/]" } else { '' }
         switch (Select-One -Title @("[$($Hex.Fg) bold]Settings[/]", $runlog) -Items $items -BackLabel 'Back to main menu') {
+            # per-PC preference in local-settings.json (never GitHub); tests only write into their scratch state folder
+            'auto' { if (-not $script:Test -or $env:MYWINKIT_STATE_DIR) { Set-KitLocalPref -Name 'autoInstallPwsh' -Value (-not $ap.On) } }
             'dr'  { if (-not $script:Test) { $script:DryRunOn = -not $script:DryRunOn } }   # smoke tests stay dry
             'log' {
                 $d = Join-Path $env:TEMP 'my-win-kit'
@@ -1048,9 +1065,9 @@ try {
         Show-Banner
         $menu = @(
             @{ Key = 'install';  Icon = $Glyph.Pointer; Color = $Hex.Orange; Name = 'Install or update apps'; Desc = "pick from $($script:Catalog.Count) apps: install new ones, update the rest" }
-            @{ Key = 'ai';       Icon = $Glyph.Up;      Color = $Hex.Aqua;   Name = 'Update AI tools';        Desc = "Claude Code $($Glyph.Dot) Claude Desktop $($Glyph.Dot) agy $($Glyph.Dot) Antigravity, always latest" }
+            @{ Key = 'ai';       Icon = $Glyph.Up;      Color = $Hex.Aqua;   Name = 'Update AI tools';        Desc = "the AI tools installed here to latest: Claude, Codex, Cursor, Antigravity $($Glyph.Ell)" }
             @{ Key = 'tweaks';   Icon = $Glyph.Sun;     Color = $Hex.Yellow; Name = 'Windows tweaks';         Desc = 'Spotlight icon, lock-screen tips, Start web search, auto-lock' }
-            @{ Key = 'settings'; Icon = $Glyph.Menu;    Color = $Hex.Blue;   Name = 'Settings';               Desc = 'config source and values (read-only), dry run, log folder' }
+            @{ Key = 'settings'; Icon = $Glyph.Menu;    Color = $Hex.Blue;   Name = 'Settings';               Desc = 'config (read-only), auto PowerShell 7 on this PC, dry run, log folder' }
             @{ Key = 'quit';     Icon = $Glyph.Left;    Color = $Hex.Gray;   Name = 'Quit';                   Desc = 'or press q' }
         )
         $items = foreach ($m in $menu) {

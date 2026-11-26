@@ -18,6 +18,12 @@ param([switch]$Online)
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+# scratch state folder: the per-PC preference tests below write local-settings.json there
+$keepState = $env:MYWINKIT_STATE_DIR
+$env:MYWINKIT_STATE_DIR = Join-Path ([IO.Path]::GetTempPath()) ('my-win-kit-core-' + [guid]::NewGuid().ToString('N'))
+# -Online still tests THIS copy's config/*.json (a PR's catalogue), not GitHub main
+$keepCfg = $env:MYWINKIT_CONFIG_URL
+$env:MYWINKIT_CONFIG_URL = ([Uri](Join-Path $root 'config')).AbsoluteUri
 Import-Module (Join-Path $root 'src\core.psm1') -Force
 
 $script:fail = 0
@@ -48,6 +54,26 @@ Check ($ai.Count -ge 4) "AI tools flagged: $($ai -join ', ')"
 $order = @(Get-KitRunOrder $cat)
 Check ($order[-1].Group -eq 'POST') 'run order puts POST last'
 
+Write-Host 'catalogue changes 2026-11-26 (kit 2.5.0):'
+$byId = @{}; foreach ($p in $cat) { $byId[$p.Id] = $p }
+$removedIds = @(@($data['Removed']) | ForEach-Object { [int]$_['Id'] })
+Check (-not $byId.ContainsKey(8) -and -not $byId.ContainsKey(33) -and $removedIds -contains 8 -and $removedIds -contains 33) 'Perplexity (8) and Samsung Quick Share (33) moved to Removed'
+Check ($byId.ContainsKey(32) -and $byId[32].Ref -eq 'Google.QuickShare') 'Google Quick Share (32) kept'
+Check (-not $byId[4].Default) 'Obsidian (4) is off by default'
+foreach ($id in 53, 54) {
+    $p = $byId[$id]
+    Check ($p.AI -and -not $p.Default -and -not $p.On) "$($p.Name) ($id): AI-flagged and off by default (the AI flag ticks nothing)"
+}
+foreach ($id in 47, 56) { Check ($byId[$id].AI) "$($byId[$id].Name) ($id) is AI-flagged" }
+Check (@($cat | Where-Object { $_.AI -and $_.Group -eq 'DEV' -and $_.Default }).Count -eq 0) 'no AI-flagged dev tool is in the recommended set'
+$set = @(Get-KitAiUpdateSet -Installed @{ 53 = '1.0'; 7 = '140' })
+Check ($set.Count -eq 1 -and $set[0].Id -eq 53) "AI update set = installed AI tools only (Cursor installed -> [$(@($set.Name) -join ', ')]; Codex not installed -> not touched)"
+Check (@(Get-KitAiUpdateSet -Installed @{}).Count -eq 0) 'AI update set is empty when no AI tool is installed (never installs Codex/Cursor)'
+$ctt = $byId[59]; $dev = $byId[60]; $wsl = $byId[61]
+Check ($ctt -and $ctt.Method -eq 'script' -and $ctt.Interactive -and $ctt.Elevated -and $ctt.Shell -eq 'pwsh' -and -not $ctt.Default -and $ctt.Ref -eq 'https://github.com/ChrisTitusTech/powershell-profile/raw/main/setup.ps1') 'Chris Titus prompt (59): official setup.ps1, pwsh, elevated, interactive, off'
+Check ($dev -and $dev.Method -eq 'builtin' -and $dev.Ref -eq 'dev-folder' -and $dev.Default -and -not $dev.Interactive) 'Dev folder (60): builtin, on by default, runs under the progress view'
+Check ($wsl -and $wsl.Method -eq 'builtin' -and $wsl.Ref -eq 'wsl-ubuntu' -and $wsl.Interactive -and $wsl.Group -eq 'DEV' -and -not $wsl.Default) 'WSL + Ubuntu (61): builtin, DEV, interactive, off'
+
 Write-Host 'dry run (no installs):'
 $installed = @{}
 if ($Online) {
@@ -70,6 +96,41 @@ if ($Online) {
 Check (Test-KitVersionCurrent -Installed '2.8.0' -Latest '2.8.0') 'version compare: equal is current'
 Check (-not (Test-KitVersionCurrent -Installed '2.5.5' -Latest '2.8.0')) 'version compare: older is not current'
 Check (Test-KitVersionCurrent -Installed '6.28899.6.0' -Latest '6.28899.6') 'version compare: trailing .0'
+
+Write-Host 'dev folder (Get-KitDevFolderPath, injected D: check):'
+$sys = if ($env:SystemDrive) { $env:SystemDrive } else { 'C:' }
+Check ((Get-KitDevFolderPath -DDriveType 'Fixed') -eq 'D:\dev\git') 'D: is a fixed disk -> D:\dev\git'
+foreach ($t in '', 'CDRom', 'Removable', 'Network') { Check ((Get-KitDevFolderPath -DDriveType $t) -eq "$sys\dev\git") "D: '$t' -> $sys\dev\git" }
+$r = Invoke-KitDevFolder -DryRun -DDriveType ''
+Check (($r.Status -eq 'dryrun' -and $r.Detail -eq "would create $sys\dev\git") -or ($r.Status -eq 'current' -and $r.Detail -like '*already exists')) "dry run creates nothing: $($r.Status) - $($r.Detail)"
+
+Write-Host 'WSL (Select-KitUbuntuDistro on sample wsl --list --online output):'
+$wslOnline = @('The following is a list of valid distributions that can be installed.', "Install using 'wsl.exe --install <Distro>'.", '',
+    'NAME                            FRIENDLY NAME', 'AlmaLinux-9                     AlmaLinux OS 9', 'Debian                          Debian GNU/Linux',
+    'Ubuntu                          Ubuntu', 'Ubuntu-25.10                    Ubuntu 25.10', 'Ubuntu-24.04                    Ubuntu 24.04 LTS',
+    'Ubuntu-22.04                    Ubuntu 22.04 LTS', 'Ubuntu-20.04                    Ubuntu 20.04 LTS', 'openSUSE-Tumbleweed             openSUSE Tumbleweed')
+Check ((Select-KitUbuntuDistro -Lines $wslOnline) -eq 'Ubuntu-24.04') 'picks the highest LTS (24.04), skips interim 25.10'
+Check ((Select-KitUbuntuDistro -Lines ($wslOnline + @('Ubuntu-26.04                    Ubuntu 26.04 LTS'))) -eq 'Ubuntu-26.04') 'a newer LTS (26.04) wins when listed'
+$utf16 = @($wslOnline | ForEach-Object { ($_.ToCharArray() | ForEach-Object { "$_`0" }) -join '' })
+$utf16[0] = [string][char]0xFFFD + [string][char]0xFFFD + $utf16[0]
+Check ((Select-KitUbuntuDistro -Lines $utf16) -eq 'Ubuntu-24.04') 'UTF-16 output read as UTF-8 (NULs, mangled BOM) parses the same'
+Check ((Select-KitUbuntuDistro -Lines @('NAME    FRIENDLY NAME', 'Debian  Debian')) -eq 'Ubuntu') 'no versioned Ubuntu listed -> Ubuntu'
+Check ((Select-KitUbuntuDistro -Lines @()) -eq 'Ubuntu') 'no output (offline) -> Ubuntu'
+Check (Test-KitRebootNeeded -ExitCode 3010 -Out @()) 'reboot: exit 3010'
+Check (Test-KitRebootNeeded -ExitCode 0 -Out @('The requested operation is successful. Changes will not be effective until the system is rebooted.')) 'reboot: "until the system is rebooted"'
+Check (-not (Test-KitRebootNeeded -ExitCode 0 -Out @('Checking for updates.', 'The most recent version of Windows Subsystem for Linux is already installed.'))) 'reboot: not for an up-to-date wsl --update'
+
+Write-Host 'per-PC preference: autoInstallPwsh (local override > settings.json > on):'
+$a = Get-KitAutoInstallPwsh
+# -Online reads settings.json from GitHub main, which may not have the key yet ('default')
+Check ($a.On -and $a.Source -in 'shared', 'default') "no local choice -> settings.json value, else on ($($a.On), $($a.Source))"
+Set-KitLocalPref -Name 'autoInstallPwsh' -Value $false
+$a = Get-KitAutoInstallPwsh
+Check (-not $a.On -and $a.Source -eq 'this PC') "local choice off wins over the shared on ($($a.On), $($a.Source))"
+$lf = Get-KitLocalPrefsFile
+Check ($lf -like "$($env:MYWINKIT_STATE_DIR)*" -and ([IO.File]::ReadAllText($lf)) -eq "{`n  `"autoInstallPwsh`": false`n}`n") 'stored in the state folder (local-settings.json, canonical JSON), not in config/'
+Set-KitLocalPref -Name 'autoInstallPwsh' -Value $true
+Check ((Get-KitAutoInstallPwsh).On) 'local choice back on'
 
 Write-Host 'winget exit codes (Get-KitWingetOutcome, no winget run):'
 $o = Get-KitWingetOutcome -ExitCode 0 -Out @('Successfully installed')
@@ -133,6 +194,9 @@ $m = [uint32]0; [void][T.C]::GetConsoleMode($h, [ref]$m); [void][T.C]::SetConsol
         Write-Host '  skip  console-mode checks (output is not a console; run in a console window to include them)' -ForegroundColor DarkGray
     }
 } finally { Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
+Remove-Item -LiteralPath $env:MYWINKIT_STATE_DIR -Recurse -Force -ErrorAction SilentlyContinue
+$env:MYWINKIT_STATE_DIR = $keepState
+$env:MYWINKIT_CONFIG_URL = $keepCfg
 
 if ($script:fail -eq 0) { Write-Host 'test-core: all passed' -ForegroundColor Green }
 else { Write-Host "test-core: $($script:fail) failure(s)" -ForegroundColor Red }

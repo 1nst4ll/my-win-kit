@@ -20,6 +20,9 @@ $root = Split-Path -Parent $PSScriptRoot
 $tui = Join-Path $root 'src\tui-spectre.ps1'
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 $env:MYWINKIT_STATE_DIR = Join-Path ([IO.Path]::GetTempPath()) ("my-win-kit-render-" + [guid]::NewGuid())
+# this copy's config/*.json (not GitHub main) and loader (no self-update)
+$env:MYWINKIT_CONFIG_URL = ([Uri](Join-Path $root 'config')).AbsoluteUri
+$env:MYWINKIT_RAW_URL = 'file:///C:/nonexistent-my-win-kit-update-source'
 
 $screens = [ordered]@{
     '1-main-menu+goodbye' = 'text:q'

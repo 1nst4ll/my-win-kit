@@ -80,7 +80,7 @@ try {
     }
     $u = ConvertTo-KitJsonDocument ([ordered]@{ Name = "Caf$([char]0xE9) `"q`" \ x" })
     Check (-not @([Text.Encoding]::UTF8.GetBytes($u) | Where-Object { $_ -gt 127 }).Count -and (ConvertFrom-KitJsonText $u)['Name'] -eq "Caf$([char]0xE9) `"q`" \ x") 'JSON writer: ASCII-only (\u escapes), round-trips quotes and backslashes'
-    Check (@(($t1 -split "`n") | Where-Object { $_ -match '^\s+\{ "Id": ' }).Count -eq @($doc['Packages']).Count) 'JSON writer: one package per line'
+    Check (@(($t1 -split "`n") | Where-Object { $_ -match '^\s+\{ "Id": ' }).Count -eq (@($doc['Packages']).Count + @(@($doc['Removed']) | Where-Object { $_ }).Count)) 'JSON writer: one package per line (Packages and Removed)'
 
     # ---------------------------------------------------------------- hand-edited catalogue: Ids are permanent
     $all = @(@($doc['Packages']) + @($doc['Removed']) | Where-Object { $_ } | ForEach-Object { [int]$_['Id'] })

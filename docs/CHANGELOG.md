@@ -2,6 +2,57 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-26: catalogue changes, Chris Titus prompt, dev folder, WSL + Ubuntu, auto PowerShell 7 + Terminal (kit v2.5.0, branch `catalog-ps7-wsl`)
+
+- Daniel: "lets remove perplexyty and samsung qick share also lets add titus script for terminal prompt, also add
+  setup of d:\dev\git folder if d: does not exist then root c: also script to setup latest wsl and latest ubuntu,
+  obsidian untick as default install i section to update ai tools if installed update other ones aswell like codex
+  cursor ect. ps7 and latest terminal should be installed as without asking as soon as ps5 manage to run then
+  restart in ps7 add toggle to tun it off in settings but set as default on". Follow-up via the coordinator: Codex
+  CLI and Cursor must stay off by default; the AI flag must not tick them anywhere, and Update AI tools only
+  updates them when they are already installed, never installs them.
+- **Catalogue (`config/catalog.json`, canonical form):** Perplexity (8) and Samsung Quick Share (33) moved to
+  `Removed` (Google Quick Share 32 stays). Obsidian (4) off by default. `AI: true` on Cursor (53), Codex CLI (54),
+  KiloCode CLI (47) and Hermes Agent (56; `Exe` = its install folder, `Update` = `hermes update`); Cursor and Codex
+  stay `On: false`. New: **Chris Titus prompt (59)**, script
+  `https://github.com/ChrisTitusTech/powershell-profile/raw/main/setup.ps1` (the one-liner in that repo's README,
+  checked 2026-11-26), DEV, off, `Interactive`, new fields `Elevated` + `Shell: pwsh` (the setup returns without
+  doing anything when not elevated, and installs into the running shell's profile, so it must run as admin under
+  PowerShell 7), `Requires: pwsh`, `Detect: ctt-profile`. **Dev folder (60)**, builtin, UTIL, on: `D:\dev\git`
+  when D: is a ready fixed disk, else `C:\dev\git`. **WSL + Ubuntu (61)**, builtin, DEV, off, `Interactive`.
+  Windows Terminal (34) / PowerShell 7 (35) descriptions say the loader installs them. Next free Id 62.
+- **Engine (`src/core.psm1`):** builtins `dev-folder` (`Get-KitDevFolderPath` with an injectable D: check,
+  `Invoke-KitDevFolder`) and `wsl-ubuntu` (`Invoke-KitWslUbuntu`: `wsl --install --no-distribution` or
+  `wsl --update` through the new `Invoke-KitElevatedCapture`, restart detection, newest Ubuntu LTS from
+  `wsl --list --online` via `Select-KitUbuntuDistro` / `ConvertFrom-KitWslText` (UTF-16 safe, `WSL_UTF8=1`), then
+  `wsl --install -d <name>` on the console for Ubuntu's user set-up). New catalogue key `Detect` (`Get-KitDetect`:
+  dev folder exists, PowerShell 7 profile is the CTT one, an Ubuntu distro is registered, read from the registry).
+  Scripts: `Shell: pwsh` and `Elevated` (own administrator window with `-EncodedCommand`; declined UAC = "administrator
+  prompt declined"). npm globals are detected (`npm ls -g`) and their latest version read (`npm view`), so KiloCode
+  shows up and updates. An `Exe` folder proves an install; its command comes from PATH. `Get-KitAiUpdateSet`
+  (installed AI tools only) feeds both menus. Per-PC preferences: `local-settings.json`
+  (`Get-KitLocalPrefs` / `Set-KitLocalPref`), `Get-KitAutoInstallPwsh` (this PC > settings.json > on).
+- **Loader (`install.ps1`, 5.1):** with `autoInstallPwsh` on (new in `config/settings.json`, default true) it
+  installs PowerShell 7 and the latest Windows Terminal (winget) without asking, then starts the modern menu under
+  pwsh; failures end in the classic menu as before; a failed Terminal install isn't retried the same day. Off
+  (this PC's override) → the old "Install PowerShell 7 now?" question. New test hooks: `-NoTerminal`,
+  `MYWINKIT_SIMULATE_WT`, `MYWINKIT_SIMULATE_INSTALL=ok|fail`.
+- **Menus:** Update AI tools lists every AI tool but updates only installed ones (the "Pick tools (also installs
+  missing ones)" option is gone; "Pick which installed tools to update" lists installed tools only), trims its table
+  to the window, and the main-menu line no longer names four tools. Settings gets the row "Auto-install PowerShell
+  7 + Terminal on start: on/off (this PC)" (local file, never GitHub) and shows `autoInstallPwsh` read-only. Classic
+  menu: `K` toggles the same override and the command line shows it; `L` uses `Get-KitAiUpdateSet`. Interactive
+  items print their status steps (e.g. "type exit to come back here").
+- **Tests:** test-core: catalogue changes, Cursor/Codex AI-flagged and off, AI update set (installed only, empty
+  when none), dev-folder path for Fixed / none / CDRom / Removable / Network, WSL picker (24.04 over interim 25.10,
+  26.04 when listed, UTF-16 text, fallback), restart detection, preference precedence. smoke-loader: auto mode
+  installs without the question (dry run, simulated ok/fail), Terminal-only, not retried the same day, local
+  override off → ask first, classic `K`. smoke-tui: AI table, installed-only pick, Settings toggle; "n clears
+  Utilities" now leaves 29 apps. test-core, smoke-tui, smoke-loader and render-screens now read this copy's
+  `config/` (`MYWINKIT_CONFIG_URL` = `file:///`), so a PR's catalogue is what gets tested (they read GitHub `main`
+  before). test-config counts `Removed` lines in the one-package-per-line check.
+- Kit version 2.5.0. Not merged or published: waits for Daniel's go.
+
 ## 2026-11-25: rebuild merged to `main` and published (kit v2.4.2)
 
 - Daniel: "fix both and merge comit push to mainn". PR #1 (`rebuild-tui`) merged into `main` after review of
