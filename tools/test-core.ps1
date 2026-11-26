@@ -116,9 +116,9 @@ foreach ($dt in 'Fixed', '', 'CDRom', 'Removable', 'Network') {
     }
 }
 Check (-not $devBad.Count) "80 combinations (D: fixed / none / CD / USB / network x 16 sets of existing folders): existing dev\github before dev\git, D: before C:, else a new dev\github$(if ($devBad.Count) { ': ' + ($devBad | Select-Object -First 3) -join '; ' })"
-Check ((Get-KitDevFolderPath -DDriveType 'Fixed' -Exists { param($p) $p -eq "$sys\dev\github" }) -eq "$sys\dev\github") 'athena-style: C:\dev\github exists, D: present -> C:\dev\github (nothing new on D:)'
-Check ((Get-KitDevFolderPath -DDriveType 'Fixed' -Exists { param($p) $p -in 'D:\dev\github', "$sys\dev\git" }) -eq 'D:\dev\github') 'stacy-style: D:\dev\github wins over an old dev\git'
-Check ((Get-KitDevFolderPath -DDriveType '' -Exists { param($p) $p -eq "$sys\dev\git" }) -eq "$sys\dev\git") 'joanna/ninja-style: only C:\dev\git -> reused, never moved or renamed'
+Check ((Get-KitDevFolderPath -DDriveType 'Fixed' -Exists { param($p) $p -eq "$sys\dev\github" }) -eq "$sys\dev\github") 'PC A: C:\dev\github exists, D: present -> C:\dev\github (nothing new on D:)'
+Check ((Get-KitDevFolderPath -DDriveType 'Fixed' -Exists { param($p) $p -in 'D:\dev\github', "$sys\dev\git" }) -eq 'D:\dev\github') 'PC B: D:\dev\github wins over an old dev\git'
+Check ((Get-KitDevFolderPath -DDriveType '' -Exists { param($p) $p -eq "$sys\dev\git" }) -eq "$sys\dev\git") 'PC C/D: only C:\dev\git -> reused, never moved or renamed'
 $r = Invoke-KitDevFolder -DryRun -DDriveType '' -Exists { param($p) [void]$p; $false }
 Check ($r.Status -eq 'dryrun' -and $r.Detail -eq "would create $sys\dev\github") "nothing there, no D: -> would create $sys\dev\github (dry run creates nothing)"
 $r = Invoke-KitDevFolder -DryRun -DDriveType '' -Exists { param($p) $p -eq "$sys\dev\git" }

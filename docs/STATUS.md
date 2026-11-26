@@ -19,7 +19,7 @@ _A new session can start from this line, no handover needed._
 - **Kit v2.7.0 is live:** PR #4 merged into `main` (f28612d) on 2026-11-26 with Daniel's go ("merge 4"); the
   post-merge publish copied 8 files to OneDrive (incl. the new `config/terminal.json`). The essentials step: at
   every start, without asking, in order: PowerShell 7, Windows Terminal, Claude Code CLI, CaskaydiaCove Nerd Font,
-  the Windows Terminal settings tidied from Stacy (`config/terminal.json`) and Windows Terminal as the default
+  the Windows Terminal settings tidied from the reference PC (`config/terminal.json`) and Windows Terminal as the default
   terminal app. Setting `autoInstallEssentials` (was `autoInstallPwsh`, still read). Not yet run for real (Open
   items 1).
 - **Kit v2.6.0 is live:** PR #3 merged into `main` (6b9fcc5) on 2026-11-26 with Daniel's go ("merge 3"); the
@@ -69,7 +69,7 @@ _A new session can start from this line, no handover needed._
 1. **Untested for real (needs a person or a spare PC):** the **real UAC relaunch** (`install.cmd` from Explorer:
    one prompt, the admin window, the first window waiting and closing; declined → carries on) and a **real
    `install.cmd /auto`** run; the over-the-shoulder hand-back with a real standard account; a real NoAdmin
-   de-elevated install (the scheduled-task runner itself was checked by hand on ATHENA with `cmd /c`); a real
+   de-elevated install (the scheduled-task runner itself was checked by hand on the main PC with `cmd /c`); a real
    Update everything run (rest-of-PC `winget upgrade` items, e.g. Visual C++ / .NET runtimes, which may want a
    restart); whether Dropbox's post-install launch runs elevated (no evidence either way, not NoAdmin);
    an actual install through each method;

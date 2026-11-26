@@ -85,7 +85,7 @@ try {
     # ---------------------------------------------------------------- config/terminal.json (public repo: no personal data)
     $tj = [IO.File]::ReadAllText((Join-Path $repo 'config\terminal.json'))
     Check (-not @([Text.Encoding]::UTF8.GetBytes($tj) | Where-Object { $_ -gt 127 }).Count) 'terminal.json: ASCII-only (the robot icon is a \u escape)'
-    $personal = @(@('C:\\Users\\', 'D:\\OneDrive', $env:USERNAME, $env:COMPUTERNAME, 'Stacy', '@', 'startOnUserLogin') | Where-Object { $_ -and $tj.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+    $personal = @(@('C:\\Users\\', 'D:\\OneDrive', $env:USERNAME, $env:COMPUTERNAME, '@', 'startOnUserLogin') | Where-Object { $_ -and $tj.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
     $ip = [regex]::Match($tj, '\b\d{1,3}(\.\d{1,3}){3}\b')
     Check (-not $personal.Count -and -not $ip.Success) "terminal.json: no user names, host names, personal paths or IPs$(if ($personal.Count) { ': ' + ($personal -join ', ') })"
     $td = ConvertFrom-KitJsonText $tj

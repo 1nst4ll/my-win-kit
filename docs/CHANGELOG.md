@@ -2,6 +2,12 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-26: machine names removed from docs and tests
+
+- Daniel: "anonimize it". The public repo named Daniel's own PCs in docs and test labels. They now read "the main
+  PC", "the reference PC" and "PC A/B/C/D"; test-config's personal-data check keeps the user and computer name
+  checks. Older commits still contain the names (no history rewrite).
+
 ## 2026-11-26: v2.8.0 merged to `main` and published
 
 - Daniel: "merge 5". PR #5 (`v28-latest`) merged as 1bdf12e after review; CI green on both jobs. The post-merge
@@ -51,7 +57,7 @@
 - **Smart App Control:** with it on (`VerifiedAndReputablePolicyState` = 1), an Application Control refusal is
   "blocked by Smart App Control", and Hermes (unsigned) is not even started (Update AI tools skips it with that note).
 - **Terminal:** `config/terminal.json` `startingDirectory.prefer` = `dev-folder` (the dev folder logic itself); the
-  folder is also set on the kit's own profiles, so a Claude Code profile with its own folder (Stacy's) moves too. A
+  folder is also set on the kit's own profiles, so a Claude Code profile with its own folder (on the reference PC) moves too. A
   new **my-win-kit** profile starts `install.cmd` from the OneDrive kit folder through `%OneDrive%` (no personal
   path in the repo).
 - **The kit inside Windows Terminal:** Daniel's run log showed Terminal installed and set as the default terminal
@@ -77,7 +83,7 @@
 - Daniel: "change this starting to D:\dev\git or if no D: C:\dev\git". `config/terminal.json` `startingDirectory.prefer` is now
   `D:\dev\git` (was `%OneDrive%\.playground`); when it doesn't exist the dev-folder fallback picks
   `D:\dev\git` or `C:\dev\git` and creates it. Config-only, live at each PC's next start. A profile that already
-  carries its own `startingDirectory` (Stacy's Claude Code profile) keeps it until v2.8 sets the kit profile's
+  carries its own `startingDirectory` (the reference PC's Claude Code profile) keeps it until v2.8 sets the kit profile's
   folder too.
 
 ## 2026-11-26: v2.7.0 merged to `main` and published
@@ -88,7 +94,7 @@
 
 ## 2026-11-26: essentials at start: PowerShell 7, Terminal, Claude Code, Nerd Font, Terminal settings, default terminal (kit v2.7.0, branch `essentials`)
 
-- Daniel: "go to stacy and copy settings for terminal app then analyze and tidy up and add to auto install upon the
+- Daniel: "go to [the reference PC] and copy settings for terminal app then analyze and tidy up and add to auto install upon the
   start script together with ps7 and terminal so terminal opens the same way. Add there also claude cli. These are
   absolute essentials for me on a new system and should be installed without asking."
 - **Before this branch:** PR #3 (kit v2.6.0) was merged into `main` (6b9fcc5) and published on 2026-11-26 with
@@ -103,14 +109,14 @@
 - **One setting:** `autoInstallPwsh` → `autoInstallEssentials` (`config/settings.json`, default true; Settings row
   "Install essentials on start (PS7, Terminal, Claude Code, font, Terminal settings)", classic `K`). The older name is
   still read, shared and per PC, so a PC that turned it off stays off.
-- **Terminal settings from Stacy, tidied (`config/terminal.json`, new):** copied from Stacy's Windows Terminal 1.25
+- **Terminal settings from the reference PC, tidied (`config/terminal.json`, new):** copied from the reference PC's Windows Terminal 1.25
   `settings.json`. Kept: a *Claude Code* profile as the default (same guid, `pwsh.exe -NoExit -Command claude`, robot
   icon as a `\u` escape), profile defaults *Dark+*, `CaskaydiaCove Nerd Font Mono`, opacity 90, no acrylic; acrylic
   tab row, no copy-on-select, plain-text copy; Ctrl+C copy, Ctrl+V paste, Alt+Shift+D duplicate pane; the
-  remaining-profiles new-tab menu. Tidied: the starting folder is `%OneDrive%\.playground` resolved on each PC (Stacy's
+  remaining-profiles new-tab menu. Tidied: the starting folder is `%OneDrive%\.playground` resolved on each PC (the reference PC's
   `D:\OneDrive\.playground` only exists there; the kit's dev folder when it doesn't exist); dropped the hard-coded
   Command Prompt / PowerShell / Ubuntu-26.04 entries (Terminal generates them itself), `startOnUserLogin` (only in
-  Stacy's older backup), the profile's own copy of the starting folder and the empty `actions` / `schemes` / `themes`.
+  the reference PC's older backup), the profile's own copy of the starting folder and the empty `actions` / `schemes` / `themes`.
   The merge keeps everything else in a PC's file, backs it up first (`settings.json.bak-my-win-kit-<date>`), writes
   only when something changes, never overwrites a file it can't read, leaves the font out until the Nerd Font is
   installed and keeps the PC's default profile while PowerShell 7 is missing. Read like the other config files
@@ -125,7 +131,7 @@
   release's `SHA-256.txt`; not installed without a checksum. Regular + Mono TTFs; all users (`%WINDIR%\Fonts` + HKLM)
   when elevated, else this user; skipped when the Mono face is already there.
 - **Default terminal:** `HKCU\Console\%%Startup` `DelegationConsole` / `DelegationTerminal` = Windows Terminal's GUIDs
-  (checked against Microsoft's Terminal group-policy page; the same values Stacy has), only after Terminal is installed.
+  (checked against Microsoft's Terminal group-policy page; the same values the reference PC has), only after Terminal is installed.
 - **Fix:** the JSON writer read a key named `keys` (Terminal key bindings) as the dictionary's own key list; it now
   uses `PSBase.Keys` / `.Values` / `.Count`. Plain ASCII strings skip the character-by-character escape loop.
 - **Tests:** test-core (merge on scratch files: fresh, comments + trailing comma + other profiles kept, backup,
@@ -192,7 +198,7 @@
   test-core covers `elevateAtStart`, NoAdmin routing, the de-elevation helper (simulated) and the task script itself,
   the `/auto` plan, the update-everything plan from sample `winget upgrade` output and failure reasons. smoke-tui
   covers the Update submenu, Update everything (review, and a dry run when this PC has updates), one Back row on
-  results, the ADMIN badge and the new Settings row. The scheduled-task runner was checked by hand on ATHENA
+  results, the ADMIN badge and the new Settings row. The scheduled-task runner was checked by hand on the main PC
   (medium integrity, exit 7 returned, task deleted, ~1 s).
 
 ## 2026-11-26: catalogue changes, Chris Titus prompt, dev folder, WSL + Ubuntu, auto PowerShell 7 + Terminal (kit v2.5.0, branch `catalog-ps7-wsl`)
@@ -356,7 +362,7 @@
 - **Read:** every start fetches the latest config (raw GitHub URL, 4 s; `gh api` when the repo is private) and
   caches it; offline → cache → bundled copy. The banner shows the source.
 - **Write:** Manage packages and Settings commit to `main` through `gh api` (contents API, sha; on a conflict
-  re-fetch, re-apply, retry once). Plain user commit messages ("config: add 7-Zip (from ATHENA)"). Offers to
+  re-fetch, re-apply, retry once). Plain user commit messages ("config: add 7-Zip (from PC-NAME)"). Offers to
   install gh and runs `gh auth login --web`; no tokens stored by the kit. Dry run previews the commit.
 - **Learned heals** are committed when signed in, else held per PC and pushed from Settings.
 - **Self-update:** the loader compares `KitVersion` with GitHub `main`, asks once per version, downloads the repo
