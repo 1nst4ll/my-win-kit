@@ -1,13 +1,21 @@
 # Status: where the kit is
 
 > **Owns:** every volatile fact (counts, dates, last publish, open bugs, what's next). Other docs link here.
-> _Last updated: 2026-11-25._
+> _Last updated: 2026-11-26._
 
 ## ▶ Resume here (current focus)
 
 _A new session can start from this line, no handover needed._
 
-- **The rebuild is live (kit v2.4.2).** PR #1 merged into `main` on 2026-11-25 with Daniel's go ("fix both and
+- **Kit v2.5.0 is on branch `catalog-ps7-wsl` (PR into `main`, waiting for Daniel's go; not merged, not
+  published).** Daniel's 2026-11-26 request: Perplexity and Samsung Quick Share removed; Obsidian off; Chris Titus
+  PowerShell prompt (Id 59), Dev folder `D:\dev\git` / `C:\dev\git` (Id 60, recommended), WSL + newest Ubuntu LTS
+  (Id 61); Update AI tools covers Cursor, Codex CLI, KiloCode CLI and Hermes Agent too (installed ones only;
+  Cursor/Codex stay off by default); the loader installs PowerShell 7 + Windows Terminal **without asking**
+  (setting `autoInstallPwsh`, default on, per-PC override in Settings / classic `K`). All local tests pass; the
+  real installs are untested (see Open items 1).
+- After the merge: run `install.cmd` on this PC once to see the 2.5.0 update prompt, then try the new items for real.
+- **The rebuild is live (kit v2.4.2 on `main`).** PR #1 merged into `main` on 2026-11-25 with Daniel's go ("fix both and
   merge comit push to mainn"); the post-merge publish copied 8 files to OneDrive. Every PC now gets the modern
   menu + classic fallback, always-latest AI tools, **config read from GitHub `main`** at each start (raw URL →
   cache → bundled copy) and **self-update** from GitHub. The menu never writes config: Daniel edits
@@ -30,23 +38,28 @@ _A new session can start from this line, no handover needed._
 | Config home | `config/catalog.json`, `config/settings.json`, `config/winget-id-overrides.json` on GitHub `main`, edited by hand |
 | Publish target | `$env:OneDrive\[98] Shortcuts` (the OneDrive folder every PC syncs) |
 | Last publish | 2026-11-25: merge of PR #1, 8 files copied (`src/*`, `config/*`, `win11-tweaks.ps1`, `install.ps1`; `install.cmd` unchanged) |
-| Apps in `config/catalog.json` | 58 total: 35 in the recommended set, 20 DEV (off), 3 POST (off); 0 removed |
-| By method | 45 winget, 4 Store, 5 script, 2 direct, 1 npm, 1 builtin. AI-flagged (Update AI tools): 5 |
-| Next free app Id | 59 (above every Id in Packages, Removed, RetiredIds; use it when adding an app to `config/catalog.json` by hand) |
-| Kit version | 2.4.2 (`$script:KitVersion` in src/core.psm1) |
+| Apps in `config/catalog.json` | 59 total: 33 in the recommended set, 22 DEV (off), 3 POST (off); 2 removed (Perplexity 8, Samsung Quick Share 33) _(branch `catalog-ps7-wsl`; `main` still has 58 / 35 / 20 / 3 / 0)_ |
+| By method | 45 winget, 2 Store, 6 script, 2 direct, 1 npm, 3 builtin. AI-flagged (Update AI tools): 9 (Claude Desktop, Claude Code CLI, KiloCode CLI, Cursor, Codex CLI, Antigravity IDE, Antigravity, Antigravity CLI, Hermes Agent) |
+| Next free app Id | 62 (above every Id in Packages, Removed, RetiredIds; use it when adding an app to `config/catalog.json` by hand) |
+| Kit version | 2.5.0 on branch `catalog-ps7-wsl` (`$script:KitVersion` in src/core.psm1); `main` is 2.4.2 |
+| Shared settings | `removeShortcuts` true, `dryRunByDefault` false, `autoInstallPwsh` true (branch) |
 | Modern menu needs | PowerShell 7.4+, PwshSpectreConsole ≥ 2.3 (tested with 2.6.3 on pwsh 7.7.0); no GitHub CLI or sign-in |
 | Startup (this PC) | ~750 ms launch → banner → quit, plus the config fetch (3 small files) |
-| Screen heights (120 × 30) | main 17, start 14, app picker 29, review ≤ 29, results ≤ 28, AI 22, tweaks ≤ 27, settings 22 (24 with local fixes), classic 26 |
-| Run logs | `%LOCALAPPDATA%\my-win-kit\logs\run-*.log` (newest 30 kept); config cache and this PC's learned heals (`local-overrides.json`) in `...\cache`, downloaded kit copies in `...\app` |
+| Screen heights (120 × 30) | main 17, start 14, app picker 29, review ≤ 29, results ≤ 28, AI 26 (9 tools; pick 18), tweaks ≤ 27, settings 23 (25 with local fixes), classic 29 incl. the prompt line (1 row spare: one more row of apps in a group needs a layout change) |
+| Run logs | `%LOCALAPPDATA%\my-win-kit\logs\run-*.log` (newest 30 kept); config cache and this PC's learned heals (`local-overrides.json`) in `...\cache`, downloaded kit copies in `...\app`, per-PC preferences in `...\local-settings.json`, the loader's "Terminal install failed today" note in `...\loader.json` |
 | Latest direct versions seen | Antigravity IDE 2.8.0, Antigravity 2.35.1 (2026-11-25, from antigravity.google/download) |
 | CI | lint.yml: ps51 job (parse, test-core, smoke-loader, test-config) + pwsh job (lint, test-core -Online, test-config, smoke-tui) |
 
 ## Open items (priority order)
 
 1. **Untested for real (needs a person or a spare PC):** an actual install through each method;
-   PowerShell 7 install from the loader on a PC without it; first-run PwshSpectreConsole install; the elevated
-   tweaks window; self-update and `irm | iex` against the real GitHub URLs (tested with `file:///` stand-ins).
-   Raw-URL config read from `main` answers HTTP 200 since the merge.
+   the **automatic PowerShell 7 + Windows Terminal install** from the loader on a fresh PC (tested with dry run and
+   `MYWINKIT_SIMULATE_INSTALL` only); a **real WSL + Ubuntu install** (UAC prompt, possible restart, Ubuntu's
+   user set-up in the kit's console, distro detection afterwards); the **real Chris Titus profile install** (its
+   own administrator window under pwsh; this PC's profile is already the CTT one and is detected as installed);
+   the Dev folder on a PC with a D: disk; first-run PwshSpectreConsole install; the elevated tweaks window;
+   self-update and `irm | iex` against the real GitHub URLs (tested with `file:///` stand-ins). Raw-URL config
+   read from `main` answers HTTP 200 since the merge.
 2. **Self-update under an inherited PowerShell 7 `PSModulePath`:** when Windows PowerShell 5.1 is started from a
    shell that inherited pwsh's module path, `Expand-Archive` fails ("Cannot find an overload for
    ExtractToDirectory") and the update is skipped; the running copy is kept, so nothing strands. Seen in local test
@@ -54,7 +67,15 @@ _A new session can start from this line, no handover needed._
    affected. Not fixed yet.
 3. Claude Desktop stays on winget: Anthropic's latest-download redirect returns HTTP 403 to scripted clients.
 
+4. Hermes Agent on this PC: Windows Application Control blocks
+   `%LOCALAPPDATA%\hermes\hermes-agent\venv\Scripts\hermes.exe` ("An Application Control policy has blocked this
+   file"), so its version shows as "installed" and `hermes update` from Update AI tools will fail here until that
+   policy allows it. Detection uses the install folder (a custom `HERMES_HOME` is not detected).
+
 ## What's next
+
+- Daniel's go on the `catalog-ps7-wsl` PR, then the merge (publishes to OneDrive), then the real-install checks in
+  Open items 1.
 
 - Run `irm https://raw.githubusercontent.com/1nst4ll/my-win-kit/main/install.ps1 | iex`
   on a spare PC, and bump `KitVersion` once to see the update prompt on a second PC.

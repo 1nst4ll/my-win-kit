@@ -20,6 +20,8 @@ param()
 $root = Split-Path -Parent $PSScriptRoot
 $tui = Join-Path $root 'src\tui-spectre.ps1'
 $fail = 0
+# Test THIS copy's config/*.json, not whatever is on GitHub main
+$env:MYWINKIT_CONFIG_URL = ([Uri](Join-Path $root 'config')).AbsoluteUri
 # Empty per-run state folder, so "last selection" items never shift the menus
 $env:MYWINKIT_STATE_DIR = Join-Path ([IO.Path]::GetTempPath()) ("mwk-smoke-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 # One heal "learned on this PC" (a made-up Id no package uses), so Settings shows the local-fix lines
@@ -41,16 +43,17 @@ $scenarios = @(
        Expect = @('Search apps', 'Claude Code CLI', '1 selected', '1 app', 'would run') }
     @{ Name = 'group toggle: n clears the Utilities group'
        Keys = 'Enter,Enter,text:n,Enter,Escape,Escape,Escape,text:q'
-       Expect = @('31 apps') }
-    @{ Name = 'update AI tools: table -> pick -> esc -> esc -> q'
-       Keys = 'DownArrow,Enter,End,Enter,Escape,Escape,text:q'
-       Expect = @('How it updates', 'Antigravity IDE', 'Choose AI tools', 'claude update', 'see you next time') }
+       Expect = @('29 apps') }
+    @{ Name = 'update AI tools: table lists every AI tool, updates installed ones only -> esc -> q'
+       Keys = 'DownArrow,Enter,Escape,text:q'
+       Expect = @('How it updates', 'Antigravity IDE', 'Cursor', 'Codex CLI', 'KiloCode CLI', 'claude update', 'see you next time')
+       Absent = @('also installs missing ones') }
     @{ Name = 'tweaks: esc back, then open (dry) -> back'
        Keys = 'DownArrow,DownArrow,Enter,Escape,DownArrow,DownArrow,Enter,Enter,Enter,text:q'
        Expect = @('Windows 11 tweaks', 'would run: powershell -File', 'see you next time') }
-    @{ Name = 'settings (read-only): config source, values, local fixes, edit-in-repo line; enter, esc back'
+    @{ Name = 'settings (read-only): config source, values, local fixes, edit-in-repo line; auto PS7 toggle (this PC), esc back'
        Keys = 'DownArrow,DownArrow,DownArrow,Enter,Enter,Escape,text:q'
-       Expect = @('read-only', 'Config', 'removeShortcuts', 'dryRunByDefault', '1 package-ID fix in use (learned when winget', '1 package-ID fix learned on this PC only', 'local-overrides.json', 'To change config, edit config/*.json in the my-win-kit repo on GitHub.', 'Dry run now', 'Open the log folder', 'Back to main menu', 'run log:', 'see you next time')
+       Expect = @('read-only', 'Config', 'removeShortcuts', 'dryRunByDefault', 'autoInstallPwsh', '1 package-ID fix in use (learned when winget', '1 package-ID fix learned on this PC only', 'local-overrides.json', 'To change config, edit config/*.json in the my-win-kit repo on GitHub.', 'Auto-install PowerShell 7 + Terminal on start:', '(this PC: shared default)', '(this PC)', 'Dry run now', 'Open the log folder', 'Back to main menu', 'run log:', 'see you next time')
        Absent = @('Manage packages', 'GitHub account', 'Would commit', 'gh auth') }
 )
 
@@ -60,6 +63,9 @@ if ($hasAi -and -not $env:GITHUB_ACTIONS) {
     $scenarios += @{ Name = 'update AI tools: update all -> simulate -> results -> back'
         Keys = 'DownArrow,Enter,Enter,Enter,text:q'
         Expect = @('Update all installed', 'Updating AI tools', 'would run', 'Summary') }
+    $scenarios += @{ Name = 'update AI tools: pick lists installed tools only -> esc -> esc -> q'
+        Keys = 'DownArrow,Enter,DownArrow,Enter,Escape,Escape,text:q'
+        Expect = @('Pick which installed tools to update', 'Choose AI tools', 'see you next time') }
 }
 
 foreach ($s in $scenarios) {

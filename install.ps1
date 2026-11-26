@@ -9,10 +9,14 @@
          %LOCALAPPDATA%\my-win-kit\app\<version>, verify it, and run from there.
          Any failure falls back to this copy. A newer copy already downloaded is
          used without asking.
-      1. PowerShell 7.4+ present  -> modern menu (src/tui-spectre.ps1) under pwsh.
-      2. Missing or too old       -> offer to install PowerShell 7 (winget,
-                                     fallback: signed MSI from GitHub), then 1.
-      3. Declined / failed        -> classic menu (src/tui-classic.ps1) in 5.1.
+      1. autoInstallPwsh on (default; this PC's choice in Settings, else
+         config/settings.json): install whatever is missing of PowerShell 7
+         (winget, fallback: signed MSI from GitHub) and Windows Terminal
+         (winget) WITHOUT asking, then relaunch under pwsh (2).
+      2. PowerShell 7.4+ present  -> modern menu (src/tui-spectre.ps1) under pwsh.
+      3. autoInstallPwsh off, pwsh missing or too old -> ask "Install PowerShell 7
+                                     now?" first, then 2.
+      4. Declined / failed        -> classic menu (src/tui-classic.ps1) in 5.1.
     If the modern menu cannot load its module (exit 3) it also falls back to the
     classic menu, so a fresh PC is never stuck.
     Quick start: double-click install.cmd, or on any PC (public repo):
@@ -30,8 +34,11 @@
 .PARAMETER NoPwsh
     Testing: behave as if PowerShell 7 were not installed. Same as
     environment variable MYWINKIT_SIMULATE_NO_PWSH=1.
+.PARAMETER NoTerminal
+    Testing: behave as if Windows Terminal were not installed. Same as
+    MYWINKIT_SIMULATE_WT=absent (MYWINKIT_SIMULATE_WT=present: as if installed).
 .PARAMETER WhatIfLoader
-    Testing: print the decision (modern / offer-install / classic) and exit.
+    Testing: print the decision (modern / auto-install / offer-install / classic) and exit.
 .PARAMETER Answer
     Testing: answer for the "install PowerShell 7?" question (y or n).
 .PARAMETER ClassicTestInput
@@ -40,7 +47,9 @@
     Keep ASCII-only and Windows PowerShell 5.1 compatible.
     Overrides (tests): MYWINKIT_REPO, MYWINKIT_BRANCH, MYWINKIT_RAW_URL (base of
     raw files, or file:///folder), MYWINKIT_ZIP_URL (zip, or file:///kit.zip),
-    MYWINKIT_STATE_DIR, MYWINKIT_BOOTSTRAP_ARGS (args for the iex bootstrap).
+    MYWINKIT_STATE_DIR, MYWINKIT_BOOTSTRAP_ARGS (args for the iex bootstrap),
+    MYWINKIT_SIMULATE_INSTALL=ok|fail (PowerShell 7 / Terminal installs report
+    that result without running anything).
 #>
 [CmdletBinding()]
 param(
@@ -49,6 +58,7 @@ param(
     [switch]$NoUpdate,
     [string]$UpdateAnswer,
     [switch]$NoPwsh,
+    [switch]$NoTerminal,
     [switch]$WhatIfLoader,
     [string]$Answer,
     [string]$ClassicTestInput
@@ -261,8 +271,16 @@ function Find-Pwsh {
     return $best
 }
 
+function Get-SimulatedInstall {
+    <# Testing: MYWINKIT_SIMULATE_INSTALL=ok|fail makes the installs below report that result without running anything. #>
+    if ($env:MYWINKIT_SIMULATE_INSTALL -in 'ok', 'fail') { return $env:MYWINKIT_SIMULATE_INSTALL }
+    return ''
+}
+
 function Install-Pwsh {
     <# Install PowerShell 7: winget first, then the signed MSI from the official GitHub release. #>
+    $sim = Get-SimulatedInstall
+    if ($sim) { Write-Say "Simulated: PowerShell 7 install ($sim)." 'Magenta'; Write-RunLog "loader: simulated PowerShell 7 install ($sim)"; return ($sim -eq 'ok') }
     if (Get-Command winget -ErrorAction SilentlyContinue) {
         Write-Say 'Installing PowerShell 7 with winget...' 'DarkYellow'
         & winget install --id Microsoft.PowerShell --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
@@ -295,6 +313,61 @@ function Install-Pwsh {
         Write-Say "PowerShell 7 install failed: $($_.Exception.Message)" 'Red'
         return $false
     }
+}
+
+# ---------------------------------------------------------------- Windows Terminal + the auto-install setting
+
+function Test-Terminal {
+    <# Windows Terminal is installed for this user. Testing: -NoTerminal, MYWINKIT_SIMULATE_WT=present|absent. #>
+    if ($NoTerminal -or $env:MYWINKIT_SIMULATE_WT -eq 'absent') { return $false }
+    if ($env:MYWINKIT_SIMULATE_WT -eq 'present') { return $true }
+    if (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\wt.exe')) { return $true }
+    try { if (Get-AppxPackage -Name 'Microsoft.WindowsTerminal*' -ErrorAction Stop) { return $true } } catch {}
+    return $false
+}
+
+function Install-Terminal {
+    <# Latest Windows Terminal with winget (no other channel: without winget it is skipped). #>
+    $sim = Get-SimulatedInstall
+    if ($sim) { Write-Say "Simulated: Windows Terminal install ($sim)." 'Magenta'; Write-RunLog "loader: simulated Windows Terminal install ($sim)"; return ($sim -eq 'ok') }
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { Write-Say 'winget is missing - skipping Windows Terminal.' 'Yellow'; Write-RunLog 'loader: Windows Terminal skipped (no winget)'; return $false }
+    Write-Say 'Installing Windows Terminal with winget...' 'DarkYellow'
+    & winget install --id Microsoft.WindowsTerminal --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+    $ec = $LASTEXITCODE
+    Write-RunLog "loader: winget install Microsoft.WindowsTerminal exit $ec"
+    # 0 = installed; winget's "nothing to do" codes = already current
+    return ($ec -in 0, -1978335189, -1978335153, -1978335135, -1978334962)
+}
+
+function Get-AutoPwshSetting {
+    <#
+    "Install PowerShell 7 + Windows Terminal at start without asking": this PC's
+    own choice (<state>\local-settings.json, set from the Settings screen), else
+    settings.json autoInstallPwsh (cached copy, then the bundled one), else on.
+    Same order as Get-KitAutoInstallPwsh in src/core.psm1.
+    #>
+    $srcs = @(
+        @{ File = (Join-Path $stateDir 'local-settings.json'); Name = 'this PC' },
+        @{ File = (Join-Path $stateDir 'cache\settings.json'); Name = 'shared, cached' },
+        @{ File = (Join-Path $root 'config\settings.json'); Name = 'shared, bundled' }
+    )
+    foreach ($s in $srcs) {
+        if (-not (Test-Path -LiteralPath $s.File)) { continue }
+        try {
+            $j = [IO.File]::ReadAllText($s.File) | ConvertFrom-Json
+            if ($j.PSObject.Properties['autoInstallPwsh'] -and $j.autoInstallPwsh -is [bool]) { return [pscustomobject]@{ On = [bool]$j.autoInstallPwsh; Source = $s.Name } }
+        } catch {}
+    }
+    return [pscustomobject]@{ On = $true; Source = 'default' }
+}
+
+# A failed Windows Terminal install is not retried on every start the same day (keeps start-up fast).
+$loaderState = Join-Path $stateDir 'loader.json'
+function Get-WtFailedToday {
+    try { return (([IO.File]::ReadAllText($loaderState) | ConvertFrom-Json).wtFailed -eq (Get-Date -Format 'yyyy-MM-dd')) } catch { return $false }
+}
+function Set-WtFailedToday {
+    try { [IO.File]::WriteAllText($loaderState, ('{ "wtFailed": "' + (Get-Date -Format 'yyyy-MM-dd') + '" }')) } catch {}
 }
 
 # ---------------------------------------------------------------- launchers
@@ -337,14 +410,51 @@ if ($Classic) {
 
 $pw = Find-Pwsh
 Write-RunLog $(if ($pw) { "loader: found pwsh $($pw.Path) version $($pw.Version) (needs $MinPwsh+)" } elseif ($NoPwsh -or $env:MYWINKIT_SIMULATE_NO_PWSH -eq '1') { 'loader: pwsh search skipped (simulated absent)' } else { 'loader: no pwsh found' })
-if ($pw -and $pw.Version -ge $MinPwsh) {
+$hasPwsh = [bool]($pw -and $pw.Version -ge $MinPwsh)
+$found = if ($pw) { "found $($pw.Version), needs $MinPwsh+" } else { 'not installed' }
+$auto = Get-AutoPwshSetting
+Write-RunLog "loader: autoInstallPwsh = $($auto.On) ($($auto.Source))"
+
+# Auto mode (default): install what is missing without asking, then relaunch under pwsh.
+# Any failure ends in the classic menu, exactly like a declined install.
+if ($auto.On) {
+    $needWt = -not (Test-Terminal)
+    if ($needWt -and (Get-WtFailedToday)) { Write-RunLog 'loader: Windows Terminal missing, but its install failed earlier today - not retrying until tomorrow'; $needWt = $false }
+    if (-not $hasPwsh -or $needWt) {
+        $what = @(); if (-not $hasPwsh) { $what += "PowerShell 7 ($found)" }; if ($needWt) { $what += 'Windows Terminal' }
+        Write-RunLog "loader: decision = auto-install $($what -join ' + ') (autoInstallPwsh on, $($auto.Source))"
+        if ($WhatIfLoader) { "decision: auto-install ($($what -join ' + '))"; exit 0 }
+        Write-Host ''
+        Write-Say "my-win-kit $Dot installing $($what -join ' and ') $Dot no question asked (switch off in Settings)" 'DarkYellow'
+        if ($DryRun) {
+            if (-not $hasPwsh) { Write-Say 'Dry run: would install PowerShell 7 (winget Microsoft.PowerShell, MSI fallback) without asking.' 'Magenta' }
+            if ($needWt) { Write-Say 'Dry run: would install Windows Terminal (winget Microsoft.WindowsTerminal) without asking.' 'Magenta' }
+            if ($hasPwsh) { Start-Modern $pw }
+            Start-Classic 'dry run: PowerShell 7 not installed'
+        }
+        $pwshOk = $hasPwsh
+        if (-not $hasPwsh) {
+            if (Install-Pwsh) { $pw = Find-Pwsh; $pwshOk = [bool]($pw -and $pw.Version -ge $MinPwsh) }
+            Write-RunLog "loader: auto-install PowerShell 7 -> $(if ($pwshOk) { "ok ($($pw.Path))" } else { 'not available' })"
+        }
+        if ($needWt) {
+            if (Install-Terminal) { Write-RunLog 'loader: auto-install Windows Terminal -> ok' }
+            else { Set-WtFailedToday; Write-RunLog 'loader: auto-install Windows Terminal -> failed'; Write-Say 'Windows Terminal was not installed - carrying on without it.' 'Yellow' }
+        }
+        if ($pwshOk) { Start-Modern $pw }
+        Write-Say 'PowerShell 7 is not available yet - opening the classic menu.' 'Yellow'
+        Start-Sleep -Seconds 2
+        Start-Classic 'auto-install: PowerShell 7 not available'
+    }
+}
+
+if ($hasPwsh) {
     Write-RunLog 'loader: decision = modern'
     if ($WhatIfLoader) { "decision: modern ($($pw.Path) $($pw.Version))"; exit 0 }
     Start-Modern $pw
 }
 
-$found = if ($pw) { "found $($pw.Version), needs $MinPwsh+" } else { 'not installed' }
-Write-RunLog "loader: decision = offer PowerShell 7 install ($found)"
+Write-RunLog "loader: decision = offer PowerShell 7 install ($found; autoInstallPwsh off, $($auto.Source))"
 if ($WhatIfLoader) { "decision: offer-install (PowerShell 7 $found)"; exit 0 }
 
 Write-Host ''

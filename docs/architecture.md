@@ -13,7 +13,7 @@
 | [CHANGELOG.md](CHANGELOG.md) | Dated history, append-only. | Current state. |
 | architecture.md (this) | How the loader, menus, engine, publish and CI work. | Counts, history. |
 | [config/catalog.json](../config/catalog.json) **on GitHub `main`** | The app catalogue: groups, packages (name, method, Id/URL, default on/off, detection), removed packages, `RetiredIds`, the direct-download rules. Edited by hand in the repo (the menu never writes it). Every PC reads the live copy at start. Fields: [Catalog fields](#catalog-fields). | Never copy it into docs. |
-| [config/settings.json](../config/settings.json) **on GitHub `main`** | Kit settings shared by every PC (`removeShortcuts`, `dryRunByDefault`). Edited by hand in the repo; Settings shows them read-only. | Per-PC state (last selection, last failures: `%LOCALAPPDATA%\my-win-kit\state.json`). |
+| [config/settings.json](../config/settings.json) **on GitHub `main`** | Kit settings shared by every PC (`removeShortcuts`, `dryRunByDefault`, `autoInstallPwsh`). Edited by hand in the repo; Settings shows them read-only. | Per-PC state (last selection, last failures: `%LOCALAPPDATA%\my-win-kit\state.json`) and per-PC preferences (`local-settings.json`, e.g. this PC's `autoInstallPwsh` override). |
 | [config/winget-id-overrides.json](../config/winget-id-overrides.json) **on GitHub `main`** | Shared winget-ID heals (old → new, `msstore:` prefix = Store). Edited by hand. Heals a PC learns itself stay in that PC's `cache\local-overrides.json` until copied in here. | |
 | `$script:KitVersion` in [src/core.psm1](../src/core.psm1) | The kit version. The loader compares it with GitHub `main` for the self-update. | |
 | `$script:Fixes` in [win11-tweaks.ps1](../win11-tweaks.ps1#L87) | The tweak catalogue (registry keys, apply/check/revert). | |
@@ -51,17 +51,31 @@ Runs on stock Windows PowerShell 5.1 with nothing installed.
 1. **Bootstrap:** TLS 1.2, `Unblock-File` on every kit file (mark-of-the-web), recreate `install.cmd` if missing.
 2. **Find PowerShell 7** (`Find-Pwsh`): checks `pwsh` on PATH plus the known install paths (PATH is stale right
    after an install) and asks each candidate for its version. The best one wins.
-3. **Decide:**
+3. **Read the auto-install setting** (`Get-AutoPwshSetting`): this PC's `<state>\local-settings.json`
+   `autoInstallPwsh` (set from Settings / classic `K`), else `settings.json` `autoInstallPwsh` (the cached copy
+   in `<state>\cache`, then the bundled one; the loader does not fetch config itself), else **on**. The engine's
+   `Get-KitAutoInstallPwsh` uses the same order.
+4. **Decide:**
+   - **auto on** and PowerShell 7.4+ or Windows Terminal missing → installs what is missing **without asking**:
+     `Install-Pwsh` (`winget install Microsoft.PowerShell`, then the official MSI from the latest GitHub release;
+     its Authenticode signer must be Microsoft Corporation; installs elevated), then `Install-Terminal`
+     (`winget install Microsoft.WindowsTerminal`; winget's "nothing to do" exits count as success; there is no
+     other channel). It re-finds pwsh by path and starts the modern menu. pwsh still unavailable → classic menu
+     (never stranded). A failed Terminal install does not stop the start-up and is not retried until the next
+     day (`<state>\loader.json`), so a PC without winget doesn't retry on every start. Terminal detection:
+     `%LOCALAPPDATA%\Microsoft\WindowsApps\wt.exe` or the `Microsoft.WindowsTerminal*` Appx package.
    - pwsh **7.4+** → `pwsh -NoProfile -ExecutionPolicy Bypass -File src\tui-spectre.ps1 -KitRoot <folder>`.
      If that exits **3** (Spectre module unavailable) → classic menu.
-   - missing or older → asks "Install PowerShell 7 now? [Y/n]" (Enter = yes). `Install-Pwsh` tries
-     `winget install Microsoft.PowerShell`, then the official MSI from the latest GitHub release (its
-     Authenticode signer must be Microsoft Corporation; installs elevated). Then it re-finds pwsh by path and
-     starts the modern menu.
+   - **auto off** and pwsh missing or older → asks "Install PowerShell 7 now? [Y/n]" (Enter = yes), then the
+     same `Install-Pwsh` and modern menu.
    - declined or failed → `src\tui-classic.ps1` in the same 5.1 process.
-4. Test switches (no effect on normal use): `-NoPwsh` / env `MYWINKIT_SIMULATE_NO_PWSH=1` pretend pwsh is
-   absent, `-WhatIfLoader` prints the decision, `-Answer` answers the question, `-ClassicTestInput` feeds the
-   classic menu, `-Classic` forces it, `-DryRun` passes through to either menu.
+   - `-Classic` skips all of this.
+5. Test switches (no effect on normal use): `-NoPwsh` / env `MYWINKIT_SIMULATE_NO_PWSH=1` pretend pwsh is
+   absent, `-NoTerminal` / `MYWINKIT_SIMULATE_WT=absent|present` fake Windows Terminal, `MYWINKIT_SIMULATE_INSTALL=ok|fail`
+   makes both installs report that result without running anything, `-WhatIfLoader` prints the decision
+   (modern / auto-install / offer-install / classic), `-Answer` answers the question, `-ClassicTestInput` feeds
+   the classic menu, `-Classic` forces it, `-DryRun` passes through to either menu (in auto mode it prints what
+   would be installed, no question).
 
 ## The engine: src/core.psm1
 
@@ -71,9 +85,13 @@ No UI. Both menus call the same functions, so behaviour is identical in both.
   into an object with a mutable `On`, and applies learned heals from `config/winget-id-overrides.json` plus this
   PC's `cache\local-overrides.json` (old→new chains up to 5 hops; `msstore:` prefix switches channel).
 - **`Get-KitInstalled`** returns `Id → version` for everything installed: one `winget export --include-versions`
-  for all winget/Store IDs, plus per-package checks: `Appx` name (MSIX apps such as Claude Desktop), `Uninstall`
-  DisplayName regex (direct installers), `Exe` path + `Version` command (script installs such as `claude`,
-  `agy`). Odd winget version strings (`> 280.4`, `ad 9.8.0`) are reduced to the dotted number.
+  for all winget/Store IDs, one `npm ls -g --depth=0 --json` when the catalogue has npm packages and npm exists,
+  plus per-package checks: `Detect` (built-in checks: `dev-folder` = the folder exists, `ctt-profile` = PowerShell
+  7's profile in Documents names Chris Titus Tech, `wsl-ubuntu` = an `Ubuntu*` distro registered under
+  `HKCU\...\Lxss`, read from the registry so WSL is never started), `Appx` name (MSIX apps such as Claude Desktop),
+  `Uninstall` DisplayName regex (direct installers), `Exe` path + `Version` command (script installs such as
+  `claude`, `agy`; an `Exe` that is a folder only proves the install, the command then comes from PATH). Odd winget
+  version strings (`> 280.4`, `ad 9.8.0`) are reduced to the dotted number.
 - **`Invoke-KitPackage -Package -Installed -Mode install|update -DryRun -OnStatus`** is the single entry point.
   It returns a result object (`Status` = installed | updated | current | done | failed | dryrun, `From`, `To`,
   `Detail`, `Healed`, `Seconds`) and writes everything to a log in `%TEMP%\my-win-kit\`. By method:
@@ -89,14 +107,37 @@ No UI. Both menus call the same functions, so behaviour is identical in both.
     this PC only (`cache\local-overrides.json`).
   - **script:** the vendor's official `irm <url> | iex`, always in a **child** `powershell.exe`, so a vendor
     `exit`/`throw` can't close the menu. When the tool is already installed and has an `Update` command
-    (`claude update`, `agy update`), that runs instead. `Interactive` scripts (MAS, WinUtil) share the console.
+    (`claude update`, `agy update`, `hermes update`), that runs instead. `Interactive` scripts (MAS, WinUtil)
+    share the console. `Shell: pwsh` runs the child in PowerShell 7 instead (the Chris Titus profile installs
+    into the running shell's profile). `Elevated` without admin rights opens the child in **its own administrator
+    window** (`Start-Process -Verb RunAs`, `-EncodedCommand`, so no quoting issues), which waits for Enter so its
+    output can be read; a declined UAC prompt is reported as "administrator prompt declined" (exit 1223). Already
+    elevated: it shares the console like any interactive script.
   - **direct:** `Resolve-KitDirect` fetches the vendor's download page and pulls the current installer link with
     the catalogue regex (per CPU arch), so every run gets the vendor's latest release. If the installed version
     is already ≥ that, it reports up to date and downloads nothing. Otherwise it downloads to `%TEMP%`, requires
     a **valid Authenticode signature from the catalogue's signer** (Google LLC), runs it silently and waits for
     that process only. If the page no longer matches, it falls back to the `Fallback` winget ID for that run.
-  - **npm:** `npm install -g` (needs Node). **builtin:** `enable-rdp` (registry + NLA + firewall group,
-    elevated via UAC when needed; prints the Tailscale IP if present).
+  - **npm:** `npm install -g` (needs Node; also the update path, it fetches the latest).
+  - **builtin:**
+    - `enable-rdp`: registry + NLA + firewall group, elevated via UAC when needed; prints the Tailscale IP if
+      present.
+    - `dev-folder`: `Get-KitDevFolderPath` = `D:\dev\git` when D: is ready and a **Fixed** disk
+      (`System.IO.DriveInfo`; a CD/DVD, USB stick or network drive doesn't count), else `%SystemDrive%\dev\git`.
+      Exists → current; dry run → "would create <path>"; otherwise `New-Item` → done. `-DDriveType` injects the D:
+      check for tests.
+    - `wsl-ubuntu` (`Invoke-KitWslUbuntu`): WSL present (`%ProgramFiles%\WSL\wsl.exe` or the
+      `MicrosoftCorporationII.WindowsSubsystemForLinux` package; the inbox stub doesn't count) → `wsl --update`,
+      else `wsl --install --no-distribution`, both through `Invoke-KitElevatedCapture` (already admin:
+      `Invoke-KitProcess`; otherwise one UAC prompt for a hidden `cmd.exe` that redirects the output to a temp
+      file and sets `WSL_UTF8=1` itself, because the elevated process doesn't inherit the environment). A restart
+      request (exit 3010/1641 or "reboot"/"restart the system" in the output, `Test-KitRebootNeeded`) ends it as
+      failed with "restart Windows, then run this again", so *Retry last run's failures* picks it up. Then
+      `wsl --list --online` (with `WSL_UTF8=1`; `ConvertFrom-KitWslText` strips the NULs of UTF-16 output either
+      way) → `Select-KitUbuntuDistro`: the highest `Ubuntu-NN.04` with an even NN (LTS), else `Ubuntu`; no header
+      needed, so localized output works. Already registered → current. Otherwise `wsl --install -d <name>` with
+      the console attached (the catalogue entry is `Interactive`): Ubuntu's first run asks for a Linux user name
+      and password, then the user types `exit`. Success = the distro is registered afterwards.
   - `Requires` (git, npm) is checked after reloading PATH from the registry, so a tool installed earlier in the
     same run is found.
 - **Child processes: `Invoke-KitProcess`.** Every non-interactive native program (winget, `claude`/`agy`
@@ -105,13 +146,20 @@ No UI. Both menus call the same functions, so behaviour is identical in both.
   streams read at once, UTF-8), so the child gets its own hidden console and returns `Ec`, `Out`, `Err` and
   `Started`. `.cmd`/`.bat` files run via `cmd.exe /d /s /c`. Reason: PowerShell 7 in a conhost window switches
   the console's VT processing off for as long as a `&`-started program runs, and Spectre's live progress and
-  spinners then print raw escape codes. Only `Interactive` scripts (MAS, WinUtil) and the tweaks menu ("Open
-  here") still share the console; nothing live is drawn while they run. `Enable-KitConsoleVt` switches VT back on (best effort, no-op when output is not a
+  spinners then print raw escape codes. Only `Interactive` items (MAS, WinUtil, an already-elevated Chris Titus
+  prompt, `wsl --install -d` for Ubuntu's first run) and the tweaks menu ("Open here") still share the console; nothing live is drawn while they run. `Enable-KitConsoleVt` switches VT back on (best effort, no-op when output is not a
   console); both menus call it after the scan and after each package.
 - **`Get-KitRunOrder`** sorts by catalogue group order, then Id, with POST always last.
-- **`Get-KitLatestVersion`** (direct = vendor page, winget = `winget show`) feeds the "Update AI tools" table.
+- **`Get-KitLatestVersion`** (direct = vendor page, winget = `winget show`, npm = `npm view`) feeds the "Update
+  AI tools" table, for installed tools only.
+- **`Get-KitAiUpdateSet -Installed`**: what "Update AI tools" (and classic `L`) updates: `AI`-flagged apps that
+  are installed. The `AI` flag never installs anything and never ticks an app (Cursor and Codex CLI are AI-flagged
+  and off by default).
 - **State** (`%LOCALAPPDATA%\my-win-kit\state.json`, per PC, never synced): last selection, last failures,
   the desktop-shortcut setting. `MYWINKIT_STATE_DIR` overrides the folder (tests).
+- **Per-PC preferences** (`%LOCALAPPDATA%\my-win-kit\local-settings.json`, canonical JSON, never synced):
+  `Get-KitLocalPrefs` / `Set-KitLocalPref`. Today one key, `autoInstallPwsh`; `Get-KitAutoInstallPwsh` returns
+  the effective value and its source (`this PC` / `shared` / `default`).
 - **Desktop shortcuts:** snapshot before a run, delete new `.lnk` files after (setting, on by default).
 
 ## Modern menu: src/tui-spectre.ps1
@@ -174,11 +222,17 @@ picker, `Show-Picker`, built on `[Console]::ReadKey`.
      the progress view. Then a rounded results table (badge, app, result, version from → to, time, note) and a
      summary panel (`√ ok · ↔ healed · × failed · total time`, log path, removed shortcuts; purple in dry run,
      red with failures, green otherwise).
-- **Update AI tools:** table of every `AI = $true` app (installed, latest, how it updates), then update all
-  installed or pick (missing ones get installed). Runs with `-Mode update`.
+- **Update AI tools:** table of every `AI = $true` app (installed, latest, how it updates: winget upgrade, npm,
+  official updater or download page; trimmed to window − 17 rows, installed first), then "Update all installed"
+  or "Pick which installed tools to update". Both use `Get-KitAiUpdateSet`, so a tool that isn't installed is
+  never installed from here (the title says so; with none installed only « Back is offered). Runs with
+  `-Mode update`; latest versions are looked up for installed tools only.
 - **Windows tweaks:** describes the 4 fixes and runs `win11-tweaks.ps1` here or elevated in a new window.
-- **Settings:** read-only (see [Configuration on GitHub](#configuration-on-github-read-only)); session dry-run
-  toggle, open the log folder.
+- **Settings:** read-only shared config (see [Configuration on GitHub](#configuration-on-github-read-only)); this
+  PC's "Auto-install PowerShell 7 + Terminal on start" toggle (`local-settings.json`; the row says whether the
+  value is this PC's own or the shared default), session dry-run toggle, open the log folder.
+- **Interactive items** (POST, Chris Titus prompt, WSL + Ubuntu) run after the progress view; their `OnStatus`
+  steps print as grey lines above the child's own output (e.g. "type exit to come back here").
 - **Smoke-test hook:** `-TestKeys` swaps `AnsiConsole.Console` for Spectre's `TestConsole` (120 × 30) and feeds
   the keys to the picker; it forces dry run and locks it on, and prints `SCREEN-HEIGHTS: name=rows; ...` on exit
   so tests can prove every screen fits 30 rows.
@@ -198,9 +252,10 @@ no GitHub CLI dependency.
   cache is reported and skipped. The banner and the Settings screen show the source (GitHub, cached <time>,
   bundled).
 - **Settings screen (modern menu):** read-only panel with the config source, the current values of
-  `removeShortcuts` and `dryRunByDefault`, the number of package-ID fixes in use and the ones learned on this PC
-  (with their file), and the line "To change config, edit config/*.json in the my-win-kit repo on GitHub." Its
-  only actions are session-level: the dry-run toggle and opening the log folder.
+  `removeShortcuts`, `dryRunByDefault` and `autoInstallPwsh`, the number of package-ID fixes in use and the ones
+  learned on this PC (with their file), and the line "To change config, edit config/*.json in the my-win-kit repo
+  on GitHub." Its actions are local only: this PC's auto-install override (`local-settings.json`), the session
+  dry-run toggle and opening the log folder. Smoke tests write the override only into their scratch state folder.
 - **Learned heals:** `Save-KitOverride` keeps each heal on the PC that found it
   (`cache\local-overrides.json`, `Get-KitLocalOverrides`) and applies it at every start on top of
   `config/winget-id-overrides.json`. Nothing is pushed; to share a heal, copy it into the repo file (or fix the
@@ -217,8 +272,12 @@ no GitHub CLI dependency.
 `Groups`: `Key`, `Label`, `Letter` (classic-menu hotkey). `Packages` (and `Removed`), required: `Id` (permanent,
 never renumbered or reused), `Name` (unique), `Group`, `On` (in the recommended set), `Method` (`winget` | `msstore`
 | `script` | `direct` | `npm` | `builtin`), `Ref` (winget ID | Store product ID | script URL | Direct key | npm
-package | builtin name), `Desc`. Optional: `AI` (listed under Update AI tools), `Interactive` (needs the console,
-never under a spinner), `Exe` (file that proves a script/npm install, env vars expanded), `Version` (command whose
+package | builtin name: `enable-rdp`, `dev-folder`, `wsl-ubuntu`), `Desc`. Optional: `AI` (listed under Update AI
+tools, which updates it only when installed; never ticks or installs it), `Interactive` (needs the console, never
+under a spinner), `Elevated` (script: runs as administrator, own window when the menu isn't elevated), `Shell`
+(`pwsh` = run the script in PowerShell 7 instead of Windows PowerShell), `Detect` (built-in install check:
+`dev-folder`, `ctt-profile`, `wsl-ubuntu`), `Exe` (file, or folder, that proves a script/npm install, env vars
+expanded), `Version` (command whose
 output has the installed version), `Update` (native updater, e.g. `claude update`), `Appx` (MSIX package name),
 `Uninstall` (regex on the uninstall DisplayName), `Fallback` (winget ID when a direct download can't be resolved),
 `Requires` (command that must exist first). `RetiredIds`: Ids that must never be reused. `Direct.<key>`: `Page`,
@@ -264,7 +323,8 @@ menu; updates come from `Get-KitUpdates`). Colour is 24-bit through VT escape co
 (`$Host.UI.SupportsVirtualTerminal` or Windows Terminal), otherwise the 16 console colours
 (`MYWINKIT_FORCE_VT=1` forces VT for captures). One prompt line takes tokens: numbers, ranges `a-b`, group letters, `*` (all
 except POST), `0` (none). Commands use letters that aren't group letters: `Z` recommended, `N` only missing,
-`I` install, `L` latest AI tools, `W` Windows tweaks, `Q` quit. Runs print one line per app using the same
+`I` install, `L` latest AI tools (`Get-KitAiUpdateSet`: installed ones only), `W` Windows tweaks, `K` this PC's
+auto-install of PowerShell 7 + Terminal on/off (shown on the command line with its source), `Q` quit. Runs print one line per app using the same
 engine; failures stay selected for a retry. `-TestInput "a;b;c"` feeds answers (tests).
 
 ## win11-tweaks.ps1
@@ -301,11 +361,14 @@ All tests run the kit in dry-run mode; nothing installs.
 | Script | Engine | Covers |
 |---|---|---|
 | `tools/lint.ps1` | 5.1 (`-ParseOnly`) + pwsh | parser check of every `.ps1/.psm1/.psd1`; PSScriptAnalyzer (pwsh) |
-| `tools/test-core.ps1` | 5.1 + pwsh | catalogue sanity (unique Ids/names, groups, methods, DEV/POST off, POST interactive), dry run of every package, version compare; `-Online` adds the installed scan and vendor-page resolution |
-| `tools/smoke-tui.ps1` | pwsh | the Spectre menu driven by scripted keys: install flow, search, AI table, read-only settings (incl. a seeded local fix; fails if removed screens reappear) + tweaks (+ "update all" when an AI tool is installed, local only) |
-| `tools/smoke-loader.ps1` | 5.1 | loader decisions (pwsh present / absent / forced classic), declining and dry-run accepting the PowerShell 7 install, a classic-menu run |
+| `tools/test-core.ps1` | 5.1 + pwsh | catalogue sanity (unique Ids/names, groups, methods, DEV/POST off, POST interactive), the 2026-11-26 catalogue changes (removed apps, Obsidian off, Cursor/Codex AI-flagged and off, the three new entries), `Get-KitAiUpdateSet` (installed only), dev-folder path choice (injected D: types), WSL distro picker on sample `wsl --list --online` text (plain and UTF-16-as-UTF-8), restart detection, per-PC `autoInstallPwsh` precedence, dry run of every package, version compare; `-Online` adds the installed scan and vendor-page resolution |
+| `tools/smoke-tui.ps1` | pwsh | the Spectre menu driven by scripted keys: install flow, search, AI table (every AI tool listed, never "installs missing ones"), settings (read-only panel, a seeded local fix, the per-PC auto-install toggle; fails if removed screens reappear) + tweaks (+ "update all" and "pick installed" when an AI tool is installed, local only) |
+| `tools/smoke-loader.ps1` | 5.1 | loader decisions (pwsh/Terminal present / absent / forced classic); auto mode installs without the question (dry run, simulated ok and failed installs end in the classic menu; a failed Terminal install isn't retried the same day); auto off via `local-settings.json`: declining and dry-run accepting the PowerShell 7 install; classic `K` toggles the override; a classic-menu run |
 | `tools/test-config.ps1` | 5.1 + pwsh | config read chain (remote / cache / corrupt cache / bundled / defaults), JSON writer (ASCII, round trip) and canonical form of all three `config/*.json`, catalogue Ids (unique across Packages + Removed, no `RetiredIds` reuse), heals kept local, no config-write functions exported, publish, self-update (accept / reuse / decline / broken zip), `irm \| iex` bootstrap |
 | `tools/render-screens.ps1 -OutDir <dir>` | pwsh (+5.1 for classic) | not a test: captures every screen as `.txt` (layout) and truecolor `.ans` (view with `Get-Content x.ans -Raw` in Windows Terminal) at 120 × 30, and prints the main-menu height |
+
+test-core, smoke-tui, smoke-loader and render-screens point `MYWINKIT_CONFIG_URL` at the repo's own `config/`
+(a `file:///` URL), so they test this copy's catalogue (a branch or PR), not whatever is on GitHub `main`.
 
 `.github/workflows/lint.yml` runs two jobs on `windows-latest`: **ps51** (parse, test-core, smoke-loader, test-config) and
 **pwsh** (lint, test-core -Online, test-config, install PwshSpectreConsole, smoke-tui). `$KnownIssues` in `lint.ps1`

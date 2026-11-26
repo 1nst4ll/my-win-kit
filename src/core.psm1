@@ -10,7 +10,7 @@
     Install methods: winget, msstore, script (vendor one-liner, run in a
     CHILD process so a vendor `exit` cannot close the menu), direct (latest
     installer resolved from the vendor's download page + Authenticode check),
-    npm, builtin.
+    npm, builtin (enable-rdp, dev-folder, wsl-ubuntu).
 
     Self-healing winget IDs: a vanished ID is replaced by its successor, and a
     dead installer download falls back to older versions, then to the Store.
@@ -22,7 +22,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:KitVersion  = '2.4.2'   # bump with user-visible changes (shown in the menu banner)
+$script:KitVersion  = '2.5.0'   # bump with user-visible changes (shown in the menu banner)
 $script:KitRoot     = $null
 $script:BaseData    = $null
 $script:Catalog     = @()
@@ -56,6 +56,7 @@ function ConvertTo-KitPackage($h, [hashtable]$Order, [string]$Origin = 'config')
         AI = [bool]$h['AI']; Interactive = [bool]$h['Interactive']
         Update = $h['Update']; Version = $h['Version']; Exe = $h['Exe']; Appx = $h['Appx']
         Uninstall = $h['Uninstall']; Fallback = $h['Fallback']; Requires = $h['Requires']
+        Elevated = [bool]$h['Elevated']; Shell = $h['Shell']; Detect = $h['Detect']
         Origin = $Origin
     }
 }
@@ -396,8 +397,9 @@ function Get-KitToolVersion {
     $exe = $parts[0]
     if ($Package.Exe) {
         $full = [Environment]::ExpandEnvironmentVariables($Package.Exe)
-        if (Test-Path -LiteralPath $full) { $exe = $full }
+        if (Test-Path -LiteralPath $full -PathType Leaf) { $exe = $full }   # a folder only proves the install
     }
+    if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) { Update-KitPath }   # installed earlier in this run
     if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) { return $null }
     try {
         $r = Invoke-KitProcess -FilePath $exe -ArgumentList @($parts | Select-Object -Skip 1)
@@ -438,11 +440,16 @@ function Get-KitInstalled {
         } finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
     }
 
+    $npm = $null
+    if (@($Packages | Where-Object Method -eq 'npm').Count) { $npm = Get-KitNpmGlobals }
+
     $uninst = $null
     $res = @{}
     foreach ($p in $Packages) {
         $ver = $null
-        if ($p.Appx) {
+        if ($p.Detect) { $ver = Get-KitDetect -Name $p.Detect }
+        if ($null -eq $ver -and $p.Method -eq 'npm' -and $npm -and $npm.ContainsKey($p.Ref)) { $ver = $npm[$p.Ref] }
+        if ($null -eq $ver -and $p.Appx) {
             try {
                 $ax = Get-AppxPackage -Name $p.Appx -ErrorAction Stop | Select-Object -First 1
                 if ($ax) { $ver = [string]$ax.Version }
@@ -741,7 +748,7 @@ function Get-KitUpdates {
 function Get-KitLatestVersion {
     <#
     Newest version the kit's install path would get, or $null when unknown:
-    direct = vendor download page, winget/msstore = `winget show`,
+    direct = vendor download page, winget/msstore = `winget show`, npm = `npm view`,
     script = $null (the vendor installer/updater always fetches latest).
     #>
     param([Parameter(Mandatory)]$Package)
@@ -752,6 +759,11 @@ function Get-KitLatestVersion {
                 $sa = @('show', '--id', $Package.Ref, '--exact', '--disable-interactivity', '--accept-source-agreements')
                 if ($Package.Method -eq 'msstore') { $sa += @('--source', 'msstore') }
                 foreach ($l in (Get-KitWingetRaw $sa)) { if ($l -match '^\s*Version:\s*(\S+)') { return $Matches[1] } }
+                return $null
+            }
+            'npm' {
+                $r = Invoke-KitProcess -FilePath 'npm' -ArgumentList @('view', $Package.Ref, 'version')
+                if ($r.Started -and $r.Ec -eq 0) { return (Get-KitVersionText (@($r.Out) -join ' ')) }
                 return $null
             }
             default { return $null }
@@ -861,20 +873,35 @@ function Enable-KitConsoleVt {
 
 function Invoke-KitRemoteScript {
     <#
-    Run a vendor one-liner (irm URL | iex) in a CHILD Windows PowerShell so
-    a vendor `exit` or `throw` cannot close the menu. -Attached = shares the
-    console (interactive menus); otherwise it runs through Invoke-KitProcess
-    (own hidden console) and its output is captured to the log.
+    Run a vendor one-liner (irm URL | iex) in a CHILD Windows PowerShell (or
+    pwsh with -Shell pwsh) so a vendor `exit` or `throw` cannot close the menu.
+    -Attached = shares the console (interactive menus); otherwise it runs
+    through Invoke-KitProcess (own hidden console) and its output is captured
+    to the log. -Elevated without admin rights: its own administrator window
+    (UAC); returns 1223 when the prompt is declined.
     #>
-    param([string]$Url, [switch]$Attached)
+    param([string]$Url, [switch]$Attached, [string]$Shell = '', [switch]$Elevated)
+    $exe = 'powershell.exe'
+    if ($Shell -eq 'pwsh') {
+        $exe = Get-KitPwshPath
+        if (-not $exe) { Write-KitLog "script: $Url needs PowerShell 7 (pwsh), not found"; return 1 }
+    }
     $cmd = "[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072; irm '$Url' | iex"
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $cmd)
-    Write-KitLog "script: irm $Url | iex  (child process)"
-    if ($Attached) {
-        & powershell.exe @argList
+    Write-KitLog "script: irm $Url | iex  (child $exe$(if ($Elevated) { ', elevated' }))"
+    if ($Elevated -and -not (Test-KitAdmin)) {
+        # Own administrator window (one UAC prompt); it waits for Enter so its output can be read.
+        $wrapped = "try { $cmd; `$c = 0 } catch { Write-Host `$_ -ForegroundColor Red; `$c = 1 }; Write-Host ''; [void](Read-Host 'Finished - press Enter to close this window'); exit `$c"
+        $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($wrapped))
+        try { $proc = Start-Process -FilePath $exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $enc" -Verb RunAs -PassThru -ErrorAction Stop }
+        catch { Write-KitLog '  administrator prompt declined'; return 1223 }
+        $proc.WaitForExit()
+        $ec = $proc.ExitCode
+    } elseif ($Attached) {
+        & $exe @argList
         $ec = $LASTEXITCODE
     } else {
-        $r = Invoke-KitProcess -FilePath 'powershell.exe' -ArgumentList $argList
+        $r = Invoke-KitProcess -FilePath $exe -ArgumentList $argList
         $out = @(@($r.Out) + @($r.Err))
         $ec = $r.Ec
         foreach ($l in ($out | Where-Object { $_.Trim() } | Select-Object -Last 20)) { Write-KitLog "  | $l" }
@@ -889,7 +916,8 @@ function Invoke-KitCommandLine {
     param([string]$CommandLine, [string]$Exe)
     $parts = $CommandLine -split '\s+'
     $file = $parts[0]
-    if ($Exe) { $full = [Environment]::ExpandEnvironmentVariables($Exe); if (Test-Path -LiteralPath $full) { $file = $full } }
+    if ($Exe) { $full = [Environment]::ExpandEnvironmentVariables($Exe); if (Test-Path -LiteralPath $full -PathType Leaf) { $file = $full } }
+    if (-not [IO.Path]::IsPathRooted($file) -and -not (Get-Command $file -ErrorAction SilentlyContinue)) { Update-KitPath }
     Write-KitLog "run: $CommandLine"
     $r = Invoke-KitProcess -FilePath $file -ArgumentList @($parts | Select-Object -Skip 1)
     $out = @(@($r.Out) + @($r.Err))
@@ -931,6 +959,284 @@ try {
         if ($ip) { $detail += ", Tailscale IP $ip" }
     }
     return @{ Ec = [int]$ec; Detail = $detail }
+}
+
+# ---------------------------------------------------------------- built-in checks and actions
+
+function Get-KitNpmGlobals {
+    <# Globally installed npm packages: hashtable name -> version, or $null when npm is missing. #>
+    if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { return $null }
+    try {
+        $r = Invoke-KitProcess -FilePath 'npm' -ArgumentList @('ls', '-g', '--depth=0', '--json')
+        if (-not $r.Started) { return $null }
+        $j = (@($r.Out) -join "`n") | ConvertFrom-Json
+        $h = @{}
+        if ($j -and $j.PSObject.Properties['dependencies'] -and $j.dependencies) {
+            foreach ($d in $j.dependencies.PSObject.Properties) {
+                $v = ''; if ($d.Value -and $d.Value.PSObject.Properties['version']) { $v = [string]$d.Value.version }
+                $h[[string]$d.Name] = $v
+            }
+        }
+        return $h
+    } catch { return $null }
+}
+
+function Get-KitPwshPath {
+    <# pwsh.exe (PowerShell 7) on this PC, or $null. Known path first: PATH is stale right after an install. #>
+    $known = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
+    if (Test-Path -LiteralPath $known) { return $known }
+    $c = Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($c) { return $c.Path }
+    return $null
+}
+
+function Get-KitPwshProfilePath {
+    <# PowerShell 7's current-user, current-host profile (Documents may be redirected, e.g. to OneDrive). #>
+    return (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'PowerShell\Microsoft.PowerShell_profile.ps1')
+}
+
+function Test-KitCttProfile {
+    <# $true when PowerShell 7's profile is Chris Titus Tech's (its first line names it). #>
+    $f = Get-KitPwshProfilePath
+    if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return $false }
+    try { return ((@(Get-Content -LiteralPath $f -TotalCount 5 -ErrorAction Stop) -join "`n") -match "Chris Titus Tech's PowerShell profile") } catch { return $false }
+}
+
+function Get-KitDriveType {
+    <# DriveType of a drive letter ('Fixed', 'CDRom', 'Removable', 'Network', ...) when it is ready, else ''. #>
+    param([Parameter(Mandatory)][string]$Letter)
+    try {
+        $d = New-Object System.IO.DriveInfo ($Letter.TrimEnd(':', '\') + ':')
+        if ($d.IsReady) { return [string]$d.DriveType }
+    } catch {}
+    return ''
+}
+
+function Get-KitDevFolderPath {
+    <#
+    D:\dev\git when D: is a local fixed disk (not a CD/DVD, USB stick or network
+    drive), else <system drive>\dev\git. -DDriveType injects the D: check (tests).
+    #>
+    param([AllowEmptyString()][string]$DDriveType)
+    if (-not $PSBoundParameters.ContainsKey('DDriveType')) { $DDriveType = Get-KitDriveType 'D' }
+    if ($DDriveType -eq 'Fixed') { return 'D:\dev\git' }
+    $sys = $env:SystemDrive; if (-not $sys) { $sys = 'C:' }
+    return "$sys\dev\git"
+}
+
+function Invoke-KitDevFolder {
+    <# Create the dev folder (idempotent). @{ Status = done|current|dryrun|failed; Detail; To = path }. #>
+    param([switch]$DryRun, [AllowEmptyString()][string]$DDriveType)
+    $path = if ($PSBoundParameters.ContainsKey('DDriveType')) { Get-KitDevFolderPath -DDriveType $DDriveType } else { Get-KitDevFolderPath }
+    if (Test-Path -LiteralPath $path -PathType Container) { return @{ Status = 'current'; Detail = "$path already exists"; To = $path } }
+    if ($DryRun) { return @{ Status = 'dryrun'; Detail = "would create $path"; To = $path } }
+    try {
+        New-Item -ItemType Directory -Path $path -Force -ErrorAction Stop | Out-Null
+        return @{ Status = 'done'; Detail = "created $path"; To = $path }
+    } catch { return @{ Status = 'failed'; Detail = "could not create $($path): $($_.Exception.Message)"; To = '' } }
+}
+
+function ConvertFrom-KitWslText {
+    <#
+    wsl.exe writes UTF-16LE unless WSL_UTF8=1, so its lines read as UTF-8 carry
+    NUL characters (and a mangled BOM). Strip them so either form parses.
+    #>
+    param([string[]]$Lines)
+    return @(@($Lines) | ForEach-Object { ("$_" -replace "`0", '' -replace "[$([char]0xFEFF)$([char]0xFFFD)]", '').TrimEnd() })
+}
+
+function Select-KitUbuntuDistro {
+    <#
+    Newest Ubuntu LTS from `wsl --list --online` output: the highest Ubuntu-NN.04
+    with an even NN (LTS releases); 'Ubuntu' when none is listed. No header
+    needed, so localized output parses too.
+    #>
+    param([string[]]$Lines)
+    $best = $null; $bestMajor = -1
+    foreach ($l in (ConvertFrom-KitWslText $Lines)) {
+        $tok = ($l.Trim() -split '\s+')[0]
+        if ($tok -match '^Ubuntu-(\d+)\.04$') {
+            $major = [int]$Matches[1]
+            if (($major % 2) -eq 0 -and $major -gt $bestMajor) { $bestMajor = $major; $best = $tok }
+        }
+    }
+    if ($best) { return $best }
+    return 'Ubuntu'
+}
+
+function Get-KitWslDistros {
+    <# WSL distributions registered for this user (registry, no wsl.exe call: safe when WSL is missing). #>
+    $k = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss'
+    if (-not (Test-Path -LiteralPath $k)) { return @() }
+    return @(Get-ChildItem -LiteralPath $k -ErrorAction SilentlyContinue | ForEach-Object { $_.GetValue('DistributionName') } | Where-Object { $_ } | ForEach-Object { [string]$_ })
+}
+
+function Test-KitWslInstalled {
+    <# The WSL app (Store/MSI package, %ProgramFiles%\WSL) is present. The inbox wsl.exe stub alone does not count. #>
+    if (Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'WSL\wsl.exe')) { return $true }
+    try { if (Get-AppxPackage -Name 'MicrosoftCorporationII.WindowsSubsystemForLinux' -ErrorAction Stop) { return $true } } catch {}
+    return $false
+}
+
+function Get-KitWslExe {
+    $p = Join-Path $env:ProgramFiles 'WSL\wsl.exe'
+    if (Test-Path -LiteralPath $p) { return $p }
+    return (Join-Path $env:SystemRoot 'System32\wsl.exe')
+}
+
+function Test-KitRebootNeeded {
+    <# A Windows restart is needed: exit 3010/1641, or the output says so. #>
+    param([int]$ExitCode, [string[]]$Out)
+    if ($ExitCode -in 3010, 1641) { return $true }
+    foreach ($l in @($Out)) { if ("$l" -match '(?i)reboot|restart (the|your) (system|computer|pc|machine)') { return $true } }
+    return $false
+}
+
+function Invoke-KitElevatedCapture {
+    <#
+    Run a console program as administrator with its output captured. Already
+    elevated: Invoke-KitProcess. Otherwise one UAC prompt: a hidden cmd.exe runs
+    it with output redirected to a temp file (the elevated process does not
+    inherit this environment, so -Environment is set inside that cmd).
+    Returns @{ Ec; Out; Err; Started }; Ec 1223 = the prompt was declined.
+    #>
+    param([Parameter(Mandatory)][string]$FilePath, [string[]]$ArgumentList = @(), [hashtable]$Environment = @{})
+    if (Test-KitAdmin) {
+        $saved = @{}
+        foreach ($k in @($Environment.Keys)) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, [string]$Environment[$k]) }
+        try { return (Invoke-KitProcess -FilePath $FilePath -ArgumentList $ArgumentList) }
+        finally { foreach ($k in @($saved.Keys)) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) } }
+    }
+    $out = Join-Path $env:TEMP ('my-win-kit-elevated-{0}.txt' -f [guid]::NewGuid().ToString('N'))
+    $sets = (@($Environment.Keys) | ForEach-Object { "set $_=$($Environment[$_])&& " }) -join ''
+    $line = '/d /s /c "' + $sets + '"' + $FilePath + '" ' + (ConvertTo-KitArgLine $ArgumentList) + ' > "' + $out + '" 2>&1"'
+    $cmdExe = $env:ComSpec; if (-not $cmdExe) { $cmdExe = 'cmd.exe' }
+    try { $proc = Start-Process -FilePath $cmdExe -ArgumentList $line -Verb RunAs -WindowStyle Hidden -PassThru -ErrorAction Stop }
+    catch { return @{ Ec = 1223; Out = @(); Err = @('administrator prompt declined'); Started = $false } }
+    $proc.WaitForExit()
+    $lines = @()
+    if (Test-Path -LiteralPath $out) {
+        try { $lines = @(Split-KitOutputLines ([IO.File]::ReadAllText($out))) } catch {}
+        Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
+    }
+    return @{ Ec = [int]$proc.ExitCode; Out = $lines; Err = @(); Started = $true }
+}
+
+function Invoke-KitWslUbuntu {
+    <#
+    WSL installed and current (`wsl --install --no-distribution`, else
+    `wsl --update`; as administrator), then the newest Ubuntu LTS unless it is
+    already registered. The distro's first run (Linux user name + password)
+    shares the console, so the catalogue entry is Interactive.
+    Returns @{ Status = installed|current|dryrun|failed; Detail; To }.
+    #>
+    param([switch]$DryRun, [scriptblock]$OnStatus)
+    $notify = $OnStatus
+    function Send-Note([string]$t) { if ($notify) { try { & $notify $t } catch {} } }
+    $hasWsl = Test-KitWslInstalled
+    $a = if ($hasWsl) { @('--update') } else { @('--install', '--no-distribution') }
+    if ($DryRun) {
+        return @{ Status = 'dryrun'; Detail = "wsl $($a -join ' ') (admin), then wsl --install -d <newest Ubuntu LTS> unless it is installed"; To = '' }
+    }
+    $wsl = Get-KitWslExe
+    Send-Note $(if ($hasWsl) { 'updating WSL (Windows asks for admin)' } else { 'installing WSL (Windows asks for admin)' })
+    Write-KitLog "wsl $($a -join ' ')  (elevated)"
+    $r = Invoke-KitElevatedCapture -FilePath $wsl -ArgumentList $a -Environment @{ WSL_UTF8 = '1' }
+    $out = @(ConvertFrom-KitWslText (@($r.Out) + @($r.Err)) | Where-Object { $_.Trim() })
+    foreach ($l in ($out | Select-Object -Last 15)) { Write-KitLog "  | $l" }
+    Write-KitLog "  exit $($r.Ec)"
+    if ($r.Ec -eq 1223) { return @{ Status = 'failed'; Detail = 'administrator prompt declined'; To = '' } }
+    if (Test-KitRebootNeeded -ExitCode $r.Ec -Out $out) { return @{ Status = 'failed'; Detail = 'WSL installed - restart Windows, then run this again to add Ubuntu'; To = '' } }
+    $last = if ($out.Count) { $out[-1].Trim() } else { '' }
+    if ($r.Ec -ne 0 -and -not $hasWsl) { return @{ Status = 'failed'; Detail = "wsl --install exit $($r.Ec): $last".TrimEnd(' ', ':'); To = '' } }
+    $wslNote = ''
+    if ($r.Ec -ne 0) { $wslNote = "wsl --update exit $($r.Ec); " }
+    $wsl = Get-KitWslExe
+
+    Send-Note 'finding the newest Ubuntu LTS'
+    $saved = $env:WSL_UTF8; $env:WSL_UTF8 = '1'
+    try { $lr = Invoke-KitProcess -FilePath $wsl -ArgumentList @('--list', '--online') } finally { $env:WSL_UTF8 = $saved }
+    $name = Select-KitUbuntuDistro -Lines (@($lr.Out) + @($lr.Err))
+    Write-KitLog "  newest Ubuntu LTS: $name (wsl --list --online exit $($lr.Ec))"
+    $ver = Get-KitVersionText $name; if (-not $ver) { $ver = '' }
+    if (@(Get-KitWslDistros) -contains $name) { return @{ Status = 'current'; Detail = "$($wslNote)WSL up to date, $name already installed"; To = $ver } }
+
+    Send-Note "installing $name - it asks for a new Linux user name and password; type exit to come back here"
+    Write-KitLog "wsl --install -d $name  (console attached: first-run user set-up)"
+    & $wsl --install -d $name
+    $ec = $LASTEXITCODE; if ($null -eq $ec) { $ec = 1 }
+    Write-KitLog "  exit $ec"
+    if (@(Get-KitWslDistros) -contains $name) { return @{ Status = 'installed'; Detail = "$($wslNote)$name installed"; To = $ver } }
+    if ($ec -in 3010, 1641) { return @{ Status = 'failed'; Detail = 'restart Windows, then run this again'; To = '' } }
+    return @{ Status = 'failed'; Detail = "$($wslNote)wsl --install -d $name exit $ec (see log)"; To = '' }
+}
+
+function Get-KitDetect {
+    <#
+    Built-in install checks, named by a catalogue entry's Detect key. Returns the
+    version text ('' = installed, version unknown) or $null (not installed).
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+    try {
+        switch ($Name) {
+            'dev-folder'  { if (Test-Path -LiteralPath (Get-KitDevFolderPath) -PathType Container) { return '' }; return $null }
+            'ctt-profile' { if (Test-KitCttProfile) { return '' }; return $null }
+            'wsl-ubuntu'  {
+                $best = $null; $bestMajor = -2
+                foreach ($d in @(Get-KitWslDistros | Where-Object { $_ -match '^Ubuntu(-\d+\.\d+)?$' })) {
+                    $m = -1; if ($d -match '^Ubuntu-(\d+)\.') { $m = [int]$Matches[1] }
+                    if ($m -gt $bestMajor) { $bestMajor = $m; $best = $d }
+                }
+                if (-not $best) { return $null }
+                $v = Get-KitVersionText $best; if ($v) { return $v }; return ''
+            }
+            default { return $null }
+        }
+    } catch { return $null }
+}
+
+# ---------------------------------------------------------------- per-PC preferences (local, never GitHub)
+
+function Get-KitLocalPrefsFile { return (Join-Path $script:StateDir 'local-settings.json') }
+
+function Get-KitLocalPrefs {
+    <# This PC's own preferences (%LOCALAPPDATA%\my-win-kit\local-settings.json): ordered hashtable. #>
+    $f = Get-KitLocalPrefsFile
+    if (Test-Path -LiteralPath $f) { try { $d = ConvertFrom-KitJsonText ([IO.File]::ReadAllText($f)); if ($d -is [System.Collections.IDictionary]) { return $d } } catch {} }
+    return [ordered]@{}
+}
+
+function Set-KitLocalPref {
+    <# Save one per-PC preference locally. Never touches config/*.json or GitHub. #>
+    param([Parameter(Mandatory)][string]$Name, $Value)
+    $d = Get-KitLocalPrefs
+    $d[$Name] = $Value
+    if (-not (Test-Path -LiteralPath $script:StateDir)) { New-Item -ItemType Directory -Path $script:StateDir -Force | Out-Null }
+    [IO.File]::WriteAllText((Get-KitLocalPrefsFile), (ConvertTo-KitJsonDocument $d), [Text.UTF8Encoding]::new($false))
+    Write-KitRunLog "prefs: $Name = $(ConvertTo-KitJsonValue $Value) (this PC: $(Get-KitLocalPrefsFile))"
+}
+
+function Get-KitAutoInstallPwsh {
+    <#
+    Effective "install PowerShell 7 + Windows Terminal at start" setting:
+    this PC's override, else settings.json autoInstallPwsh, else on.
+    @{ On; Source = 'this PC' | 'shared' | 'default' }. The loader (5.1, no
+    module) applies the same order on its own copy of the files.
+    #>
+    $loc = Get-KitLocalPrefs
+    if ($loc.Contains('autoInstallPwsh') -and $loc['autoInstallPwsh'] -is [bool]) { return [pscustomobject]@{ On = [bool]$loc['autoInstallPwsh']; Source = 'this PC' } }
+    $s = $script:Config['settings.json']
+    if ($s -and $s.Contains('autoInstallPwsh') -and $s['autoInstallPwsh'] -is [bool]) { return [pscustomobject]@{ On = [bool]$s['autoInstallPwsh']; Source = 'shared' } }
+    return [pscustomobject]@{ On = $true; Source = 'default' }
+}
+
+function Get-KitAiUpdateSet {
+    <#
+    What "Update AI tools" updates: AI-flagged apps that are installed on this PC.
+    The AI flag never installs anything and never ticks an app elsewhere.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Installed, [object[]]$Packages = $script:Catalog)
+    return @($Packages | Where-Object { $_.AI -and $Installed.ContainsKey($_.Id) } | Sort-Object GroupOrder, Id)
 }
 
 # ---------------------------------------------------------------- the one entry point
@@ -1046,7 +1352,9 @@ function Invoke-KitPackage {
                 # Already installed + has a native updater -> use it (claude update, agy update)
                 $useUpdate = $isInst -and [bool]$p.Update
                 if ($DryRun) {
-                    $what = if ($useUpdate) { $p.Update } else { "irm $($p.Ref) | iex (child process)" }
+                    $child = if ($p.Shell -eq 'pwsh') { 'child pwsh' } else { 'child process' }
+                    if ($p.Elevated) { $child += ', as administrator' }
+                    $what = if ($useUpdate) { $p.Update } else { "irm $($p.Ref) | iex ($child)" }
                     return New-KitResult $p 'dryrun' $from '' $what '' $sw.Elapsed.TotalSeconds
                 }
                 if ($useUpdate) {
@@ -1054,8 +1362,10 @@ function Invoke-KitPackage {
                     $ec = Invoke-KitCommandLine -CommandLine $p.Update -Exe $p.Exe
                 } else {
                     Step 'running the official installer'
-                    $ec = Invoke-KitRemoteScript -Url $p.Ref -Attached:$p.Interactive
+                    if ($p.Elevated -and -not (Test-KitAdmin)) { Step 'it opens its own administrator window (Windows asks first)' }
+                    $ec = Invoke-KitRemoteScript -Url $p.Ref -Attached:$p.Interactive -Shell ([string]$p.Shell) -Elevated:$p.Elevated
                 }
+                if ($ec -eq 1223) { return New-KitResult $p 'failed' $from '' 'administrator prompt declined' '' $sw.Elapsed.TotalSeconds }
                 if ($ec -ne 0) { return New-KitResult $p 'failed' $from '' "exit code $ec (see log)" '' $sw.Elapsed.TotalSeconds }
                 $to = Get-KitToolVersion -Package $p
                 $st = 'installed'
@@ -1129,11 +1439,25 @@ function Invoke-KitPackage {
             }
 
             'builtin' {
-                if ($p.Ref -ne 'enable-rdp') { throw "unknown builtin '$($p.Ref)'" }
-                if ($DryRun) { return New-KitResult $p 'dryrun' '' '' 'enable RDP + NLA + firewall group (UAC)' '' $sw.Elapsed.TotalSeconds }
-                $r = Invoke-KitEnableRdp
-                $st = if ($r.Ec -eq 0) { 'done' } else { 'failed' }
-                return New-KitResult $p $st '' '' $r.Detail '' $sw.Elapsed.TotalSeconds
+                switch ($p.Ref) {
+                    'enable-rdp' {
+                        if ($DryRun) { return New-KitResult $p 'dryrun' '' '' 'enable RDP + NLA + firewall group (UAC)' '' $sw.Elapsed.TotalSeconds }
+                        $r = Invoke-KitEnableRdp
+                        $st = if ($r.Ec -eq 0) { 'done' } else { 'failed' }
+                        return New-KitResult $p $st '' '' $r.Detail '' $sw.Elapsed.TotalSeconds
+                    }
+                    'dev-folder' {
+                        $r = Invoke-KitDevFolder -DryRun:$DryRun
+                        Write-KitLog "  dev folder: $($r.Status) - $($r.Detail)"
+                        return New-KitResult $p $r.Status $from $r.To $r.Detail '' $sw.Elapsed.TotalSeconds
+                    }
+                    'wsl-ubuntu' {
+                        $r = Invoke-KitWslUbuntu -DryRun:$DryRun -OnStatus $OnStatus
+                        Write-KitLog "  wsl: $($r.Status) - $($r.Detail)"
+                        return New-KitResult $p $r.Status $from $r.To $r.Detail '' $sw.Elapsed.TotalSeconds
+                    }
+                    default { throw "unknown builtin '$($p.Ref)'" }
+                }
             }
 
             default { throw "unknown method '$($p.Method)'" }
@@ -1173,4 +1497,6 @@ Export-ModuleMember -Function Initialize-Kit, Get-KitVersion, Get-KitUpdates, Ge
     Get-KitCatalog, Get-KitLogPath, Get-KitOverrideCount,
     Get-KitRunOrder, Test-KitAdmin, Test-KitWinget, Get-KitArch, Update-KitPath, Start-KitLog, Write-KitLog, Write-KitRunLog,
     Get-KitState, Save-KitState, Get-KitInstalled, Get-KitToolVersion, Get-KitVersionText, Resolve-KitDirect,
-    Test-KitVersionCurrent, Get-KitLatestVersion, Get-KitWingetOutcome, Invoke-KitPackage, Invoke-KitProcess, Enable-KitConsoleVt, Get-KitDesktopShortcuts, Remove-KitNewShortcuts
+    Test-KitVersionCurrent, Get-KitLatestVersion, Get-KitWingetOutcome, Invoke-KitPackage, Invoke-KitProcess, Enable-KitConsoleVt, Get-KitDesktopShortcuts, Remove-KitNewShortcuts,
+    Get-KitDevFolderPath, Invoke-KitDevFolder, Get-KitDriveType, Select-KitUbuntuDistro, ConvertFrom-KitWslText, Get-KitWslDistros, Test-KitRebootNeeded,
+    Get-KitDetect, Test-KitCttProfile, Get-KitPwshProfilePath, Get-KitPwshPath, Get-KitLocalPrefs, Get-KitLocalPrefsFile, Set-KitLocalPref, Get-KitAutoInstallPwsh, Get-KitAiUpdateSet

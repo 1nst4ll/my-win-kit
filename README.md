@@ -14,12 +14,14 @@ The kit is already in **`OneDrive\[98] Shortcuts`** on every PC signed in to Dan
 
 What happens next depends on the PC:
 
-- **PowerShell 7.4+ installed** → it prints *"Starting modern menu · PowerShell 7.x · Spectre"* and the modern
-  menu opens (window title `my-win-kit · modern (PowerShell 7)`).
-- **Not installed** (a fresh PC) → it asks *"Install PowerShell 7 now? [Y/n]"*. Press Enter: it installs
-  PowerShell 7, then opens the modern menu. The first run also installs the PwshSpectreConsole module for the
-  current user (a few seconds).
-- **Answer `n`** → the simpler classic menu opens in Windows PowerShell 5.1. Every install works in both.
+- **PowerShell 7.4+ and Windows Terminal installed** → it prints *"Starting modern menu · PowerShell 7.x ·
+  Spectre"* and the modern menu opens (window title `my-win-kit · modern (PowerShell 7)`).
+- **Either one missing** (a fresh PC) → it installs PowerShell 7 and the latest Windows Terminal straight away,
+  **without asking**, then opens the modern menu under PowerShell 7. The first run also installs the
+  PwshSpectreConsole module for the current user (a few seconds). If an install fails, the simpler classic menu
+  opens in Windows PowerShell 5.1; every install works in both.
+- **Auto-install switched off** (Settings → *Auto-install PowerShell 7 + Terminal on start*, per PC; classic menu:
+  `K`) → it asks *"Install PowerShell 7 now? [Y/n]"* first, as before. `n` opens the classic menu.
 
 By hand: `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1` (add `-Classic` to skip straight
 to the classic menu, or `-DryRun` to see what would run without installing anything).
@@ -44,12 +46,14 @@ available, · not installed, × failed, ↔ healed. In dry run every screen carr
   failures, your last selection, or empty), adjust the grouped list (space ticks an app, ticking a group header
   ticks the whole group), check the review table, then install. Already-installed apps update if a newer version
   exists. **Search to add or remove an app** lets you type a name instead of scrolling.
-- **Update AI tools:** a table of Claude Code, Claude Desktop, Antigravity, Antigravity IDE and the `agy` CLI with
-  installed vs latest versions, then one key updates them all.
+- **Update AI tools:** a table of every AI tool in the catalogue (Claude, Codex, Cursor, Antigravity, KiloCode,
+  Hermes …) with installed vs latest versions, then one key updates **the ones installed on this PC** (winget
+  upgrade, npm, or the tool's own updater). It never installs a missing tool: use Install or update apps for that.
 - **Windows tweaks:** opens the tweaks menu (here, or as administrator for all 4 fixes).
-- **Settings (read-only):** where the config came from (GitHub, cached copy or bundled copy), the current settings,
-  package-ID fixes this PC learned and the file they are in; plus a dry-run toggle for this session and the log
-  folder.
+- **Settings:** read-only: where the config came from (GitHub, cached copy or bundled copy), the current settings,
+  package-ID fixes this PC learned and the file they are in. Changeable on this PC only: auto-install of PowerShell 7
+  + Windows Terminal at start (saved in `%LOCALAPPDATA%\my-win-kit\local-settings.json`), the dry-run toggle for
+  this session, and the log folder.
 
 Each run ends with a results table and writes a log to `%TEMP%\my-win-kit\`.
 
@@ -57,7 +61,18 @@ Each run ends with a results table and writes a log to `%TEMP%\my-win-kit\`.
 
 Type into the prompt and press Enter: numbers (`5`, `1 5 12`), ranges (`20-27`), group letters (`U`, `B`, `D` …),
 `*` (all except post-install), `0` (none). Commands: `Z` recommended set, `N` only what's new here, `I` install,
-`L` latest AI tools, `W` Windows tweaks, `Q` quit. Failed apps stay selected, so `I` retries them.
+`L` latest AI tools (installed ones), `W` Windows tweaks, `K` auto-install PowerShell 7 + Terminal on/off (this
+PC), `Q` quit. Failed apps stay selected, so `I` retries them.
+
+## Set-up items that aren't apps
+
+- **Dev folder** (recommended set): creates `D:\dev\git`, or `C:\dev\git` when the PC has no local D: disk.
+- **WSL + Ubuntu** (Dev tools, off): installs or updates WSL, then the newest Ubuntu LTS. Windows asks for admin,
+  may need a restart (run it again afterwards), and Ubuntu asks for a Linux user name and password; type `exit`
+  to come back to the kit.
+- **Chris Titus prompt** (Dev tools, off): Chris Titus Tech's PowerShell 7 profile (oh-my-posh, Terminal-Icons,
+  zoxide, Nerd Font) from its official `setup.ps1`, in its own administrator window. Afterwards set the Terminal
+  font to `CaskaydiaCove NF`.
 
 ## Always-latest AI tools
 
@@ -67,6 +82,9 @@ Type into the prompt and press Enter: numbers (`5`, `1 5 12`), ranges (`20-27`),
 | Antigravity CLI (`agy`) | official `irm https://antigravity.google/cli/install.ps1 \| iex` | `agy update` |
 | Antigravity IDE, Antigravity | the latest installer linked on antigravity.google/download (must be signed by Google LLC) | same, skipped when already current |
 | Claude Desktop | winget `Anthropic.Claude` | the app updates itself |
+| Cursor, Codex CLI | winget `Anysphere.Cursor`, `OpenAI.Codex` (off by default) | winget upgrade |
+| KiloCode CLI | npm `@kilocode/cli` | `npm install -g` (latest) |
+| Hermes Agent | official installer | `hermes update` |
 
 Claude Desktop stays on winget because Anthropic's "latest" download link refuses scripted downloads (HTTP 403).
 The winget package tracks the current release, and the app updates itself after install.
@@ -80,7 +98,8 @@ run it as administrator for that one.
 
 ## Settings and the package list live on GitHub
 
-`config/catalog.json` (the apps), `config/settings.json` (desktop-shortcut cleanup, start in dry run) and
+`config/catalog.json` (the apps), `config/settings.json` (desktop-shortcut cleanup, start in dry run, auto-install
+PowerShell 7 + Terminal; a PC can override the last one in Settings) and
 `config/winget-id-overrides.json` in this repo are the copy that counts. Every PC reads the latest from GitHub when
 the kit starts (falling back to its last cached copy, then to the copy that came with the kit, when offline). No
 sign-in is needed: the repo is public.
