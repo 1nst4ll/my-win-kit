@@ -10,7 +10,7 @@ _A new session can start from this line, no handover needed._
 - **Kit v2.8.1 is live:** PR #6 merged into `main` (72b7f06) on 2026-11-26 with Daniel's go ("merge"); CI green on both jobs; the post-merge publish copied 2 files to OneDrive. Fixes "Update everything" hanging on
   "Checking what's installed" on a laptop: `hermes --version` ran a git fetch that never finished, and
   `Invoke-KitProcess` had no time limit (see CHANGELOG). Now: Hermes's version is read from its package metadata
-  (`Detect: hermes`) and scans/probes have time limits. Next: run Update everything on that laptop to confirm.
+  (`Detect: hermes`) and scans/probes have time limits. Confirmed working on that laptop 2026-11-26 (Daniel: "it is working now").
   - **Laptop cleaned 2026-11-26** (Daniel: "clean stacy"): the hung `hermes --version` scans and their `git fetch`
     processes ended, 8 leftover `tmp_pack_*` files (2.55 GB) deleted from Hermes's `.git\objects\pack`; its real
     packs untouched. Open question: `hermes update` on that shallow clone may be just as slow (same full fetch); not checked yet.
