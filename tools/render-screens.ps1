@@ -28,12 +28,15 @@ $screens = [ordered]@{
     '1-main-menu+goodbye' = 'text:q'
     '2-install-flow'      = 'Enter,Enter,Enter,Enter,Enter,text:q'
     '3-search'            = 'Enter,UpArrow,UpArrow,Enter,Enter,Enter,text:anti,Enter,Spacebar,Enter,Enter,Enter,text:q'
-    '4-update-ai'         = 'DownArrow,Enter,End,Enter,Escape,Home,DownArrow,Enter,Enter,text:q'
+    '4-update-ai'         = 'DownArrow,Enter,DownArrow,Enter,Escape,Escape,text:q'
+    '9-update-everything' = 'DownArrow,Enter,Enter,Escape,Escape,text:q'
     '5-tweaks'            = 'DownArrow,DownArrow,Enter,Enter,Enter,text:q'
     '6-settings'          = 'DownArrow,DownArrow,DownArrow,Enter,Escape,text:q'
+    '8-admin-settings'    = 'DownArrow,DownArrow,DownArrow,Enter,Escape,text:q'   # elevated: ADMIN badge
 }
 $esc = [char]27
 foreach ($name in $screens.Keys) {
+    $env:MYWINKIT_SIMULATE_ADMIN = if ($name -like '*admin*') { '1' } else { '0' }
     $env:MYWINKIT_TEST_ANSI = '1'
     $ans = & pwsh -NoProfile -File $tui -KitRoot $root -TestKeys $screens[$name] 2>&1 | Out-String
     $env:MYWINKIT_TEST_ANSI = ''
@@ -46,10 +49,12 @@ foreach ($name in $screens.Keys) {
     Write-Host ("  {0,-22} {1,6} chars ansi  {2}" -f $name, $ans.Length, $hl)
 }
 
-# Classic menu (VT truecolor forced for the capture)
+# Classic menu (VT truecolor forced for the capture), elevated so the ADMIN badge shows
+$env:MYWINKIT_SIMULATE_ADMIN = '1'
 $env:MYWINKIT_FORCE_VT = '1'
 $cl = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'install.ps1') -Classic -DryRun -ClassicTestInput '2;I;y;;Q' 2>&1 | Out-String
 $env:MYWINKIT_FORCE_VT = ''
+$env:MYWINKIT_SIMULATE_ADMIN = ''
 Set-Content -LiteralPath (Join-Path $OutDir '7-classic.ans') -Value $cl -Encoding utf8
 Set-Content -LiteralPath (Join-Path $OutDir '7-classic.txt') -Value ($cl -replace "$esc\[[0-9;]*m", '') -Encoding utf8
 Write-Host ("  {0,-22} {1,6} chars ansi" -f '7-classic', $cl.Length)

@@ -2,6 +2,64 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-26: admin once at start, unattended `/auto`, Update menu (everything + AI tools), NoAdmin installs (kit v2.6.0, branch `elevate-auto`)
+
+- Daniel: "any way the script could work unattended and not show security prompts, start in admin mode?" He chose
+  option 1: ask for admin once at start, then nothing else prompts, plus an unattended `/auto` mode. No UAC bypass,
+  no permanent scheduled-task elevation, no turning UAC off. Then: "we need update option then update everything
+  and update ai tools" ("Update everything" = kit apps + the rest of the PC).
+- **Before this branch:** PR #2 (kit v2.5.0) was merged into `main` (f30b5c7) and published on 2026-11-26 with
+  Daniel's go ("merg 2"). The post-merge publish copied 6 files (`src/core.psm1`, `src/tui-classic.ps1`,
+  `src/tui-spectre.ps1`, `config/catalog.json`, `config/settings.json`, `install.ps1`).
+- **Admin once at start (`install.ps1`):** new setting `elevateAtStart` (`config/settings.json`, default true; per
+  PC in Settings / classic `V`, same precedence as `autoInstallPwsh`). Not elevated → the loader relaunches its
+  own copy with `Start-Process -Verb RunAs` (all arguments kept, `MYWINKIT_*` passed as `-KitEnv` because an
+  elevated process doesn't inherit the environment), waits for it and exits with its code. UAC declined → carries
+  on as before, one line says so. Elevation comes after the self-update and before the PowerShell 7 / Terminal
+  install, so those run elevated and the modern menu inherits it. **Over-the-shoulder guard:** a standard account
+  (its token has no deny-only `BUILTIN\Administrators` claim, so Windows would ask for another account) is never
+  elevated as a whole; the elevated copy also checks that its account is the signed-in user (owner of
+  `explorer.exe` in this session) and otherwise hands back (exit 75) so the normal window carries on. The run log
+  records `elevated = yes/no` and why. No real UAC prompt in tests: the step is skipped in test mode unless
+  `MYWINKIT_SIMULATE_UAC` is set (new hooks `MYWINKIT_SIMULATE_ADMIN|ELEVATION|UAC|SESSION_USER`).
+- **ADMIN badge:** orange `ADMIN` on the modern banner and every sub-screen header ("not admin" in grey otherwise),
+  and on the classic subtitle.
+- **Unattended `/auto`:** `install.cmd` now passes its arguments (`/auto /pause /dryrun /classic /noelevate`;
+  `install.ps1 -Auto` too). Elevates once, accepts a newer kit without asking, installs PowerShell 7 + Terminal
+  when `autoInstallPwsh` is on (never asks when it's off), then runs `src/tui-classic.ps1 -Auto` in 5.1: installs the
+  recommended apps that are missing and runs "update everything" (below), skips Interactive / POST items and lists
+  them as "Skipped (needs you)", prints the summary, the log and the run log, and exits 0 (all ok) or 1 (a failure).
+  `/pause` waits for Enter. `& ([scriptblock]::Create((irm <url>))) -Auto` forwards arguments through the bootstrap.
+- **Update menu (both menus):** the main menu's "Update AI tools" moved under a new **Update** entry with two
+  choices: **Update everything** and **Update AI tools**. "Install or update apps" is now "Install apps". Update
+  everything = every installed catalogue app with a newer version (AI tools too, through their own methods and
+  updaters) plus every other app `winget upgrade` lists on the PC (outside the catalogue, not pinned, known version),
+  each run with `winget upgrade --id <Id> --exact --silent ...` through Invoke-KitProcess and classified like any winget
+  run. It shows a Review table of both groups with counts first (Esc = back). Classic: `L` opens the same submenu.
+  Engine: `Get-KitUpdateAllPlan`, `ConvertFrom-KitWingetUpgradeText`, `Get-KitWingetPins`, `Get-KitCatalogUpdateSet`,
+  method `winget-upgrade` in `Invoke-KitPackage`. `/auto` uses the same plan for its update half.
+- **NoAdmin (`config/catalog.json`):** new field, on OneDrive (10), VS Code (36), GitHub Desktop (38) and Cursor (53).
+  From an elevated kit these installers run at the signed-in user's normal rights through `Invoke-KitDeElevated`:
+  a one-shot scheduled task (Task Scheduler COM, interactive token, RunLevel LUA) that waits and returns the exit
+  code and output, then is deleted. A winget "installer prohibits elevation" (0x8A150056) or "admin context
+  prohibited" (0x8A15007D) exit is retried the same way for any app (Spotify's manifest declares `elevationProhibited`;
+  no catalogue manifest does). Evidence: Squirrel (GitHub Desktop) reruns itself unelevated and exits 0 at once;
+  Microsoft says OneDrive running elevated is not supported; VS Code and Cursor user installs turn updates off when run as
+  admin. UniGetUI is left out because its installer elevates itself, so running it de-elevated would bring a UAC
+  prompt back.
+- **Fixes:** the results screens showed "« Back to main menu" twice: `Wait-Back` passed its own item and Select-One
+  added the pinned Back row as well. Now the pinned row is the only one (an empty list draws no blank rows), so
+  results screens are 3 rows shorter. A failed script tool or updater now shows the output line that names the
+  problem (e.g. Hermes' "An Application Control policy has blocked this file") instead of "exit code 1 (see log)".
+- **Tests:** smoke-loader covers elevation (relaunch, already admin, declined, standard account, other account
+  handed back, setting off, `/noelevate`, arguments kept, classic `V`, ADMIN), `/auto` with stdin closed and a time
+  limit (exit 0, no prompt, run log; with a simulated elevation), `install.cmd /auto` pass-through and classic `L`.
+  test-core covers `elevateAtStart`, NoAdmin routing, the de-elevation helper (simulated) and the task script itself,
+  the `/auto` plan, the update-everything plan from sample `winget upgrade` output and failure reasons. smoke-tui
+  covers the Update submenu, Update everything (review, and a dry run when this PC has updates), one Back row on
+  results, the ADMIN badge and the new Settings row. The scheduled-task runner was checked by hand on ATHENA
+  (medium integrity, exit 7 returned, task deleted, ~1 s).
+
 ## 2026-11-26: catalogue changes, Chris Titus prompt, dev folder, WSL + Ubuntu, auto PowerShell 7 + Terminal (kit v2.5.0, branch `catalog-ps7-wsl`)
 
 - Daniel: "lets remove perplexyty and samsung qick share also lets add titus script for terminal prompt, also add

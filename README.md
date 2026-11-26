@@ -23,8 +23,30 @@ What happens next depends on the PC:
 - **Auto-install switched off** (Settings → *Auto-install PowerShell 7 + Terminal on start*, per PC; classic menu:
   `K`) → it asks *"Install PowerShell 7 now? [Y/n]"* first, as before. `n` opens the classic menu.
 
+**Administrator rights once:** at start Windows asks once ("Do you want to allow this app to make changes?"); the
+kit then runs as administrator in its own window (orange **ADMIN** badge), and no installer asks again. The first
+window waits and closes when the kit finishes. Say **No** and the kit carries on as before (each installer asks for
+itself). On a standard account (where Windows would ask for another account's password) the kit doesn't ask up
+front, so per-user apps land in the right profile. Switch it off per PC in Settings → *Ask for administrator rights
+once at start* (classic menu: `V`), or for one run with `install.cmd /noelevate`. A few apps never install as
+administrator (OneDrive, VS Code, GitHub Desktop, Cursor: `NoAdmin` in the catalogue); the kit runs those at your
+normal rights.
+
 By hand: `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1` (add `-Classic` to skip straight
 to the classic menu, or `-DryRun` to see what would run without installing anything).
+
+## Run it unattended
+
+```
+install.cmd /auto
+```
+
+One administrator prompt, then no questions at all: it updates the kit itself if GitHub has a newer version,
+installs PowerShell 7 + Windows Terminal if missing, installs every recommended app that is missing, and runs
+**Update everything** (below). Items that need a person (post-install tools, WSL + Ubuntu, the Chris Titus prompt)
+are skipped and listed as "Skipped (needs you)". It ends with the results, the log paths and an exit code: `0` all
+ok, `1` something failed. Add `/dryrun` to see what it would do, `/pause` to keep the window open at the end
+(`install.ps1 -Auto -DryRun -Pause` works too).
 
 Most installs need winget (App Installer). If it's missing, the menu opens its Microsoft Store page.
 
@@ -42,18 +64,22 @@ Which menu ran is logged: `%LOCALAPPDATA%\my-win-kit\logs\run-*.log` (Settings s
 A gradient **MY WIN KIT** banner, gruvbox colours, and one set of badges everywhere: √ installed, ↑ update
 available, · not installed, × failed, ↔ healed. In dry run every screen carries a purple **DRY RUN** band.
 
-- **Install or update apps:** pick a starting point (recommended set, only what's missing on this PC, retry last
+- **Install apps:** pick a starting point (recommended set, only what's missing on this PC, retry last
   failures, your last selection, or empty), adjust the grouped list (space ticks an app, ticking a group header
   ticks the whole group), check the review table, then install. Already-installed apps update if a newer version
   exists. **Search to add or remove an app** lets you type a name instead of scrolling.
-- **Update AI tools:** a table of every AI tool in the catalogue (Claude, Codex, Cursor, Antigravity, KiloCode,
-  Hermes …) with installed vs latest versions, then one key updates **the ones installed on this PC** (winget
-  upgrade, npm, or the tool's own updater). It never installs a missing tool: use Install or update apps for that.
+- **Update** → **Update everything:** every app from the catalogue that is installed and has a newer version (AI
+  tools too, each through its own updater) **plus everything else winget can upgrade on this PC** (runtimes,
+  other apps; pinned ones and ones with an unknown version are left alone). A review table shows both groups and
+  their counts first; Esc goes back.
+- **Update** → **Update AI tools:** a table of every AI tool in the catalogue (Claude, Codex, Cursor, Antigravity,
+  KiloCode, Hermes …) with installed vs latest versions, then one key updates **the ones installed on this PC**
+  (winget upgrade, npm, or the tool's own updater). It never installs a missing tool: use Install apps for that.
 - **Windows tweaks:** opens the tweaks menu (here, or as administrator for all 4 fixes).
 - **Settings:** read-only: where the config came from (GitHub, cached copy or bundled copy), the current settings,
   package-ID fixes this PC learned and the file they are in. Changeable on this PC only: auto-install of PowerShell 7
-  + Windows Terminal at start (saved in `%LOCALAPPDATA%\my-win-kit\local-settings.json`), the dry-run toggle for
-  this session, and the log folder.
+  + Windows Terminal at start and asking for administrator rights once at start (saved in
+  `%LOCALAPPDATA%\my-win-kit\local-settings.json`), the dry-run toggle for this session, and the log folder.
 
 Each run ends with a results table and writes a log to `%TEMP%\my-win-kit\`.
 
@@ -61,8 +87,9 @@ Each run ends with a results table and writes a log to `%TEMP%\my-win-kit\`.
 
 Type into the prompt and press Enter: numbers (`5`, `1 5 12`), ranges (`20-27`), group letters (`U`, `B`, `D` …),
 `*` (all except post-install), `0` (none). Commands: `Z` recommended set, `N` only what's new here, `I` install,
-`L` latest AI tools (installed ones), `W` Windows tweaks, `K` auto-install PowerShell 7 + Terminal on/off (this
-PC), `Q` quit. Failed apps stay selected, so `I` retries them.
+`L` update (`1` everything, `2` AI tools; Enter = back), `W` Windows tweaks, `K` auto-install PowerShell 7 +
+Terminal on/off, `V` administrator rights at start on/off (both per PC), `Q` quit. Failed apps stay selected, so `I`
+retries them.
 
 ## Set-up items that aren't apps
 
@@ -99,7 +126,7 @@ run it as administrator for that one.
 ## Settings and the package list live on GitHub
 
 `config/catalog.json` (the apps), `config/settings.json` (desktop-shortcut cleanup, start in dry run, auto-install
-PowerShell 7 + Terminal; a PC can override the last one in Settings) and
+PowerShell 7 + Terminal, administrator rights at start; a PC can override the last two in Settings) and
 `config/winget-id-overrides.json` in this repo are the copy that counts. Every PC reads the latest from GitHub when
 the kit starts (falling back to its last cached copy, then to the copy that came with the kit, when offline). No
 sign-in is needed: the repo is public.

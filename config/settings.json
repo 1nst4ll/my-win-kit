@@ -1,7 +1,8 @@
 {
   "schema": 1,
-  "_about": "my-win-kit settings shared by every PC. Edited by hand in the repo; every PC reads it from GitHub at start-up (the menu only shows it). autoInstallPwsh: the loader installs PowerShell 7 + Windows Terminal without asking (a PC can override it in Settings, stored locally).",
+  "_about": "my-win-kit settings shared by every PC. Edited by hand in the repo; every PC reads it from GitHub at start-up (the menu only shows it). autoInstallPwsh: the loader installs PowerShell 7 + Windows Terminal without asking. elevateAtStart: the loader asks for administrator rights once at start (one UAC prompt), so no installer asks again. A PC can override both in Settings (stored locally).",
   "removeShortcuts": true,
   "dryRunByDefault": false,
-  "autoInstallPwsh": true
+  "autoInstallPwsh": true,
+  "elevateAtStart": true
 }

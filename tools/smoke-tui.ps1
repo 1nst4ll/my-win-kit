@@ -31,7 +31,8 @@ New-Item -ItemType Directory -Path (Join-Path $env:MYWINKIT_STATE_DIR 'cache') -
 $scenarios = @(
     @{ Name = 'install: recommended -> picker -> review -> simulate -> results -> back -> q'
        Keys = 'Enter,Enter,Enter,Enter,Enter,text:q'
-       Expect = @('MAIN MENU', 'Start from', 'Choose apps', 'esc back', 'Simulate now', 'results', 'Summary', 'DRY RUN - nothing was installed', 'Log:', 'see you next time') }
+       Expect = @('MAIN MENU', 'Start from', 'Choose apps', 'esc back', 'Simulate now', 'results', 'Summary', 'DRY RUN - nothing was installed', 'Log:', 'see you next time')
+       OnceAfter = @('Summary', 'Back to main menu') }
     @{ Name = 'esc from every install level: start / picker / review'
        Keys = 'Enter,Escape,Enter,Enter,Escape,Escape,Enter,Enter,Enter,Escape,Escape,Escape,text:q'
        Expect = @('Back to main menu', 'Back to the app list', 'see you next time') }
@@ -45,7 +46,7 @@ $scenarios = @(
        Keys = 'Enter,Enter,text:n,Enter,Escape,Escape,Escape,text:q'
        Expect = @('29 apps') }
     @{ Name = 'update AI tools: table lists every AI tool, updates installed ones only -> esc -> q'
-       Keys = 'DownArrow,Enter,Escape,text:q'
+       Keys = 'DownArrow,Enter,DownArrow,Enter,Escape,Escape,text:q'
        Expect = @('How it updates', 'Antigravity IDE', 'Cursor', 'Codex CLI', 'KiloCode CLI', 'claude update', 'see you next time')
        Absent = @('also installs missing ones') }
     @{ Name = 'tweaks: esc back, then open (dry) -> back'
@@ -53,26 +54,60 @@ $scenarios = @(
        Expect = @('Windows 11 tweaks', 'would run: powershell -File', 'see you next time') }
     @{ Name = 'settings (read-only): config source, values, local fixes, edit-in-repo line; auto PS7 toggle (this PC), esc back'
        Keys = 'DownArrow,DownArrow,DownArrow,Enter,Enter,Escape,text:q'
-       Expect = @('read-only', 'Config', 'removeShortcuts', 'dryRunByDefault', 'autoInstallPwsh', '1 package-ID fix in use (learned when winget', '1 package-ID fix learned on this PC only', 'local-overrides.json', 'To change config, edit config/*.json in the my-win-kit repo on GitHub.', 'Auto-install PowerShell 7 + Terminal on start:', '(this PC: shared default)', '(this PC)', 'Dry run now', 'Open the log folder', 'Back to main menu', 'run log:', 'see you next time')
+       Expect = @('read-only', 'Config', 'removeShortcuts', 'dryRunByDefault', 'autoInstallPwsh', '1 package-ID fix in use (learned when winget', '1 package-ID fix learned on this PC only', 'local-overrides.json', 'To change config, edit config/*.json in the my-win-kit repo on GitHub.', 'Auto-install PowerShell 7 + Terminal on start:', '(this PC: shared default)', '(this PC)', 'elevateAtStart', 'Ask for administrator rights once at start:', 'not admin', 'Dry run now', 'Open the log folder', 'Back to main menu', 'run log:', 'see you next time')
        Absent = @('Manage packages', 'GitHub account', 'Would commit', 'gh auth') }
+    @{ Name = 'update submenu: two choices, pinned back row, esc back -> q'
+       Keys = 'DownArrow,Enter,Escape,text:q'
+       Expect = @('MAIN MENU', 'Install apps', 'Update everything', 'Update AI tools', 'Back to main menu', 'see you next time')
+       Absent = @('Install or update apps') }
+    @{ Name = 'update everything: review lists kit apps + other apps on this PC, esc back twice -> q'
+       Keys = 'DownArrow,Enter,Enter,Escape,Escape,text:q'
+       Expect = @('Update everything', 'Review', 'see you next time') }
+    @{ Name = 'settings: admin-at-start toggle (this PC), esc back'
+       Keys = 'DownArrow,DownArrow,DownArrow,Enter,DownArrow,Enter,Escape,text:q'
+       Expect = @('Ask for administrator rights once at start:', '(this PC, from the next start)', 'see you next time') }
+    @{ Name = 'elevated: ADMIN badge on the banner and every sub-screen header'
+       Env = @{ MYWINKIT_SIMULATE_ADMIN = '1' }
+       Keys = 'DownArrow,DownArrow,DownArrow,Enter,Escape,text:q'
+       Expect = @(' ADMIN ', 'Settings', 'see you next time')
+       Absent = @('not admin') }
 )
+
+# Needs something to update on this PC (first item = "Simulate all now"): skipped on CI runners
+$probeCmd = 'Import-Module (Join-Path $env:MWK_ROOT "src\core.psm1"); [void](Initialize-Kit -KitRoot $env:MWK_ROOT -Offline); $i = Get-KitInstalled; $u = Get-KitUpdates -Installed $i; (Get-KitUpdateAllPlan -Installed $i -Updates $u).Run.Count'
+$env:MWK_ROOT = $root
+$probe = if ($env:GITHUB_ACTIONS) { 0 } else { & pwsh -NoProfile -Command $probeCmd 2>$null | Select-Object -Last 1 }
+if (-not $env:GITHUB_ACTIONS -and [int]"0$probe" -gt 0) {
+    $scenarios += @{ Name = "update everything (dry): review -> simulate $probe -> results -> back -> q"
+        Keys = 'DownArrow,Enter,Enter,Enter,Enter,text:q'
+        Expect = @('Simulate all now', 'Updating everything', 'would run', 'Summary', 'DRY RUN - nothing was installed', 'see you next time') }
+}
 
 # Needs at least one AI tool installed (first item = "Update all installed"): skipped on CI runners
 $hasAi = (Test-Path (Join-Path $env:USERPROFILE '.local\bin\claude.exe')) -or (Test-Path (Join-Path $env:LOCALAPPDATA 'agy\bin\agy.exe'))
 if ($hasAi -and -not $env:GITHUB_ACTIONS) {
     $scenarios += @{ Name = 'update AI tools: update all -> simulate -> results -> back'
-        Keys = 'DownArrow,Enter,Enter,Enter,text:q'
-        Expect = @('Update all installed', 'Updating AI tools', 'would run', 'Summary') }
+        Keys = 'DownArrow,Enter,DownArrow,Enter,Enter,Enter,text:q'
+        Expect = @('Update all installed', 'Updating AI tools', 'would run', 'Summary', 'see you next time') }
     $scenarios += @{ Name = 'update AI tools: pick lists installed tools only -> esc -> esc -> q'
-        Keys = 'DownArrow,Enter,DownArrow,Enter,Escape,Escape,text:q'
+        Keys = 'DownArrow,Enter,DownArrow,Enter,DownArrow,Enter,Escape,Escape,Escape,text:q'
         Expect = @('Pick which installed tools to update', 'Choose AI tools', 'see you next time') }
 }
 
 foreach ($s in $scenarios) {
     $kitRoot = $root
+    $env:MYWINKIT_SIMULATE_ADMIN = '0'   # same screens on an elevated CI runner and a normal PC
+    if ($s.ContainsKey('Env')) { foreach ($k in $s.Env.Keys) { Set-Item "Env:$k" $s.Env[$k] } }
     $out = & pwsh -NoProfile -File $tui -KitRoot $kitRoot -TestKeys $s.Keys 2>&1 | Out-String
     $ec = $LASTEXITCODE
+    Remove-Item Env:MYWINKIT_SIMULATE_ADMIN -ErrorAction SilentlyContinue
     $missing = @($s.Expect | Where-Object { -not $out.Contains($_) })   # literal, not -like (brackets are wildcards)
+    if ($s.ContainsKey('OnceAfter')) {
+        # the results screen shows exactly one Back row (Wait-Back): count after the last marker
+        $tail = $out.Substring([Math]::Max(0, $out.LastIndexOf($s.OnceAfter[0])))
+        $n = ([regex]::Matches($tail, [regex]::Escape($s.OnceAfter[1]))).Count
+        if ($n -ne 1) { $missing += "exactly one '$($s.OnceAfter[1])' after '$($s.OnceAfter[0])' (found $n)" }
+    }
     if ($s.ContainsKey('Absent')) { $missing += @($s.Absent | Where-Object { $out.Contains($_) } | ForEach-Object { "(should be absent) $_" }) }
     $hl = ($out -split "`n" | Where-Object { $_ -like 'SCREEN-HEIGHTS:*' } | Select-Object -Last 1)
     $tall = @()

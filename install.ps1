@@ -8,7 +8,14 @@
          ("Update kit 2.3.0 -> 2.4.0? [Y/n]"), download the repo zip into
          %LOCALAPPDATA%\my-win-kit\app\<version>, verify it, and run from there.
          Any failure falls back to this copy. A newer copy already downloaded is
-         used without asking.
+         used without asking. /auto accepts the update without asking.
+      E. elevateAtStart on (default; this PC's choice in Settings, else
+         config/settings.json) and not elevated: relaunch this kit as
+         administrator (one UAC prompt, all arguments kept) and wait for it.
+         Declined -> carry on here (each installer asks for itself). A
+         standard account (Windows would ask for ANOTHER account's password)
+         is never elevated as a whole: per-user installs would land in the
+         wrong profile.
       1. autoInstallPwsh on (default; this PC's choice in Settings, else
          config/settings.json): install whatever is missing of PowerShell 7
          (winget, fallback: signed MSI from GitHub) and Windows Terminal
@@ -19,6 +26,10 @@
       4. Declined / failed        -> classic menu (src/tui-classic.ps1) in 5.1.
     If the modern menu cannot load its module (exit 3) it also falls back to the
     classic menu, so a fresh PC is never stuck.
+    Unattended: install.cmd /auto (or install.ps1 -Auto) runs the same steps
+    without a single question, then installs the recommended apps that are
+    missing and updates the installed ones (src/tui-classic.ps1 -Auto). Exit
+    code 0 = all ok, 1 = something failed. /pause waits for Enter at the end.
     Quick start: double-click install.cmd, or on any PC (public repo):
         irm https://raw.githubusercontent.com/1nst4ll/my-win-kit/main/install.ps1 | iex
     Run that way ($PSScriptRoot empty) it downloads the kit into
@@ -43,15 +54,35 @@
     Testing: answer for the "install PowerShell 7?" question (y or n).
 .PARAMETER ClassicTestInput
     Testing: passed to the classic menu as -TestInput.
+.PARAMETER Auto
+    Unattended run (same as /auto): no questions, recommended set + updates,
+    exit code 0 = ok, 1 = failures.
+.PARAMETER Pause
+    With -Auto: wait for Enter before closing (same as /pause).
+.PARAMETER NoElevate
+    Do not ask for administrator rights at start (this run only).
+.PARAMETER ElevatedChild
+    Internal: this copy was relaunched as administrator by the loader.
+.PARAMETER KitEnv
+    Internal: MYWINKIT_* environment of the parent (base64), because an
+    elevated process does not inherit the environment.
 .NOTES
     Keep ASCII-only and Windows PowerShell 5.1 compatible.
+    Slash forms from install.cmd: /auto /pause /dryrun /classic /noelevate.
     Overrides (tests): MYWINKIT_REPO, MYWINKIT_BRANCH, MYWINKIT_RAW_URL (base of
     raw files, or file:///folder), MYWINKIT_ZIP_URL (zip, or file:///kit.zip),
     MYWINKIT_STATE_DIR, MYWINKIT_BOOTSTRAP_ARGS (args for the iex bootstrap),
     MYWINKIT_SIMULATE_INSTALL=ok|fail (PowerShell 7 / Terminal installs report
-    that result without running anything).
+    that result without running anything). Elevation: MYWINKIT_SIMULATE_ADMIN=1|0
+    (elevated or not), MYWINKIT_SIMULATE_ELEVATION=same|other (what a UAC prompt
+    would give: this user, or another account = over-the-shoulder),
+    MYWINKIT_SIMULATE_UAC=accept|decline (the relaunch is simulated: accept runs
+    the child copy in this console as if elevated), MYWINKIT_SIMULATE_SESSION_USER
+    =same|other (the signed-in user, for the over-the-shoulder check). In test
+    mode (any test switch, or MYWINKIT_STATE_DIR set) there is never a real UAC
+    prompt: without MYWINKIT_SIMULATE_UAC the elevation step is skipped.
 #>
-[CmdletBinding()]
+[CmdletBinding(PositionalBinding = $false)]
 param(
     [switch]$Classic,
     [switch]$DryRun,
@@ -61,8 +92,37 @@ param(
     [switch]$NoTerminal,
     [switch]$WhatIfLoader,
     [string]$Answer,
-    [string]$ClassicTestInput
+    [string]$ClassicTestInput,
+    [switch]$Auto,
+    [switch]$Pause,
+    [switch]$NoElevate,
+    [switch]$ElevatedChild,
+    [string]$KitEnv,
+    [Parameter(ValueFromRemainingArguments = $true)][string[]]$Rest
 )
+
+# install.cmd passes its arguments through: /auto /pause /dryrun /classic /noelevate
+$script:BadArgs = @()
+foreach ($r in @($Rest)) {
+    if (-not $r) { continue }
+    switch -Regex ($r) {
+        '^[/-]auto$'      { $Auto = [switch]$true; $PSBoundParameters['Auto'] = [switch]$true; continue }
+        '^[/-]pause$'     { $Pause = [switch]$true; $PSBoundParameters['Pause'] = [switch]$true; continue }
+        '^[/-]dry-?run$'  { $DryRun = [switch]$true; $PSBoundParameters['DryRun'] = [switch]$true; continue }
+        '^[/-]classic$'   { $Classic = [switch]$true; $PSBoundParameters['Classic'] = [switch]$true; continue }
+        '^[/-]no-?elevate$' { $NoElevate = [switch]$true; $PSBoundParameters['NoElevate'] = [switch]$true; continue }
+        default           { $script:BadArgs += $r }
+    }
+}
+[void]$PSBoundParameters.Remove('Rest')
+# The elevated copy gets the parent's MYWINKIT_* variables (run log, test hooks) as an argument.
+if ($KitEnv) {
+    try {
+        foreach ($line in ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($KitEnv)) -split "`n")) {
+            $i = $line.IndexOf('='); if ($i -gt 0 -and $line.StartsWith('MYWINKIT_')) { [Environment]::SetEnvironmentVariable($line.Substring(0, $i), $line.Substring($i + 1)) }
+        }
+    } catch {}
+}
 
 $ErrorActionPreference = 'Continue'
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
@@ -89,7 +149,21 @@ try {
 function Write-RunLog([string]$Text) {
     try { Add-Content -LiteralPath $env:MYWINKIT_RUNLOG -Value ('{0:yyyy-MM-dd HH:mm:ss} [{1}] {2}' -f (Get-Date), $PID, $Text) -Encoding UTF8 } catch {}
 }
-Write-RunLog ("loader: Windows PowerShell {0} ({1}), kit {2}, args: {3}" -f $PSVersionTable.PSVersion, $PSVersionTable.PSEdition, $(if ($root) { $root } else { '(none: irm | iex bootstrap)' }), (($PSBoundParameters.GetEnumerator() | ForEach-Object { "-$($_.Key) $($_.Value)" }) -join ' '))
+Write-RunLog ("loader: Windows PowerShell {0} ({1}), kit {2}, args: {3}" -f $PSVersionTable.PSVersion, $PSVersionTable.PSEdition, $(if ($root) { $root } else { '(none: irm | iex bootstrap)' }), (($PSBoundParameters.GetEnumerator() | Where-Object { $_.Key -ne 'KitEnv' } | ForEach-Object { "-$($_.Key) $($_.Value)" }) -join ' '))
+if ($script:BadArgs.Count) { Write-Say "Ignoring unknown argument(s): $($script:BadArgs -join ' ') (known: /auto /pause /dryrun /classic /noelevate)" 'Yellow'; Write-RunLog "loader: unknown arguments ignored: $($script:BadArgs -join ' ')" }
+if ($Auto) { Write-RunLog 'loader: unattended run (/auto): no questions' }
+
+$script:BoundArgs = $PSBoundParameters   # inside a function $PSBoundParameters is that function's own
+function Get-ForwardArgs([string[]]$Skip = @()) {
+    <# This run's arguments, for a relaunched copy (self-update, elevation, bootstrap). #>
+    $a = @()
+    foreach ($kv in $script:BoundArgs.GetEnumerator()) {
+        if ($kv.Key -in @('UpdateAnswer', 'NoUpdate', 'ElevatedChild', 'KitEnv', 'Rest') + $Skip) { continue }
+        if ($kv.Value -is [System.Management.Automation.SwitchParameter]) { if ($kv.Value.IsPresent) { $a += "-$($kv.Key)" } }
+        else { $a += @("-$($kv.Key)", [string]$kv.Value) }
+    }
+    return , $a
+}
 
 # ---------------------------------------------------------------- self-update / bootstrap from GitHub
 
@@ -185,10 +259,13 @@ if (-not $root) {
     if ($rv) { $dir = Install-KitCopy $rv }
     if (-not $dir) { $n = Get-NewestKitCopy; if ($n) { $dir = $n.Path; Write-Say "Using the copy already on this PC (v$($n.Version))." 'Yellow' } }
     if (-not $dir) { Write-Say 'Could not download the kit. Check the internet connection (and that the repo is public), then try again.' 'Red'; return }
-    $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $dir 'install.ps1'), '-NoUpdate')
+    # & ([scriptblock]::Create((irm <url>))) -Auto passes arguments; plain irm | iex has none
+    $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $dir 'install.ps1'), '-NoUpdate') + (Get-ForwardArgs)
     if ($env:MYWINKIT_BOOTSTRAP_ARGS) { $childArgs += @($env:MYWINKIT_BOOTSTRAP_ARGS -split '\s+' | Where-Object { $_ }) }
     Write-RunLog "loader: bootstrap -> $dir"
+    # The child copy asks for administrator rights itself (it relaunches elevated and waits).
     & powershell.exe @childArgs
+    $global:LASTEXITCODE = $LASTEXITCODE
     return   # not exit: under iex, exit would close the user's PowerShell window
 }
 
@@ -203,7 +280,14 @@ if (-not $NoUpdate) {
     if ($rv -and $useVer -and $rv -gt $useVer) {
         $upFile = Join-Path $stateDir 'update.json'
         $declined = ''; try { $declined = ([IO.File]::ReadAllText($upFile) | ConvertFrom-Json).declined } catch {}
-        if ($declined -eq $rv.ToString() -and -not $PSBoundParameters.ContainsKey('UpdateAnswer')) {
+        if ($Auto -and -not $PSBoundParameters.ContainsKey('UpdateAnswer')) {
+            # unattended: take the newer version without asking (a failure keeps this copy)
+            Write-Say "Updating the kit $useVer -> $rv (unattended)..." 'Cyan'
+            Write-RunLog "update: /auto - installing v$rv without asking"
+            $d = Install-KitCopy $rv
+            if ($d) { $useDir = $d; $useVer = $rv; Write-Say "Updated to v$rv." 'Green' }
+            else { Write-Say "Keeping v$useVer." 'Yellow' }
+        } elseif ($declined -eq $rv.ToString() -and -not $PSBoundParameters.ContainsKey('UpdateAnswer')) {
             Write-RunLog "update: v$rv was declined earlier - not asking again"
         } elseif (-not $PSBoundParameters.ContainsKey('UpdateAnswer') -and [Console]::IsInputRedirected) {
             Write-RunLog "update: v$rv available but input is redirected (CI/pipe) - not asking, keeping v$useVer"
@@ -221,12 +305,7 @@ if (-not $NoUpdate) {
         }
     }
     if ($useDir) {
-        $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $useDir 'install.ps1'), '-NoUpdate')
-        foreach ($kv in $PSBoundParameters.GetEnumerator()) {
-            if ($kv.Key -in 'UpdateAnswer', 'NoUpdate') { continue }
-            if ($kv.Value -is [System.Management.Automation.SwitchParameter]) { if ($kv.Value.IsPresent) { $childArgs += "-$($kv.Key)" } }
-            else { $childArgs += @("-$($kv.Key)", [string]$kv.Value) }
-        }
+        $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $useDir 'install.ps1'), '-NoUpdate') + (Get-ForwardArgs)
         Write-RunLog "loader: running kit v$useVer from $useDir"
         & powershell.exe @childArgs
         exit $LASTEXITCODE
@@ -244,9 +323,173 @@ if (-not (Test-Path -LiteralPath $cmdPath)) {
             '@echo off',
             'rem Launcher for the workstation installer - safe on fresh Windows.',
             'rem Bypasses ExecutionPolicy for this run only (no system change).',
-            'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dpn0.ps1"'
+            'rem Unattended: install.cmd /auto   (also /pause /dryrun /classic /noelevate)',
+            'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dpn0.ps1" %*'
         )
     } catch {}
+}
+
+# ---------------------------------------------------------------- settings a PC can override
+
+function Get-LoaderSwitch([string]$Name, [bool]$Default = $true) {
+    <#
+    An on/off setting: this PC's own choice (<state>\local-settings.json, set
+    from the Settings screen), else settings.json (cached copy, then the
+    bundled one; the loader does not fetch config itself), else -Default.
+    Same order as Get-KitLocalSwitch in src/core.psm1.
+    #>
+    $srcs = @(
+        @{ File = (Join-Path $stateDir 'local-settings.json'); Name = 'this PC' },
+        @{ File = (Join-Path $stateDir 'cache\settings.json'); Name = 'shared, cached' },
+        @{ File = (Join-Path $root 'config\settings.json'); Name = 'shared, bundled' }
+    )
+    foreach ($s in $srcs) {
+        if (-not (Test-Path -LiteralPath $s.File)) { continue }
+        try {
+            $j = [IO.File]::ReadAllText($s.File) | ConvertFrom-Json
+            if ($j.PSObject.Properties[$Name] -and $j.$Name -is [bool]) { return [pscustomobject]@{ On = [bool]$j.$Name; Source = $s.Name } }
+        } catch {}
+    }
+    return [pscustomobject]@{ On = $Default; Source = 'default' }
+}
+
+# ---------------------------------------------------------------- administrator rights: ask once at start
+
+function Test-LoaderAdmin {
+    <# This process is elevated. Testing: MYWINKIT_SIMULATE_ADMIN=1|0. #>
+    if ($env:MYWINKIT_SIMULATE_ADMIN -eq '1') { return $true }
+    if ($env:MYWINKIT_SIMULATE_ADMIN -eq '0') { return $false }
+    try { return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch { return $false }
+}
+
+function Get-ElevationKind {
+    <#
+    Who a UAC prompt would make us: 'same' = this account is an administrator
+    (its filtered token carries BUILTIN\Administrators as a deny-only group;
+    Windows shows a Yes/No consent prompt), 'other' = a standard account
+    (Windows asks for ANOTHER account's credentials: over-the-shoulder).
+    Testing: MYWINKIT_SIMULATE_ELEVATION=same|other.
+    #>
+    if ($env:MYWINKIT_SIMULATE_ELEVATION -in 'same', 'other') { return $env:MYWINKIT_SIMULATE_ELEVATION }
+    try { foreach ($c in [Security.Principal.WindowsIdentity]::GetCurrent().Claims) { if ($c.Value -eq 'S-1-5-32-544') { return 'same' } } } catch {}
+    return 'other'
+}
+
+function Get-SessionUserSid {
+    <#
+    SID of the user signed in to this Windows session (owner of explorer.exe
+    here), or $null when unknown (no Explorer shell: then nothing is compared).
+    Testing: MYWINKIT_SIMULATE_SESSION_USER=same|other. Same check as
+    Get-KitSessionUser in src/core.psm1.
+    #>
+    $sim = $env:MYWINKIT_SIMULATE_SESSION_USER
+    if ($sim -eq 'same') { return [Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
+    if ($sim -eq 'other') { return 'S-1-5-21-0-0-0-1001' }
+    try {
+        $sess = [Diagnostics.Process]::GetCurrentProcess().SessionId
+        $ex = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'explorer.exe' AND SessionId = $sess" -ErrorAction Stop | Select-Object -First 1)
+        if ($ex.Count) { return [string](Invoke-CimMethod -InputObject $ex[0] -MethodName GetOwnerSid -ErrorAction Stop).Sid }
+    } catch {}
+    return $null
+}
+
+function Join-ArgLine([string[]]$Arguments) {
+    <# One Windows command line (CommandLineToArgvW rules), for Start-Process -Verb RunAs. #>
+    $parts = foreach ($a in $Arguments) {
+        if ($a -ne '' -and $a -notmatch '[\s"]') { $a; continue }
+        $s = [regex]::Replace($a, '(\\*)"', '$1$1\"'); $s = [regex]::Replace($s, '(\\+)$', '$1$1')
+        '"' + $s + '"'
+    }
+    return ($parts -join ' ')
+}
+
+$script:TestMode = $WhatIfLoader -or $script:HasClassicTI -or $PSBoundParameters.ContainsKey('Answer') -or $PSBoundParameters.ContainsKey('UpdateAnswer') -or [bool]$env:MYWINKIT_STATE_DIR
+$script:IsAdmin = Test-LoaderAdmin
+$script:OtherUserExit = 75   # the elevated copy found it runs as another account: hand back to the parent
+
+if ($ElevatedChild) {
+    # The relaunched copy: make sure the elevated account is the signed-in user.
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $sess = Get-SessionUserSid
+    if ($sess -and $sess -ne $me.User.Value) {
+        Write-RunLog "elevate: the elevated copy runs as $($me.Name) ($($me.User.Value)), but the signed-in user is $sess - over-the-shoulder, handing back (exit $($script:OtherUserExit))"
+        Write-Say "Administrator rights came from another account ($($me.Name)) - going back to the normal window." 'Yellow'
+        exit $script:OtherUserExit
+    }
+    Write-RunLog "elevate: elevated = yes (relaunched as administrator after one UAC prompt; account $($me.Name) = the signed-in user)"
+    if ($WhatIfLoader) { 'elevate: running elevated (relaunched copy)' }
+} elseif ($script:IsAdmin) {
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $sess = Get-SessionUserSid
+    if ($sess -and $sess -ne $me.User.Value) {
+        Write-RunLog "elevate: elevated = yes (started as administrator) but as $($me.Name), not the signed-in user ($sess): per-user apps go to that account's profile"
+        Write-Say "Running as $($me.Name), not the signed-in user: per-user apps will go to that account's profile." 'Yellow'
+    } else { Write-RunLog 'elevate: elevated = yes (started as administrator)' }
+    if ($WhatIfLoader) { 'elevate: already elevated' }
+} else {
+    $elev = Get-LoaderSwitch 'elevateAtStart' $true
+    $kind = ''
+    $why = ''
+    if ($NoElevate) { $why = 'off for this run (-NoElevate / /noelevate)' }
+    elseif (-not $elev.On) { $why = "elevateAtStart is off ($($elev.Source))" }
+    else {
+        $kind = Get-ElevationKind
+        if ($kind -eq 'other') { $why = 'this account is not an administrator: Windows would ask for another account, and per-user apps would land in its profile (over-the-shoulder)' }
+        elseif ($script:TestMode -and -not $env:MYWINKIT_SIMULATE_UAC) { $why = 'test mode (no real UAC prompt in tests)' }
+    }
+    if ($why) {
+        Write-RunLog "elevate: elevated = no - $why; installers ask for administrator rights one by one"
+        if ($WhatIfLoader) { "elevate: no ($why)" }
+        elseif ($kind -eq 'other') { Write-Say 'Not asking for administrator rights up front (this is a standard account) - each installer asks for itself.' 'DarkGray' }
+    } elseif ($WhatIfLoader) {
+        'elevate: relaunch as administrator (one UAC prompt)'
+        Write-RunLog 'elevate: decision = relaunch as administrator (what-if, not started)'
+    } else {
+        # Relaunch this copy elevated with the same arguments and wait for it (exit code + over-the-shoulder hand-back).
+        function New-ElevArgs {
+            # MYWINKIT_* travel as an argument: the elevated process does not inherit this environment
+            $kitEnvText = (@(Get-ChildItem Env: | Where-Object { $_.Name -like 'MYWINKIT_*' } | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join "`n")
+            $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($kitEnvText))
+            return , (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'install.ps1')) + (Get-ForwardArgs) + @('-NoUpdate', '-ElevatedChild', '-KitEnv', $b64))
+        }
+        $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $ec = $null
+        if ($env:MYWINKIT_SIMULATE_UAC -eq 'decline') {
+            Write-Say 'Simulated: administrator prompt declined.' 'Magenta'
+        } elseif ($env:MYWINKIT_SIMULATE_UAC -eq 'accept') {
+            Write-Say 'Simulated: administrator prompt accepted - the kit runs elevated (same console).' 'Magenta'
+            $keepSim = $env:MYWINKIT_SIMULATE_ADMIN; $env:MYWINKIT_SIMULATE_ADMIN = '1'
+            try {
+                $elevArgs = New-ElevArgs
+                Write-RunLog "elevate: simulated relaunch: $(Join-ArgLine ($elevArgs | Select-Object -SkipLast 1))"
+                & $ps @elevArgs; $ec = $LASTEXITCODE
+            } finally { $env:MYWINKIT_SIMULATE_ADMIN = $keepSim }
+        } else {
+            Write-Say "my-win-kit $Dot asking Windows for administrator rights once, so nothing else asks (switch off in Settings)" 'DarkYellow'
+            try {
+                $proc = Start-Process -FilePath $ps -ArgumentList (Join-ArgLine (New-ElevArgs)) -Verb RunAs -PassThru -ErrorAction Stop
+                $null = $proc.Handle   # keeps the exit code readable in Windows PowerShell 5.1
+                Write-RunLog "elevate: relaunched as administrator (pid $($proc.Id)); waiting for it"
+                Write-Say 'The kit continues in its administrator window. This window closes when it finishes.' 'DarkGray'
+                $proc.WaitForExit()
+                $ec = $proc.ExitCode
+            } catch {
+                Write-RunLog "elevate: relaunch not started: $($_.Exception.Message)"
+            }
+        }
+        if ($null -eq $ec) {
+            Write-RunLog 'elevate: elevated = no - administrator prompt declined (or not shown); carrying on, installers ask one by one'
+            Write-Say 'No administrator rights - carrying on; each installer asks for itself.' 'Yellow'
+        } elseif ($ec -eq $script:OtherUserExit) {
+            Write-RunLog 'elevate: elevated = no - the elevated copy ran as another account (over-the-shoulder); carrying on here, installers ask one by one'
+            Write-Say 'Carrying on here without administrator rights; each installer asks for itself.' 'Yellow'
+        } else {
+            Write-RunLog "elevate: the elevated copy exited with code $ec"
+            # the administrator window is gone now: say how it ended (its output is in the run log)
+            Write-Say "The administrator window finished (exit code $ec). Run log: $env:MYWINKIT_RUNLOG" $(if ($ec) { 'Yellow' } else { 'DarkGray' })
+            exit $ec
+        }
+    }
 }
 
 # ---------------------------------------------------------------- PowerShell 7 detection
@@ -340,25 +583,8 @@ function Install-Terminal {
 }
 
 function Get-AutoPwshSetting {
-    <#
-    "Install PowerShell 7 + Windows Terminal at start without asking": this PC's
-    own choice (<state>\local-settings.json, set from the Settings screen), else
-    settings.json autoInstallPwsh (cached copy, then the bundled one), else on.
-    Same order as Get-KitAutoInstallPwsh in src/core.psm1.
-    #>
-    $srcs = @(
-        @{ File = (Join-Path $stateDir 'local-settings.json'); Name = 'this PC' },
-        @{ File = (Join-Path $stateDir 'cache\settings.json'); Name = 'shared, cached' },
-        @{ File = (Join-Path $root 'config\settings.json'); Name = 'shared, bundled' }
-    )
-    foreach ($s in $srcs) {
-        if (-not (Test-Path -LiteralPath $s.File)) { continue }
-        try {
-            $j = [IO.File]::ReadAllText($s.File) | ConvertFrom-Json
-            if ($j.PSObject.Properties['autoInstallPwsh'] -and $j.autoInstallPwsh -is [bool]) { return [pscustomobject]@{ On = [bool]$j.autoInstallPwsh; Source = $s.Name } }
-        } catch {}
-    }
-    return [pscustomobject]@{ On = $true; Source = 'default' }
+    <# "Install PowerShell 7 + Windows Terminal at start without asking" (autoInstallPwsh, default on). #>
+    return (Get-LoaderSwitch 'autoInstallPwsh' $true)
 }
 
 # A failed Windows Terminal install is not retried on every start the same day (keeps start-up fast).
@@ -372,7 +598,20 @@ function Set-WtFailedToday {
 
 # ---------------------------------------------------------------- launchers
 
+function Start-Auto([string]$Why = '') {
+    <# Unattended run: the classic front-end's -Auto mode in this Windows PowerShell 5.1 process (no picker, no questions). #>
+    Write-RunLog "loader: starting UNATTENDED run (src\tui-classic.ps1 -Auto) in Windows PowerShell $($PSVersionTable.PSVersion)$(if ($Why) { " - $Why" })"
+    $a = @{ KitRoot = $root; Auto = $true }
+    if ($DryRun) { $a.DryRun = $true }
+    if ($Pause) { $a.Pause = $true }
+    & (Join-Path $root 'src\tui-classic.ps1') @a
+    $ec = $LASTEXITCODE
+    Write-RunLog "loader: unattended run exited with code $ec"
+    exit $ec
+}
+
 function Start-Classic([string]$Why = '') {
+    if ($Auto) { Start-Auto $Why }
     Write-RunLog "loader: starting CLASSIC menu (src\tui-classic.ps1) in Windows PowerShell $($PSVersionTable.PSVersion)$(if ($Why) { " - reason: $Why" })"
     Write-Say "Starting classic menu $Dot Windows PowerShell $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor)$(if ($Why) { " $Dot $Why" })" 'DarkYellow'
     $a = @{ KitRoot = $root }
@@ -383,6 +622,7 @@ function Start-Classic([string]$Why = '') {
 }
 
 function Start-Modern($Pwsh) {
+    if ($Auto) { Start-Auto "PowerShell 7 $($Pwsh.Version) present; unattended runs use the classic engine" }
     $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'src\tui-spectre.ps1'), '-KitRoot', $root)
     if ($DryRun) { $a += '-DryRun' }
     Write-RunLog "loader: starting MODERN menu (src\tui-spectre.ps1) with $($Pwsh.Path) (PowerShell $($Pwsh.Version))"
@@ -402,6 +642,7 @@ function Start-Modern($Pwsh) {
 
 # ---------------------------------------------------------------- decide
 
+if ($Auto -and $WhatIfLoader) { 'front-end: unattended (/auto, no questions)' }
 if ($Classic) {
     Write-RunLog 'loader: decision = classic (forced with -Classic)'
     if ($WhatIfLoader) { 'decision: classic (forced)'; exit 0 }
@@ -412,17 +653,17 @@ $pw = Find-Pwsh
 Write-RunLog $(if ($pw) { "loader: found pwsh $($pw.Path) version $($pw.Version) (needs $MinPwsh+)" } elseif ($NoPwsh -or $env:MYWINKIT_SIMULATE_NO_PWSH -eq '1') { 'loader: pwsh search skipped (simulated absent)' } else { 'loader: no pwsh found' })
 $hasPwsh = [bool]($pw -and $pw.Version -ge $MinPwsh)
 $found = if ($pw) { "found $($pw.Version), needs $MinPwsh+" } else { 'not installed' }
-$auto = Get-AutoPwshSetting
-Write-RunLog "loader: autoInstallPwsh = $($auto.On) ($($auto.Source))"
+$autoPwsh = Get-AutoPwshSetting
+Write-RunLog "loader: autoInstallPwsh = $($autoPwsh.On) ($($autoPwsh.Source))"
 
 # Auto mode (default): install what is missing without asking, then relaunch under pwsh.
 # Any failure ends in the classic menu, exactly like a declined install.
-if ($auto.On) {
+if ($autoPwsh.On) {
     $needWt = -not (Test-Terminal)
     if ($needWt -and (Get-WtFailedToday)) { Write-RunLog 'loader: Windows Terminal missing, but its install failed earlier today - not retrying until tomorrow'; $needWt = $false }
     if (-not $hasPwsh -or $needWt) {
         $what = @(); if (-not $hasPwsh) { $what += "PowerShell 7 ($found)" }; if ($needWt) { $what += 'Windows Terminal' }
-        Write-RunLog "loader: decision = auto-install $($what -join ' + ') (autoInstallPwsh on, $($auto.Source))"
+        Write-RunLog "loader: decision = auto-install $($what -join ' + ') (autoInstallPwsh on, $($autoPwsh.Source))"
         if ($WhatIfLoader) { "decision: auto-install ($($what -join ' + '))"; exit 0 }
         Write-Host ''
         Write-Say "my-win-kit $Dot installing $($what -join ' and ') $Dot no question asked (switch off in Settings)" 'DarkYellow'
@@ -454,8 +695,9 @@ if ($hasPwsh) {
     Start-Modern $pw
 }
 
-Write-RunLog "loader: decision = offer PowerShell 7 install ($found; autoInstallPwsh off, $($auto.Source))"
+Write-RunLog "loader: decision = offer PowerShell 7 install ($found; autoInstallPwsh off, $($autoPwsh.Source))"
 if ($WhatIfLoader) { "decision: offer-install (PowerShell 7 $found)"; exit 0 }
+if ($Auto) { Start-Classic 'PowerShell 7 not installed, autoInstallPwsh off: not asking (unattended)' }
 
 Write-Host ''
 Write-Say 'my-win-kit' 'DarkYellow'

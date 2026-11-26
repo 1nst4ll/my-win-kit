@@ -10,7 +10,9 @@
     Install methods: winget, msstore, script (vendor one-liner, run in a
     CHILD process so a vendor `exit` cannot close the menu), direct (latest
     installer resolved from the vendor's download page + Authenticode check),
-    npm, builtin (enable-rdp, dev-folder, wsl-ubuntu).
+    npm, builtin (enable-rdp, dev-folder, wsl-ubuntu). NoAdmin packages run
+    at the signed-in user's normal rights when the kit is elevated
+    (Invoke-KitDeElevated: one-shot scheduled task, RunLevel LUA).
 
     Self-healing winget IDs: a vanished ID is replaced by its successor, and a
     dead installer download falls back to older versions, then to the Store.
@@ -22,7 +24,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:KitVersion  = '2.5.0'   # bump with user-visible changes (shown in the menu banner)
+$script:KitVersion  = '2.6.0'   # bump with user-visible changes (shown in the menu banner)
 $script:KitRoot     = $null
 $script:BaseData    = $null
 $script:Catalog     = @()
@@ -42,6 +44,8 @@ $script:WG_PACKAGE_ALREADY_INSTALLED = -1978335135   # 0x8A150061 PACKAGE_ALREAD
 $script:WG_INSTALL_DOWNGRADE         = -1978334962   # 0x8A15010E INSTALL_DOWNGRADE: a higher version is already installed
 $script:WG_NOTHING_TO_DO = @($script:WG_UPDATE_NOT_APPLICABLE, $script:WG_UPGRADE_VERSION_NOT_NEWER, $script:WG_PACKAGE_ALREADY_INSTALLED, $script:WG_INSTALL_DOWNGRADE)
 $script:UA          = 'my-win-kit (PowerShell)'
+$script:LastUpgradeRaw = $null   # raw `winget upgrade` lines from the last Get-KitUpdates
+$script:LastFailLine = ''        # the line that names the problem in the last failed script/updater run
 
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 
@@ -57,6 +61,7 @@ function ConvertTo-KitPackage($h, [hashtable]$Order, [string]$Origin = 'config')
         Update = $h['Update']; Version = $h['Version']; Exe = $h['Exe']; Appx = $h['Appx']
         Uninstall = $h['Uninstall']; Fallback = $h['Fallback']; Requires = $h['Requires']
         Elevated = [bool]$h['Elevated']; Shell = $h['Shell']; Detect = $h['Detect']
+        NoAdmin = [bool]$h['NoAdmin']
         Origin = $Origin
     }
 }
@@ -292,6 +297,9 @@ function Get-KitRunOrder {
 }
 
 function Test-KitAdmin {
+    <# This process runs elevated. Testing: MYWINKIT_SIMULATE_ADMIN=1|0. #>
+    if ($env:MYWINKIT_SIMULATE_ADMIN -eq '1') { return $true }
+    if ($env:MYWINKIT_SIMULATE_ADMIN -eq '0') { return $false }
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
     return ([Security.Principal.WindowsPrincipal]$id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
@@ -479,10 +487,10 @@ function Get-KitInstalled {
 # ---------------------------------------------------------------- winget helpers
 
 function Invoke-KitWinget {
-    <# Run winget, return @{ Ec; Out }. #>
-    param([string[]]$WingetArgs)
-    Write-KitLog ("winget " + ($WingetArgs -join ' '))
-    $r = Invoke-KitProcess -FilePath 'winget' -ArgumentList $WingetArgs
+    <# Run winget, return @{ Ec; Out }. -DeElevate: at the signed-in user's normal rights (Invoke-KitDeElevated). #>
+    param([string[]]$WingetArgs, [switch]$DeElevate)
+    Write-KitLog ("winget " + ($WingetArgs -join ' ') + $(if ($DeElevate) { '  (de-elevated)' } else { '' }))
+    $r = Invoke-KitChild -FilePath 'winget' -ArgumentList $WingetArgs -DeElevate:$DeElevate
     $out = @(@($r.Out) + @($r.Err))
     $ec = $r.Ec
     $clean = @($out | Where-Object { $_.Trim() -and $_ -match '[A-Za-z]' -and $_ -notmatch '^\s*[\\|/\-]+\s*$' })
@@ -498,15 +506,24 @@ function Get-KitWingetFailReason {
     #>
     param([int]$ExitCode, [string[]]$Out = @())
     $code = 'winget 0x{0:X8}' -f $ExitCode
-    $lines = @($Out | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() } |
-        Where-Object { $_ -notmatch '^(Installer log is available|Downloading\s|https?://)' })
-    $pick = $null
-    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
-        if ($lines[$i] -match '(?i)fail|error|cancel|denied|blocked|unable|cannot|could not|not (found|applicable|supported|valid|newer)|no package|in use|restart') { $pick = $lines[$i]; break }
-    }
-    if (-not $pick -and $lines.Count -gt 0) { $pick = $lines[$lines.Count - 1] }
+    $pick = Get-KitFailLine -Out $Out
+    if (-not $pick) { $l = @($Out | Where-Object { $_ -and $_.Trim() }); if ($l.Count) { $pick = $l[-1].Trim() } }
     if ($pick) { return "$pick ($code)" }
     return $code
+}
+
+function Get-KitFailLine {
+    <# The last output line that names a problem (failed, blocked, denied ...), or ''. Shared by winget, scripts and updaters. #>
+    param([string[]]$Out = @())
+    $lines = @($Out | Where-Object { $_ -and "$_".Trim() } | ForEach-Object { "$_".Trim() } |
+        Where-Object { $_ -notmatch '^(Installer log is available|Downloading\s|https?://)' })
+    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+        if ($lines[$i] -match '(?i)fail|error|cancel|denied|blocked|unable|cannot|could not|not (found|applicable|supported|valid|newer|recognized)|no package|in use|restart') {
+            $s = $lines[$i]; if ($s.Length -gt 120) { $s = $s.Substring(0, 117) + '...' }
+            return $s
+        }
+    }
+    return ''
 }
 
 function Get-KitWingetOutcome {
@@ -711,8 +728,10 @@ function Get-KitUpdates {
     param([Parameter(Mandatory)][hashtable]$Installed, [object[]]$Packages = $script:Catalog)
     $res = @{}
     $avail = @{}
+    $script:LastUpgradeRaw = @()
     if (Test-KitWinget) {
         $raw = @(Get-KitWingetRaw @('upgrade', '--accept-source-agreements', '--disable-interactivity'))
+        $script:LastUpgradeRaw = $raw   # Get-KitUpdateAllPlan reuses it (one winget upgrade per scan)
         $sep = -1
         for ($j = 0; $j -lt $raw.Count; $j++) { if ($raw[$j] -match '^-{4,}') { $sep = $j; break } }
         if ($sep -ge 1) {
@@ -880,7 +899,7 @@ function Invoke-KitRemoteScript {
     to the log. -Elevated without admin rights: its own administrator window
     (UAC); returns 1223 when the prompt is declined.
     #>
-    param([string]$Url, [switch]$Attached, [string]$Shell = '', [switch]$Elevated)
+    param([string]$Url, [switch]$Attached, [string]$Shell = '', [switch]$Elevated, [switch]$DeElevate)
     $exe = 'powershell.exe'
     if ($Shell -eq 'pwsh') {
         $exe = Get-KitPwshPath
@@ -901,10 +920,11 @@ function Invoke-KitRemoteScript {
         & $exe @argList
         $ec = $LASTEXITCODE
     } else {
-        $r = Invoke-KitProcess -FilePath $exe -ArgumentList $argList
+        $r = Invoke-KitChild -FilePath $exe -ArgumentList $argList -DeElevate:$DeElevate
         $out = @(@($r.Out) + @($r.Err))
         $ec = $r.Ec
         foreach ($l in ($out | Where-Object { $_.Trim() } | Select-Object -Last 20)) { Write-KitLog "  | $l" }
+        if ($ec -ne 0) { $script:LastFailLine = Get-KitFailLine -Out $out }
     }
     if ($null -eq $ec) { $ec = 1 }
     Write-KitLog "  exit $ec"
@@ -913,15 +933,16 @@ function Invoke-KitRemoteScript {
 
 function Invoke-KitCommandLine {
     <# Run a native command line like "claude update" (Invoke-KitProcess), captured to the log. #>
-    param([string]$CommandLine, [string]$Exe)
+    param([string]$CommandLine, [string]$Exe, [switch]$DeElevate)
     $parts = $CommandLine -split '\s+'
     $file = $parts[0]
     if ($Exe) { $full = [Environment]::ExpandEnvironmentVariables($Exe); if (Test-Path -LiteralPath $full -PathType Leaf) { $file = $full } }
     if (-not [IO.Path]::IsPathRooted($file) -and -not (Get-Command $file -ErrorAction SilentlyContinue)) { Update-KitPath }
-    Write-KitLog "run: $CommandLine"
-    $r = Invoke-KitProcess -FilePath $file -ArgumentList @($parts | Select-Object -Skip 1)
+    Write-KitLog "run: $CommandLine$(if ($DeElevate) { '  (de-elevated)' })"
+    $r = Invoke-KitChild -FilePath $file -ArgumentList @($parts | Select-Object -Skip 1) -DeElevate:$DeElevate
     $out = @(@($r.Out) + @($r.Err))
     $ec = $r.Ec
+    if ($ec -ne 0) { $script:LastFailLine = Get-KitFailLine -Out $out }
     foreach ($l in ($out | Where-Object { $_.Trim() } | Select-Object -Last 15)) { Write-KitLog "  | $l" }
     Write-KitLog "  exit $ec"
     return [int]$ec
@@ -1216,18 +1237,327 @@ function Set-KitLocalPref {
     Write-KitRunLog "prefs: $Name = $(ConvertTo-KitJsonValue $Value) (this PC: $(Get-KitLocalPrefsFile))"
 }
 
-function Get-KitAutoInstallPwsh {
+function Get-KitLocalSwitch {
     <#
-    Effective "install PowerShell 7 + Windows Terminal at start" setting:
-    this PC's override, else settings.json autoInstallPwsh, else on.
+    Effective value of an on/off setting a PC can override: this PC's
+    local-settings.json, else settings.json, else -Default.
     @{ On; Source = 'this PC' | 'shared' | 'default' }. The loader (5.1, no
     module) applies the same order on its own copy of the files.
     #>
+    param([Parameter(Mandatory)][string]$Name, [bool]$Default = $true)
     $loc = Get-KitLocalPrefs
-    if ($loc.Contains('autoInstallPwsh') -and $loc['autoInstallPwsh'] -is [bool]) { return [pscustomobject]@{ On = [bool]$loc['autoInstallPwsh']; Source = 'this PC' } }
+    if ($loc.Contains($Name) -and $loc[$Name] -is [bool]) { return [pscustomobject]@{ On = [bool]$loc[$Name]; Source = 'this PC' } }
     $s = $script:Config['settings.json']
-    if ($s -and $s.Contains('autoInstallPwsh') -and $s['autoInstallPwsh'] -is [bool]) { return [pscustomobject]@{ On = [bool]$s['autoInstallPwsh']; Source = 'shared' } }
-    return [pscustomobject]@{ On = $true; Source = 'default' }
+    if ($s -and $s.Contains($Name) -and $s[$Name] -is [bool]) { return [pscustomobject]@{ On = [bool]$s[$Name]; Source = 'shared' } }
+    return [pscustomobject]@{ On = $Default; Source = 'default' }
+}
+
+function Get-KitAutoInstallPwsh {
+    <# "Install PowerShell 7 + Windows Terminal at start without asking" (autoInstallPwsh). #>
+    return (Get-KitLocalSwitch -Name 'autoInstallPwsh' -Default $true)
+}
+
+function Get-KitElevateAtStart {
+    <# "Ask for administrator rights once at start" (elevateAtStart): the loader relaunches the kit elevated. #>
+    return (Get-KitLocalSwitch -Name 'elevateAtStart' -Default $true)
+}
+
+# ---------------------------------------------------------------- de-elevation (NoAdmin installs from an elevated kit)
+
+$script:WG_PROHIBITS_ELEVATION    = -1978335146   # 0x8A150056 APPINSTALLER_CLI_ERROR_INSTALLER_PROHIBITS_ELEVATION
+$script:WG_ADMIN_CONTEXT_PROHIBITED = -1978335107 # 0x8A15007D APPINSTALLER_CLI_ERROR_ADMIN_CONTEXT_ACTION_PROHIBITED (user-scope package)
+
+function Get-KitSessionUser {
+    <#
+    The user signed in to this Windows session: the owner of explorer.exe in
+    this process's session. @{ Sid; Name } or $null (no Explorer shell).
+    Testing: MYWINKIT_SIMULATE_SESSION_USER = same | other | a SID.
+    #>
+    $sim = $env:MYWINKIT_SIMULATE_SESSION_USER
+    if ($sim) {
+        $me = [Security.Principal.WindowsIdentity]::GetCurrent()
+        if ($sim -eq 'same') { return @{ Sid = $me.User.Value; Name = $me.Name } }
+        if ($sim -eq 'other') { return @{ Sid = 'S-1-5-21-0-0-0-1001'; Name = 'PC\signed-in-user' } }
+        return @{ Sid = $sim; Name = $sim }
+    }
+    try {
+        $sess = [Diagnostics.Process]::GetCurrentProcess().SessionId
+        $ex = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'explorer.exe' AND SessionId = $sess" -ErrorAction Stop | Select-Object -First 1)
+        if (-not $ex.Count) { return $null }
+        $o = Invoke-CimMethod -InputObject $ex[0] -MethodName GetOwner -ErrorAction Stop
+        $s = Invoke-CimMethod -InputObject $ex[0] -MethodName GetOwnerSid -ErrorAction Stop
+        if (-not $s.Sid) { return $null }
+        $name = if ($o.Domain) { "$($o.Domain)\$($o.User)" } else { [string]$o.User }
+        return @{ Sid = [string]$s.Sid; Name = $name }
+    } catch { return $null }
+}
+
+function Test-KitDeElevate {
+    <#
+    Routing decision: run this package's installer at the signed-in user's
+    normal rights? Yes when the catalogue marks it NoAdmin, the kit is
+    elevated, and it is not Interactive (a de-elevated run cannot share the
+    console). -IsAdmin injects the elevation state (tests).
+    #>
+    param([Parameter(Mandatory)]$Package, $IsAdmin = $null)
+    if ($null -eq $IsAdmin) { $IsAdmin = Test-KitAdmin }
+    return [bool]($Package.NoAdmin -and $IsAdmin -and -not $Package.Interactive)
+}
+
+function ConvertTo-KitPsLiteral([string]$s) { return "'" + $s.Replace("'", "''") + "'" }
+
+function Get-KitDeElevatedCommand {
+    <#
+    The PowerShell text a de-elevated task runs: the program with its
+    arguments, all output to -OutFile, the exit code to -EcFile.
+    #>
+    param([Parameter(Mandatory)][string]$FilePath, [string[]]$ArgumentList = @(), [Parameter(Mandatory)][string]$OutFile, [Parameter(Mandatory)][string]$EcFile)
+    $argText = (@($ArgumentList) | ForEach-Object { ConvertTo-KitPsLiteral ([string]$_) }) -join ' '
+    return @"
+`$ErrorActionPreference = 'Continue'
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
+try { `$o = @(& $(ConvertTo-KitPsLiteral $FilePath) $argText 2>&1 | ForEach-Object { "`$_" }); `$c = `$LASTEXITCODE; if (`$null -eq `$c) { `$c = 0 } } catch { `$o = @("`$_"); `$c = 1 }
+[IO.File]::WriteAllLines($(ConvertTo-KitPsLiteral $OutFile), [string[]]`$o, (New-Object Text.UTF8Encoding `$false))
+[IO.File]::WriteAllText($(ConvertTo-KitPsLiteral $EcFile), [string]`$c)
+exit `$c
+"@
+}
+
+function Invoke-KitDeElevated {
+    <#
+    .SYNOPSIS
+        Run a program at the signed-in user's normal (medium) integrity from an
+        elevated kit, wait for it, return @{ Ec; Out; Err; Started } like
+        Invoke-KitProcess.
+    .DESCRIPTION
+        A one-shot scheduled task (Task Scheduler COM API, no module): principal
+        = the session user (explorer.exe owner), logon type InteractiveToken,
+        RunLevel LUA (limited). Task Scheduler starts it with that user's
+        filtered token, the same token Explorer has, so the installer runs at
+        medium integrity in the user's own profile. The task runs a hidden
+        PowerShell that writes the output and exit code to temp files; the kit
+        polls for them, then deletes the task. Not `runas /trustlevel`: that
+        gives a restricted token, not a normal one.
+        Testing: MYWINKIT_SIMULATE_DEELEVATE=ok|fail returns that result without
+        creating a task.
+    #>
+    param([Parameter(Mandatory)][string]$FilePath, [string[]]$ArgumentList = @(), [int]$TimeoutSec = 3600)
+    $sim = $env:MYWINKIT_SIMULATE_DEELEVATE
+    if ($sim -in 'ok', 'fail') {
+        Write-KitLog "de-elevated (simulated $sim): $FilePath $($ArgumentList -join ' ')"
+        $ec = 0; if ($sim -eq 'fail') { $ec = 1 }
+        return @{ Ec = $ec; Out = @("simulated de-elevated run ($sim)"); Err = @(); Started = $true }
+    }
+    $user = Get-KitSessionUser
+    if (-not $user) { return @{ Ec = 1; Out = @(); Err = @('no signed-in user found (Explorer is not running), cannot drop administrator rights'); Started = $false } }
+    $file = $FilePath
+    if (-not [IO.Path]::IsPathRooted($file)) { $c = Get-Command $file -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($c) { $file = $c.Path } }
+    $tag = [guid]::NewGuid().ToString('N')
+    $dir = Join-Path $env:TEMP 'my-win-kit'
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $outF = Join-Path $dir "deelevated-$tag.out"; $ecF = Join-Path $dir "deelevated-$tag.ec"
+    $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes((Get-KitDeElevatedCommand -FilePath $file -ArgumentList $ArgumentList -OutFile $outF -EcFile $ecF)))
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $psArgs = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand $enc"
+    # conhost --headless: no console window at all (also when Windows Terminal is the default terminal)
+    $exe = $ps; $args2 = $psArgs
+    $conhost = Join-Path $env:SystemRoot 'System32\conhost.exe'
+    if (Test-Path -LiteralPath $conhost) { $exe = $conhost; $args2 = "--headless `"$ps`" $psArgs" }
+    $name = "my-win-kit-deelevated-$tag"
+    Write-KitLog "de-elevated (task $name for $($user.Name), RunLevel LUA): $file $($ArgumentList -join ' ')"
+    $folder = $null; $registered = $false
+    try {
+        $svc = New-Object -ComObject 'Schedule.Service'
+        $svc.Connect()
+        $folder = $svc.GetFolder('\')
+        $td = $svc.NewTask(0)
+        $td.RegistrationInfo.Description = 'my-win-kit: one install at normal user rights (deleted after the run)'
+        $td.Principal.UserId = $user.Name
+        $td.Principal.LogonType = 3        # TASK_LOGON_INTERACTIVE_TOKEN: the user's own logon session
+        $td.Principal.RunLevel = 0         # TASK_RUNLEVEL_LUA: limited (filtered) token, medium integrity
+        $td.Settings.Enabled = $true
+        $td.Settings.AllowDemandStart = $true
+        $td.Settings.DisallowStartIfOnBatteries = $false
+        $td.Settings.StopIfGoingOnBatteries = $false
+        $td.Settings.ExecutionTimeLimit = 'PT2H'
+        $td.Settings.Hidden = $true
+        $act = $td.Actions.Create(0)       # TASK_ACTION_EXEC
+        $act.Path = $exe
+        $act.Arguments = $args2
+        $act.WorkingDirectory = $dir
+        $task = $folder.RegisterTaskDefinition($name, $td, 6, $user.Name, $null, 3)   # 6 = create or update; 3 = interactive token
+        $registered = $true
+        [void]$task.Run($null)
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
+            if (Test-Path -LiteralPath $ecF) { break }
+            Start-Sleep -Milliseconds 400
+            $t = $folder.GetTask($name)
+            # 4 = running; 0x41301 = still running, 0x41303 = has not run yet
+            if ($sw.Elapsed.TotalSeconds -gt 3 -and $t.State -ne 4 -and $t.LastTaskResult -notin 267009, 267011 -and -not (Test-Path -LiteralPath $ecF)) { Start-Sleep -Milliseconds 500; break }
+        }
+        $lines = @(); if (Test-Path -LiteralPath $outF) { try { $lines = @(Split-KitOutputLines ([IO.File]::ReadAllText($outF))) } catch {} }
+        if (Test-Path -LiteralPath $ecF) {
+            $ec = 1; [void][int]::TryParse(([IO.File]::ReadAllText($ecF)).Trim(), [ref]$ec)
+            return @{ Ec = $ec; Out = $lines; Err = @(); Started = $true }
+        }
+        $last = 0; try { $last = [int]$folder.GetTask($name).LastTaskResult } catch {}
+        if ($sw.Elapsed.TotalSeconds -ge $TimeoutSec) { try { $folder.GetTask($name).Stop(0) } catch {}; return @{ Ec = 1; Out = $lines; Err = @("timed out after $TimeoutSec s"); Started = $true } }
+        return @{ Ec = $(if ($last) { $last } else { 1 }); Out = $lines; Err = @('the de-elevated task ended without a result (task result 0x{0:X8})' -f $last); Started = $true }
+    } catch {
+        return @{ Ec = 1; Out = @(); Err = @("could not run at normal user rights: $($_.Exception.Message)"); Started = $false }
+    } finally {
+        if ($registered -and $folder) { try { $folder.DeleteTask($name, 0) } catch {} }
+        Remove-Item -LiteralPath $outF, $ecF -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-KitChild {
+    <# Invoke-KitProcess, or Invoke-KitDeElevated when -DeElevate (NoAdmin package, elevated kit). #>
+    param([Parameter(Mandatory)][string]$FilePath, [string[]]$ArgumentList = @(), [switch]$DeElevate)
+    if ($DeElevate) { return (Invoke-KitDeElevated -FilePath $FilePath -ArgumentList $ArgumentList) }
+    return (Invoke-KitProcess -FilePath $FilePath -ArgumentList $ArgumentList)
+}
+
+# ---------------------------------------------------------------- update everything (kit apps + the rest of the PC)
+
+function ConvertFrom-KitWingetUpgradeText {
+    <#
+    Rows of `winget upgrade` output: @{ Name; Id; Version; Available; Source }.
+    Reads the first table only: the "require explicit targeting" table after
+    it and the "N upgrades available" footer are left out.
+    #>
+    param([string[]]$Lines = @())
+    $Lines = @($Lines)
+    $sep = -1
+    for ($j = 0; $j -lt $Lines.Count; $j++) { if ("$($Lines[$j])" -match '^-{4,}') { $sep = $j; break } }
+    if ($sep -lt 1) { return @() }
+    $hdr = "$($Lines[$sep - 1])"
+    $iId = $hdr.IndexOf('Id'); $iVer = $hdr.IndexOf('Version'); $iAv = $hdr.IndexOf('Available'); $iSrc = $hdr.IndexOf('Source')
+    if ($iId -lt 1 -or $iVer -le $iId -or $iAv -le $iVer) { return @() }
+    $rows = @()
+    for ($j = $sep + 1; $j -lt $Lines.Count; $j++) {
+        $ln = "$($Lines[$j])"
+        if (-not $ln.Trim()) { break }                                    # end of the first table
+        if ($ln -match '^\s*\d+\s+(upgrades?|packages?)\b') { break }      # footer
+        if ($ln.Length -le $iAv) { continue }
+        $end = if ($iSrc -gt $iAv -and $ln.Length -gt $iSrc) { $iSrc } else { $ln.Length }
+        $rows += [pscustomobject]@{
+            Name = $ln.Substring(0, $iId).Trim(); Id = $ln.Substring($iId, $iVer - $iId).Trim()
+            Version = $ln.Substring($iVer, $iAv - $iVer).Trim(); Available = $ln.Substring($iAv, $end - $iAv).Trim()
+            Source = $(if ($iSrc -gt $iAv -and $ln.Length -gt $iSrc) { $ln.Substring($iSrc).Trim() } else { '' })
+        }
+    }
+    return $rows
+}
+
+function Get-KitWingetPins {
+    <# Ids pinned with `winget pin` (Update everything never touches them). #>
+    if (-not (Test-KitWinget)) { return @() }
+    return @(Get-KitWingetRows @(Get-KitWingetRaw @('pin', 'list', '--accept-source-agreements', '--disable-interactivity')) | ForEach-Object Id)
+}
+
+function Get-KitCatalogUpdateSet {
+    <#
+    Installed catalogue apps to update: a newer version is known
+    (Get-KitUpdates), or the tool updates itself (script with a native
+    updater such as `claude update`, npm tools: winget does not list those).
+    Interactive and POST items are left out (they need a person).
+    #>
+    param([Parameter(Mandatory)][hashtable]$Installed, [hashtable]$Updates = @{}, [object[]]$Packages = $script:Catalog)
+    return @($Packages | Where-Object {
+        $Installed.ContainsKey($_.Id) -and -not $_.Interactive -and $_.Group -ne 'POST' -and
+        ($Updates.ContainsKey($_.Id) -or ($_.Method -eq 'script' -and $_.Update) -or $_.Method -eq 'npm')
+    })
+}
+
+function New-KitPcUpgrade {
+    <# A `winget upgrade` row outside the catalogue as a runnable item (Method winget-upgrade, negative Id, group PC). #>
+    param([Parameter(Mandatory)]$Row, [int]$Id, [int]$GroupOrder = 999)
+    $p = ConvertTo-KitPackage @{ Id = $Id; Name = $Row.Name; Group = 'PC'; On = $true; Method = 'winget-upgrade'; Ref = $Row.Id; Desc = 'other app on this PC (winget upgrade)' } @{ PC = $GroupOrder } 'pc'
+    $p | Add-Member -NotePropertyName Current -NotePropertyValue ([string]$Row.Version)
+    $p | Add-Member -NotePropertyName Latest -NotePropertyValue ([string]$Row.Available)
+    $p | Add-Member -NotePropertyName Source -NotePropertyValue ([string]$Row.Source)
+    return $p
+}
+
+function Get-KitUpdateAllPlan {
+    <#
+    .SYNOPSIS
+        "Update everything": @{ Kit; Other; Run; Excluded }.
+    .DESCRIPTION
+        Kit   = Get-KitCatalogUpdateSet (catalogue apps, AI tools included, each
+                through its own method).
+        Other = every other row of `winget upgrade` (apps on the PC that are not
+                in the catalogue), as winget-upgrade items. Left out: rows whose Id
+                is a catalogue winget/Store/fallback ID, pinned packages (`winget
+                pin`), unknown or ranged versions, truncated Ids.
+        -UpgradeLines / -Pinned inject winget output (tests); by default the
+        lines of the last Get-KitUpdates are reused, else `winget upgrade` runs.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Installed, [hashtable]$Updates = @{}, [string[]]$UpgradeLines = $null, [string[]]$Pinned = $null, [object[]]$Packages = $script:Catalog)
+    $kit = @(Get-KitCatalogUpdateSet -Installed $Installed -Updates $Updates -Packages $Packages)
+    if ($null -eq $UpgradeLines) {
+        if ($null -ne $script:LastUpgradeRaw) { $UpgradeLines = @($script:LastUpgradeRaw) }
+        elseif (Test-KitWinget) { $UpgradeLines = @(Get-KitWingetRaw @('upgrade', '--accept-source-agreements', '--disable-interactivity')) }
+        else { $UpgradeLines = @() }
+    }
+    if ($null -eq $Pinned) { $Pinned = @(Get-KitWingetPins) }
+    $kitRefs = @{}
+    foreach ($p in $Packages) {
+        if ($p.Method -in 'winget', 'msstore' -and $p.Ref) { $kitRefs[$p.Ref.ToLowerInvariant()] = $true }
+        if ($p.Fallback) { $kitRefs[([string]$p.Fallback).ToLowerInvariant()] = $true }
+    }
+    $pinSet = @{}; foreach ($x in @($Pinned)) { if ($x) { $pinSet[$x.ToLowerInvariant()] = $true } }
+    $others = @(); $excluded = @(); $n = 0
+    $gOrder = @($script:Groups).Count + 1
+    foreach ($row in @(ConvertFrom-KitWingetUpgradeText -Lines $UpgradeLines | Sort-Object Name)) {
+        $key = $row.Id.ToLowerInvariant()
+        $why = ''
+        if ($kitRefs.ContainsKey($key)) { $why = 'in the catalogue' }
+        elseif ($pinSet.ContainsKey($key)) { $why = 'pinned' }
+        elseif (-not $row.Version -or $row.Version -match '^(?i)(unknown|<|>)') { $why = 'unknown version' }
+        elseif ($row.Id -match '\.\.\.$' -or $row.Id.Contains([string][char]0x2026)) { $why = 'Id cut off by winget' }
+        if ($why) { $excluded += [pscustomobject]@{ Id = $row.Id; Name = $row.Name; Why = $why }; continue }
+        $n++
+        $others += New-KitPcUpgrade -Row $row -Id (-$n) -GroupOrder $gOrder
+    }
+    return [pscustomobject]@{ Kit = @($kit); Other = @($others); Run = @(@(Get-KitRunOrder $kit) + @($others)); Excluded = @($excluded) }
+}
+
+# ---------------------------------------------------------------- unattended run (/auto)
+
+function Get-KitAutoPlan {
+    <#
+    What `install.cmd /auto` does, with no questions:
+      Install = recommended (On) apps that are missing
+      Update  = the "update everything" kit half (Get-KitCatalogUpdateSet)
+      Other   = the "update everything" rest-of-PC half (winget upgrade rows
+                outside the catalogue; Get-KitUpdateAllPlan)
+      Skipped = Interactive and POST items it would otherwise touch
+                (recommended or installed): they need a person
+    Returns @{ Install; Update; Other; Skipped; Run } (Run = Install + Update, in run order, then Other).
+    -UpgradeLines / -Pinned pass through to Get-KitUpdateAllPlan (tests).
+    #>
+    param([Parameter(Mandatory)][hashtable]$Installed, [hashtable]$Updates = @{}, [string[]]$UpgradeLines = $null, [string[]]$Pinned = $null, [object[]]$Packages = $script:Catalog)
+    $all = Get-KitUpdateAllPlan -Installed $Installed -Updates $Updates -UpgradeLines $UpgradeLines -Pinned $Pinned -Packages $Packages
+    $install = @(); $skipped = @()
+    foreach ($p in $Packages) {
+        $isInst = $Installed.ContainsKey($p.Id)
+        if ($p.Interactive -or $p.Group -eq 'POST') { if ($p.Default -or $isInst) { $skipped += $p }; continue }
+        if (-not $isInst -and $p.Default) { $install += $p }
+    }
+    return [pscustomobject]@{
+        Install = @($install); Update = @($all.Kit); Other = @($all.Other); Skipped = @(Get-KitRunOrder $skipped)
+        Run = @(@(Get-KitRunOrder (@($install) + @($all.Kit))) + @($all.Other))
+    }
+}
+
+function Get-KitAutoExitCode {
+    <# Exit code of an unattended run: 0 = nothing failed, 1 = at least one failure. #>
+    param([object[]]$Results = @())
+    if (@($Results | Where-Object { $_.Status -eq 'failed' }).Count) { return 1 }
+    return 0
 }
 
 function Get-KitAiUpdateSet {
@@ -1274,7 +1604,10 @@ function Invoke-KitPackage {
     $isInst = $null -ne $Installed
     $from = if ($isInst) { [string]$Installed } else { '' }
     function Step([string]$t) { if ($OnStatus) { try { & $OnStatus $t } catch {} } }
-    Write-KitLog "== $($p.Name) [$($p.Method) $($p.Ref)] installed='$from' mode=$Mode dry=$([bool]$DryRun)"
+    # NoAdmin + elevated kit: the installer runs at the signed-in user's normal rights
+    $de = Test-KitDeElevate -Package $p
+    $deNote = ''; if ($de) { $deNote = ' (at normal user rights, not as admin)' }
+    Write-KitLog "== $($p.Name) [$($p.Method) $($p.Ref)] installed='$from' mode=$Mode dry=$([bool]$DryRun)$(if ($de) { ' de-elevated' })"
 
     try {
         if ($p.Requires) {
@@ -1289,11 +1622,19 @@ function Invoke-KitPackage {
                 $a = Get-KitWingetInstallArgs -WId $p.Ref -Method $p.Method
                 if ($DryRun) {
                     $what = "winget install $($p.Ref)"; if ($p.Method -eq 'msstore') { $what += ' (Store)' }
-                    return New-KitResult $p 'dryrun' $from '' $what '' $sw.Elapsed.TotalSeconds
+                    return New-KitResult $p 'dryrun' $from '' "$what$deNote" '' $sw.Elapsed.TotalSeconds
                 }
-                Step 'installing with winget'
-                $r = Invoke-KitWinget $a
+                Step $(if ($de) { 'installing with winget at normal user rights' } else { 'installing with winget' })
+                $r = Invoke-KitWinget $a -DeElevate:$de
                 $healed = ''
+                # The installer refuses an administrator context (manifest: elevationProhibited, or a
+                # user-scope package): retry once at the signed-in user's normal rights.
+                if (-not $de -and $r.Ec -in $script:WG_PROHIBITS_ELEVATION, $script:WG_ADMIN_CONTEXT_PROHIBITED -and (Test-KitAdmin)) {
+                    $de = $true
+                    Step 'the installer refuses admin rights - retrying at normal user rights'
+                    $r = Invoke-KitWinget $a -DeElevate
+                    if ($r.Ec -eq 0) { $healed = 'ran at normal user rights (installer refuses admin)' }
+                }
 
                 if ($r.Ec -eq $script:WG_NOT_FOUND) {
                     Step 'ID not in source - searching for its successor'
@@ -1303,20 +1644,20 @@ function Invoke-KitPackage {
                         $healed = "$($p.Ref) -> $newId"
                         $p.Ref = $newId
                         Step "healed to $newId - installing"
-                        $r = Invoke-KitWinget (Get-KitWingetInstallArgs -WId $p.Ref -Method $p.Method)
+                        $r = Invoke-KitWinget (Get-KitWingetInstallArgs -WId $p.Ref -Method $p.Method) -DeElevate:$de
                     }
                 }
                 if ($r.Ec -ne 0 -and -not $isInst -and (Test-KitDownloadFail $r.Out)) {
                     foreach ($v in @(Get-KitPkgVersions -WId $p.Ref -Method $p.Method | Select-Object -Skip 1 -First 2)) {
                         Step "latest download broken - trying v$v"
-                        $r2 = Invoke-KitWinget (Get-KitWingetInstallArgs -WId $p.Ref -Method $p.Method -Version $v)
+                        $r2 = Invoke-KitWinget (Get-KitWingetInstallArgs -WId $p.Ref -Method $p.Method -Version $v) -DeElevate:$de
                         if ($r2.Ec -eq 0) { $r = $r2; $healed = "pinned v$v (latest installer download broken)"; break }
                     }
                     if ($r.Ec -ne 0 -and $p.Method -ne 'msstore') {
                         $sid = Find-KitStoreFallback -Package $p
                         if ($sid) {
                             Step "trying the Microsoft Store channel ($sid)"
-                            $r2 = Invoke-KitWinget (Get-KitWingetInstallArgs -WId $sid -Method 'msstore')
+                            $r2 = Invoke-KitWinget (Get-KitWingetInstallArgs -WId $sid -Method 'msstore') -DeElevate:$de
                             if ($r2.Ec -eq 0) {
                                 $r = $r2
                                 Save-KitOverride -Old $p.Ref -New "msstore:$sid"
@@ -1348,6 +1689,27 @@ function Invoke-KitPackage {
                 return New-KitResult $p 'failed' $from '' $o.Reason $healed $sw.Elapsed.TotalSeconds
             }
 
+            'winget-upgrade' {
+                # An app outside the catalogue that `winget upgrade` listed (Update everything, /auto)
+                $from = [string]$p.Current; $to = [string]$p.Latest
+                $a = @('upgrade', '--id', $p.Ref, '--exact', '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+                if ($p.Source) { $a += @('--source', [string]$p.Source) }
+                if ($DryRun) { return New-KitResult $p 'dryrun' $from $to "winget upgrade $($p.Ref)" '' $sw.Elapsed.TotalSeconds }
+                Step 'upgrading with winget'
+                $r = Invoke-KitWinget $a
+                $healed = ''
+                if ($r.Ec -in $script:WG_PROHIBITS_ELEVATION, $script:WG_ADMIN_CONTEXT_PROHIBITED -and (Test-KitAdmin)) {
+                    Step 'the installer refuses admin rights - retrying at normal user rights'
+                    $r = Invoke-KitWinget $a -DeElevate
+                    if ($r.Ec -eq 0) { $healed = 'ran at normal user rights (installer refuses admin)' }
+                }
+                $o = Get-KitWingetOutcome -ExitCode $r.Ec -Out $r.Out
+                if ($o.Status -eq 'ok') { return New-KitResult $p 'updated' $from $to '' $healed $sw.Elapsed.TotalSeconds }
+                if ($o.Status -eq 'current') { return New-KitResult $p 'current' $from $from 'winget: nothing to upgrade' $healed $sw.Elapsed.TotalSeconds }
+                Write-KitLog "  failed: $($o.Reason)"
+                return New-KitResult $p 'failed' $from '' $o.Reason $healed $sw.Elapsed.TotalSeconds
+            }
+
             'script' {
                 # Already installed + has a native updater -> use it (claude update, agy update)
                 $useUpdate = $isInst -and [bool]$p.Update
@@ -1355,18 +1717,23 @@ function Invoke-KitPackage {
                     $child = if ($p.Shell -eq 'pwsh') { 'child pwsh' } else { 'child process' }
                     if ($p.Elevated) { $child += ', as administrator' }
                     $what = if ($useUpdate) { $p.Update } else { "irm $($p.Ref) | iex ($child)" }
-                    return New-KitResult $p 'dryrun' $from '' $what '' $sw.Elapsed.TotalSeconds
+                    return New-KitResult $p 'dryrun' $from '' "$what$deNote" '' $sw.Elapsed.TotalSeconds
                 }
+                $script:LastFailLine = ''
                 if ($useUpdate) {
                     Step "running $($p.Update)"
-                    $ec = Invoke-KitCommandLine -CommandLine $p.Update -Exe $p.Exe
+                    $ec = Invoke-KitCommandLine -CommandLine $p.Update -Exe $p.Exe -DeElevate:$de
                 } else {
                     Step 'running the official installer'
                     if ($p.Elevated -and -not (Test-KitAdmin)) { Step 'it opens its own administrator window (Windows asks first)' }
-                    $ec = Invoke-KitRemoteScript -Url $p.Ref -Attached:$p.Interactive -Shell ([string]$p.Shell) -Elevated:$p.Elevated
+                    $ec = Invoke-KitRemoteScript -Url $p.Ref -Attached:$p.Interactive -Shell ([string]$p.Shell) -Elevated:$p.Elevated -DeElevate:$de
                 }
                 if ($ec -eq 1223) { return New-KitResult $p 'failed' $from '' 'administrator prompt declined' '' $sw.Elapsed.TotalSeconds }
-                if ($ec -ne 0) { return New-KitResult $p 'failed' $from '' "exit code $ec (see log)" '' $sw.Elapsed.TotalSeconds }
+                if ($ec -ne 0) {
+                    # a short reason from the child's own output when it names one (e.g. "blocked by an Application Control policy")
+                    $why = if ($script:LastFailLine) { "$($script:LastFailLine) (exit $ec)" } else { "exit code $ec (see log)" }
+                    return New-KitResult $p 'failed' $from '' $why '' $sw.Elapsed.TotalSeconds
+                }
                 $to = Get-KitToolVersion -Package $p
                 $st = 'installed'
                 if ($isInst) { $st = 'updated'; if ($to -and (Get-KitVersionText $to) -eq (Get-KitVersionText $from)) { $st = 'current' } }
@@ -1394,7 +1761,7 @@ function Invoke-KitPackage {
                 }
                 if ($DryRun) {
                     Write-KitLog "  would download $($d.Url)"
-                    return New-KitResult $p 'dryrun' $from $d.Version "download $($d.FileName) v$($d.Version) ($($d.Signer) signed), run $($d.Args)" '' $sw.Elapsed.TotalSeconds
+                    return New-KitResult $p 'dryrun' $from $d.Version "download $($d.FileName) v$($d.Version) ($($d.Signer) signed), run $($d.Args)$deNote" '' $sw.Elapsed.TotalSeconds
                 }
 
                 $dir = Join-Path $env:TEMP 'my-win-kit'
@@ -1413,11 +1780,15 @@ function Invoke-KitPackage {
                 }
                 Step "installing v$($d.Version)"
                 Write-KitLog "  run $file $($d.Args)"
-                # WaitForExit on this process only: Start-Process -Wait in PS 7
-                # also waits for the app the installer launches at the end.
-                $proc = Start-Process -FilePath $file -ArgumentList $d.Args -PassThru
-                $proc.WaitForExit()
-                $ec = $proc.ExitCode
+                if ($de) {
+                    $ec = (Invoke-KitDeElevated -FilePath $file -ArgumentList @($d.Args -split '\s+' | Where-Object { $_ })).Ec
+                } else {
+                    # WaitForExit on this process only: Start-Process -Wait in PS 7
+                    # also waits for the app the installer launches at the end.
+                    $proc = Start-Process -FilePath $file -ArgumentList $d.Args -PassThru
+                    $proc.WaitForExit()
+                    $ec = $proc.ExitCode
+                }
                 Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
                 Write-KitLog "  exit $ec"
                 if ($ec -ne 0) { return New-KitResult $p 'failed' $from '' "installer exit code $ec" '' $sw.Elapsed.TotalSeconds }
@@ -1427,10 +1798,10 @@ function Invoke-KitPackage {
 
             'npm' {
                 $a = @('install', '-g', $p.Ref)
-                if ($DryRun) { return New-KitResult $p 'dryrun' $from '' ("npm " + ($a -join ' ')) '' $sw.Elapsed.TotalSeconds }
+                if ($DryRun) { return New-KitResult $p 'dryrun' $from '' ("npm " + ($a -join ' ') + $deNote) '' $sw.Elapsed.TotalSeconds }
                 Step 'installing with npm'
-                Write-KitLog ("npm " + ($a -join ' '))
-                $nr = Invoke-KitProcess -FilePath 'npm' -ArgumentList $a
+                Write-KitLog ("npm " + ($a -join ' ') + $(if ($de) { '  (de-elevated)' } else { '' }))
+                $nr = Invoke-KitChild -FilePath 'npm' -ArgumentList $a -DeElevate:$de
                 $out = @(@($nr.Out) + @($nr.Err)); $ec = $nr.Ec
                 foreach ($l in ($out | Select-Object -Last 10)) { Write-KitLog "  | $l" }
                 if ($ec -ne 0) { return New-KitResult $p 'failed' $from '' "npm exit code $ec" '' $sw.Elapsed.TotalSeconds }
@@ -1499,4 +1870,6 @@ Export-ModuleMember -Function Initialize-Kit, Get-KitVersion, Get-KitUpdates, Ge
     Get-KitState, Save-KitState, Get-KitInstalled, Get-KitToolVersion, Get-KitVersionText, Resolve-KitDirect,
     Test-KitVersionCurrent, Get-KitLatestVersion, Get-KitWingetOutcome, Invoke-KitPackage, Invoke-KitProcess, Enable-KitConsoleVt, Get-KitDesktopShortcuts, Remove-KitNewShortcuts,
     Get-KitDevFolderPath, Invoke-KitDevFolder, Get-KitDriveType, Select-KitUbuntuDistro, ConvertFrom-KitWslText, Get-KitWslDistros, Test-KitRebootNeeded,
-    Get-KitDetect, Test-KitCttProfile, Get-KitPwshProfilePath, Get-KitPwshPath, Get-KitLocalPrefs, Get-KitLocalPrefsFile, Set-KitLocalPref, Get-KitAutoInstallPwsh, Get-KitAiUpdateSet
+    Get-KitDetect, Test-KitCttProfile, Get-KitPwshProfilePath, Get-KitPwshPath, Get-KitLocalPrefs, Get-KitLocalPrefsFile, Set-KitLocalPref, Get-KitAutoInstallPwsh, Get-KitAiUpdateSet,
+    Get-KitLocalSwitch, Get-KitElevateAtStart, Get-KitSessionUser, Test-KitDeElevate, Get-KitDeElevatedCommand, Invoke-KitDeElevated, Get-KitAutoPlan, Get-KitAutoExitCode,
+    ConvertFrom-KitWingetUpgradeText, Get-KitWingetPins, Get-KitCatalogUpdateSet, Get-KitUpdateAllPlan
