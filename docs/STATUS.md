@@ -7,13 +7,12 @@
 
 _A new session can start from this line, no handover needed._
 
-- **Kit v2.8.3 on branch `installer-shortcuts` (not merged, waiting for Daniel's go; built on top of v2.8.2):**
+- **Kit v2.8.3 on branch `installer-shortcuts` (not merged, waiting for Daniel's go):**
   Daniel: "i want instaler to add menu start icon and desktop icon also have uninstaller in the menu ... script link
   does [need the icon] and build one from scratch". The online install now adds a Start menu folder (my-win-kit +
   Uninstall my-win-kit), a Desktop shortcut and a Settings > Apps entry, per user; new icon drawn by
   `tools/build-icon.ps1`. Not yet run for real on a PC (tested in scratch folders only). See CHANGELOG.
-
-- **Kit v2.8.2 on branch `auto-update-kit` (not merged, waiting for Daniel's go):** the loader updates the kit to
+- **Kit v2.8.2 is live:** PR #7 merged into `main` (f252f62) on 2026-11-26 with Daniel's go ("merge"); CI green on both jobs; the post-merge publish copied 3 files to OneDrive. The loader updates the kit to
   the newest GitHub version at every start without asking (was a Y/n question). `-NoUpdate` skips it. PCs still on
   v2.8.1 ask one last time. Also fixes the `irm | iex` one-liner (broken by a BOM in `install.ps1`). See CHANGELOG.
 - **Kit v2.8.1 is live:** PR #6 merged into `main` (72b7f06) on 2026-11-26 with Daniel's go ("merge"); CI green on both jobs; the post-merge publish copied 2 files to OneDrive. Fixes "Update everything" hanging on
@@ -85,11 +84,11 @@ _A new session can start from this line, no handover needed._
 | Repo | github.com/1nst4ll/my-win-kit (**public**). `main` = the rebuild (merged 2026-11-25); `rebuild-tui` merged, can be deleted |
 | Config home | `config/catalog.json`, `config/settings.json`, `config/winget-id-overrides.json`, `config/terminal.json` on GitHub `main`, edited by hand |
 | Publish target | `$env:OneDrive\[98] Shortcuts` (the OneDrive folder every PC syncs) |
-| Last publish | 2026-11-26: merge of PR #6 (kit v2.8.1, 72b7f06), 2 files copied. Before that: PR #5 (kit v2.8.0), 6 files |
+| Last publish | 2026-11-26: merge of PR #7 (kit v2.8.2, f252f62), 3 files copied. Before that: PR #6 (kit v2.8.1), 2 files |
 | Apps in `config/catalog.json` | 59 total: 33 in the recommended set, 22 DEV (off), 3 POST (off); 3 removed (Perplexity 8, Samsung Quick Share 33, Python 3.13 41). NoAdmin: 6 (OneDrive, VS Code, GitHub Desktop, Cursor, Claude Code CLI, Antigravity IDE). SelfUpdates: 8 (Office, Chrome, OneDrive, Dropbox, Acrobat Reader, Teams, WhatsApp, AnyDesk). Unsigned: 1 (Hermes) |
 | By method | 45 winget, 2 Store, 6 script, 2 direct, 1 npm, 3 builtin. AI-flagged (Update AI tools): 9 (Claude Desktop, Claude Code CLI, KiloCode CLI, Cursor, Codex CLI, Antigravity IDE, Antigravity, Antigravity CLI, Hermes Agent) |
 | Next free app Id | 63 (above every Id in Packages, Removed, RetiredIds; use it when adding an app to `config/catalog.json` by hand) |
-| Kit version | 2.8.3 on branch `installer-shortcuts`; 2.8.2 on branch `auto-update-kit`; 2.8.1 on `main` (`$script:KitVersion` in src/core.psm1) |
+| Kit version | 2.8.2 on `main`; 2.8.3 on branch `installer-shortcuts` (`$script:KitVersion` in src/core.psm1) |
 | Shared settings | `removeShortcuts` true, `dryRunByDefault` false, `elevateAtStart` true; `autoInstallEssentials` true (was `autoInstallPwsh`, still read) |
 | Modern menu needs | PowerShell 7.4+, PwshSpectreConsole ≥ 2.3 (tested with 2.6.3 on pwsh 7.7.0); no GitHub CLI or sign-in |
 | Startup (this PC) | ~750 ms launch → banner → quit, plus the config fetch (3 small files; 4 with `terminal.json`). The essentials checks add ~0.3 s when everything is already set up (core import ~55 ms, Terminal settings compare ~260 ms in 5.1) |
