@@ -21,24 +21,20 @@ Front door: [README.md](README.md). Docs index and ownership map: [docs/architec
 
 1. **One owner per fact.** See the ownership map. Link to the owner, never copy. In particular, never copy the
    app list out of `config/catalog.json`. Link to it.
-2. **Volatile numbers live only in STATUS:** app counts, dates, the last publish, open bugs, the next free Id.
+2. **Volatile numbers live only in STATUS:** app counts, dates, the last merge to `main`, open bugs, the next free Id.
 3. **Reference docs use the present tense.** History goes in CHANGELOG (append-only, newest on top).
 4. **Change the system → update the owning doc + a CHANGELOG entry, in the same commit.**
 
-## Delivery: repo → OneDrive (one way)
+## Delivery: GitHub `main` → every PC (self-update)
 
-- **Edit only in the repo, never the OneDrive copies** (`$env:OneDrive\[98] Shortcuts`). Every PC syncs that
-  folder, so an edit there skips git and the tests.
-- **Commits on `main` publish immediately** (`.githooks/post-commit` / `post-merge` → `tools/publish.ps1`).
-  Do multi-step work on a branch and merge only when it's done and tested; a half-built kit on `main` reaches
-  every PC.
-- `publish.ps1` copies only the kit file set (`src/*`, `win11-tweaks.ps1`, `install.cmd`, then `install.ps1`
-  last), skips unchanged and uncommitted files, and never deletes anything. It never touches the other files in
-  that folder, including `winget-id-overrides.json`.
-- **A fresh clone needs `git config core.hooksPath .githooks`.** Without it nothing publishes.
-- Drift guard: if a target file differs from the repo copy and is newer, publish refuses (exit 2) and names the
-  file. Bring that edit into the repo, or re-run with `-Force` to overwrite it. Never pass `-Force` without
-  looking at the target file first.
+- **`main` is live.** Every PC checks GitHub `main` at each start and switches to a newer `KitVersion` without
+  asking (install.ps1 self-update), and reads `config/*.json` from `main` too. Do multi-step work on a branch and
+  merge only when it's done and tested; a half-built kit on `main` reaches every PC at its next start.
+- **A code change reaches PCs only with a `KitVersion` bump** (src/core.psm1). Config changes need no bump.
+- New PCs install with `install-online.cmd` (or the `irm | iex` one-liner): it downloads the kit into
+  `%LOCALAPPDATA%\my-win-kit\app\<version>` and adds the Start menu / Desktop shortcuts.
+- There is no OneDrive publish any more (removed in v2.8.5). Old kit copies in `OneDrive\[98] Shortcuts` still
+  start and update themselves from GitHub; nothing writes there.
 
 ## Constraints
 
@@ -58,7 +54,7 @@ Front door: [README.md](README.md). Docs index and ownership map: [docs/architec
 - **PowerShell variable names ignore case:** `$G` and `$g`, `$P` and `$p` are one variable. Never name a
   script-level table with a letter that a loop variable uses (this bit twice in the classic menu). `win11-tweaks.ps1` is the exception: it contains box-drawing characters and must keep
   its UTF-8 BOM. `install.ps1` must have NO BOM: `irm | iex` keeps it as a character in front of `param(` and the text does not parse (test-config checks it). Check with `head -c3 file | xxd`.
-- **Line endings are LF** (pinned in `.gitattributes`): publish hash-compares with the OneDrive copies.
+- **Line endings are LF** (pinned in `.gitattributes`), including `.cmd` files.
 - **No UI in `core.psm1`.** It returns result objects and reports progress through `-OnStatus`. Anything both
   menus need goes into core, so behaviour stays identical.
 - **Remote scripts always run in a child process** (`Invoke-KitRemoteScript`). Never `iex` a vendor script

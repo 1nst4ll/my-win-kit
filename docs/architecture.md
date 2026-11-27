@@ -1,6 +1,6 @@
 # Architecture: how the kit works
 
-> **Owns:** how the loader, menus, engine, publish and CI work now (present tense). **Does not cover:** counts,
+> **Owns:** how the loader, menus, engine, delivery and CI work now (present tense). **Does not cover:** counts,
 > dates or open bugs (→ [STATUS](STATUS.md)), history (→ [CHANGELOG](CHANGELOG.md)), usage (→ [README](../README.md)).
 
 ## Ownership map
@@ -9,9 +9,9 @@
 |---|---|---|
 | [README.md](../README.md) | What the kit is, how to run it, how to add a package. | Internals, counts. |
 | [CLAUDE.md](../CLAUDE.md) | Constraints, drift rules, continuity protocol, lint exclusions. | Current state. |
-| [STATUS.md](STATUS.md) | Every volatile fact: counts, last publish, open bugs, next step. | How it works. |
+| [STATUS.md](STATUS.md) | Every volatile fact: counts, last merge to `main`, open bugs, next step. | How it works. |
 | [CHANGELOG.md](CHANGELOG.md) | Dated history, append-only. | Current state. |
-| architecture.md (this) | How the loader, menus, engine, publish and CI work. | Counts, history. |
+| architecture.md (this) | How the loader, menus, engine, delivery and CI work. | Counts, history. |
 | [config/catalog.json](../config/catalog.json) **on GitHub `main`** | The app catalogue: groups, packages (name, method, Id/URL, default on/off, detection), removed packages, `RetiredIds`, the direct-download rules. Edited by hand in the repo (the menu never writes it). Every PC reads the live copy at start. Fields: [Catalog fields](#catalog-fields). | Never copy it into docs. |
 | [config/settings.json](../config/settings.json) **on GitHub `main`** | Kit settings shared by every PC (`removeShortcuts`, `dryRunByDefault`, `autoInstallEssentials`, `elevateAtStart`). Edited by hand in the repo; Settings shows them read-only. | Per-PC state (last selection, last failures: `%LOCALAPPDATA%\my-win-kit\state.json`) and per-PC preferences (`local-settings.json`, e.g. this PC's `autoInstallEssentials` / `elevateAtStart` override). |
 | [config/terminal.json](../config/terminal.json) **on GitHub `main`** | The Windows Terminal settings every PC gets (essentials step): default profile, the Claude Code profile, profile defaults, globals, key bindings, starting folder. Fields: [Windows Terminal settings](#windows-terminal-settings). | The PC's own Terminal settings (merged into, never replaced). |
@@ -30,22 +30,24 @@ src/tui-classic.ps1                # fallback menu (Windows PowerShell 5.1)
 src/launch.ps1  src/uninstall.ps1  # Start menu / Desktop launcher + uninstaller (copied to %LOCALAPPDATA% by the online install)
 assets/my-win-kit.ico              # the kit icon (drawn by tools/build-icon.ps1)
 win11-tweaks.ps1                   # registry tweaks menu (launched from both menus or on its own)
-tools/publish.ps1                  # repo → OneDrive copy (one way)
+install-online.cmd                 # the online installer (downloads the kit from GitHub, adds the shortcuts)
 tools/lint.ps1  tools/test-core.ps1  tools/smoke-tui.ps1  tools/smoke-loader.ps1
 PSScriptAnalyzerSettings.psd1
-.githooks/post-commit  post-merge  publish-on-main
 .github/workflows/lint.yml         # quality gate only
 docs/
 ```
 
-`install.cmd` launches `%~dpn0.ps1` (its own name with `.ps1`) with its arguments (`%*`), so it sits beside `install.ps1`. The published
-folder mirrors the repo: kit files at the top, `src/` beside them.
+`install.cmd` launches `%~dpn0.ps1` (its own name with `.ps1`) with its arguments (`%*`), so it sits beside
+`install.ps1`. A downloaded copy (`%LOCALAPPDATA%\my-win-kit\app\<version>`) mirrors the repo.
 
 | Channel | What | How | Trigger |
 |---|---|---|---|
-| OneDrive publish | `src/*`, `win11-tweaks.ps1`, `install.cmd`, `install.ps1` | `tools/publish.ps1` → `$env:OneDrive\[98] Shortcuts`, then OneDrive syncs every PC | git hook on commit/merge on `main` |
+| GitHub `main` | the kit (self-update) and `config/*.json` | every PC's loader checks `main` at start and switches to a newer `KitVersion` ([Self-update](#self-update-and-the-one-line-install)); config is read from `main` at start | merge to `main` (+ a `KitVersion` bump for code) |
+| Online install | a new PC | `install-online.cmd` / `irm \| iex`: download into `app\<version>`, Start menu + Desktop shortcuts | by hand, once per PC |
 | CI | lint + dry-run tests | GitHub Actions, `windows-latest` | push to `main`, PRs |
-| GitHub | source of truth + backup | `git push` | by hand |
+
+There is no OneDrive publish (removed in v2.8.5). Older kit copies left in `OneDrive\[98] Shortcuts` still start
+and update themselves from GitHub; nothing writes there.
 
 ## Start-up: install.ps1 (the loader)
 
@@ -476,8 +478,10 @@ or C:, else a new `D:\dev\github` or `C:\dev\github`, created; or a folder, envi
   lists none of them.
 - **Starting folder:** set in `profiles.defaults` and in every kit profile (the `profiles` here, by guid), so a PC's
   Claude Code profile that carries its own folder moves to the dev folder too; other profiles keep theirs. The
-  `my-win-kit` profile starts `install.cmd` from the OneDrive kit folder through `%OneDrive%` (`cmd.exe /d /c if
-  exist ...`, a message when the folder isn't there), so the repo holds no personal path.
+  `my-win-kit` profile runs the stable launcher `%LOCALAPPDATA%\my-win-kit\launch.ps1` (`cmd.exe /d /c if exist
+  ...`, a message when it isn't there), so the repo holds no personal path. The loader copies `src\launch.ps1`
+  there at every start (as the signed-in user, never the elevated copy; in test mode only into
+  `MYWINKIT_STATE_DIR`), so the profile and the shortcuts always find it.
 - **Existing file:** read as JSON with comments (`ConvertFrom-KitJsoncText`: `//` and `/* */` comments and
   trailing commas are stripped outside strings; plain files take a fast path). It sets `globals`, merges
   `profileDefaults` into `profiles.defaults` key by key (objects such as `font` merge, so a font size stays), adds or
@@ -532,8 +536,10 @@ The loader (Windows PowerShell 5.1) keeps every PC on the newest kit without git
   `$PSScriptRoot` is empty, so the loader downloads the kit into `app\<version>` the same way, starts it as a child
   `powershell.exe` (which asks for administrator rights itself and waits for its elevated copy), and returns (never
   `exit`, which would close the user's window). `& ([scriptblock]::Create((irm <url>))) -Auto` passes arguments on.
-- `OneDrive\[98] Shortcuts\install.cmd` keeps working as the launcher: it runs the published copy, which updates
-  itself from GitHub.
+- **`install-online.cmd`** (repo root; the file for a USB stick) runs that same bootstrap with
+  `.TrimStart([char]0xFEFF)` and passes its switches on (`/auto`, `/dryrun`, ...); a failure waits for Enter.
+- An old copy in `OneDrive\[98] Shortcuts` (from the former OneDrive publish) still works as a launcher: it
+  updates itself from GitHub like any copy.
 - The repo is public, so none of this needs a sign-in. If it ever went private, the raw/zip URLs would return 404:
   no self-update, no `irm | iex`, and config would come from the cache or the bundled copy.
 - Test hooks: `MYWINKIT_RAW_URL`, `MYWINKIT_ZIP_URL` (`file:///` allowed), `MYWINKIT_BOOTSTRAP_ARGS`.
@@ -609,24 +615,6 @@ themselves]`. `-TestInput "a;b;c"` feeds answers (tests).
 - `Show-Menu` runs each fix's `Check` live to show ON/OFF. `Invoke-Toggle` runs `Apply` or `Revert`, and
   refuses HKLM fixes when not elevated. `A`/`R` = all on/off. `Q` offers a reboot if needed.
 
-## publish.ps1
-
-- Copies only the kit file set: `src/*.ps1|psm1|psd1` first, then `config/*.json` (the bundled offline fallback;
-  live config is read from GitHub), `win11-tweaks.ps1`, `install.cmd`, and `install.ps1` **last**, so a PC that
-  syncs mid-publish never gets a loader whose `src/` is missing. It creates `src\` / `config\` in the target when
-  needed. It never deletes anything or touches other files there; `` names legacy root files from older
-  versions (`my-packages.json*`, `winget-id-overrides.json`) that must never be written.
-- Skips files with identical SHA-256 (computed through .NET: `Get-FileHash` fails to load in 5.1 when a git hook
-  inherits a PowerShell 7 `PSModulePath`) and files with uncommitted changes.
-- **Drift guard:** a target file that differs and is newer than the repo copy was edited on another PC: not
-  overwritten, named, exit 2. `-Force` overrides. Time-based: a later repo edit wins without a warning.
-- Every path call uses `-LiteralPath` (`[98]` contains wildcard characters). Exit codes: 0 done, 1 error,
-  2 drift blocked.
-
-The hooks are POSIX `sh` (Git for Windows). `publish-on-main` exits early off `main`, runs `publish.ps1` with
-`powershell.exe` (5.1, the engine a fresh PC has) and always exits 0, so a publish problem never blocks a
-commit. Turn them on per clone with `git config core.hooksPath .githooks`.
-
 ## Tests and CI
 
 All tests run the kit in dry-run mode; nothing installs.
@@ -637,7 +625,7 @@ All tests run the kit in dry-run mode; nothing installs.
 | `tools/test-core.ps1` | 5.1 + pwsh | essentials: Terminal settings merge on scratch files (new file, existing file with comments + trailing comma + other profiles kept, backup, second run = no write, dry run, unparsable file left alone, `-NoFont` / `-NoDefaultProfile`, old-style profile list), starting-folder fallback, default terminal through a registry stub, Nerd Font detection + install from a local zip into a scratch folder, latest-release parsing from a sample GitHub API answer (digest, `SHA-256.txt` fallback), simulated steps; per-PC `autoInstallEssentials` (+ the older `autoInstallPwsh`), `elevateAtStart`, NoAdmin set + routing (`Test-KitDeElevate`), the de-elevation helper (simulated) and its task script (run directly, no task), the `/auto` plan and exit code, the update-everything plan on sample `winget upgrade` output (kit IDs, pins, unknown versions left out; explicit-targeting table ignored), failure reasons; catalogue sanity (unique Ids/names, groups, methods, DEV/POST off, POST interactive), the 2026-11-26 catalogue changes (removed apps, Obsidian off, Cursor/Codex AI-flagged and off, the three new entries), `Get-KitAiUpdateSet` (installed only), dev-folder path choice (injected D: types x existing folders, 80 combinations), WSL distro picker on sample `wsl --list --online` text (plain and UTF-16-as-UTF-8), restart detection, dry run of every package, version compare; v2.8: every winget outcome bucket on sample exit codes, result status per bucket, SelfUpdates in the update-all plan and on hash mismatch, `/auto` exit codes 0/1/2, installer type / scope / source arguments (fresh install vs upgrade), in-use detection with a fake ARP list + process list, hash mismatch (source update once + retry) and transient retry with winget mocked in the module, Smart App Control (simulated), the RDP group string, the PowerShell 7 `.msixbundle` from a sample GitHub API answer, kit profile starting folder override, the PID in the log name, the 2.8 catalogue changes; `-Online` adds the installed scan and vendor-page resolution |
 | `tools/smoke-tui.ps1` | pwsh | the Spectre menu driven by scripted keys (`MYWINKIT_SIMULATE_ADMIN=0` unless a scenario sets it): Update submenu, Update everything review (+ a dry run when this PC has updates, local only), exactly one Back row on a results screen, the ADMIN badge, the admin-at-start Settings row, install flow, search, AI table (every AI tool listed, never "installs missing ones"), settings (read-only panel, a seeded local fix, the per-PC auto-install toggle; fails if removed screens reappear) + tweaks (+ "update all" and "pick installed" when an AI tool is installed, local only), the result badges (blocked / restart needed / skipped / failed through `MYWINKIT_SIMULATE_OUTCOME`, dry run only) and Retry the failed / blocked |
 | `tools/smoke-loader.ps1` | 5.1 | essentials (simulated): order PS7 → Terminal → Claude Code → font → Terminal settings → default terminal, all present = nothing runs, partly present, a failure carries on and is not retried the same day, dry run, `/auto`, setting off = none run, skipped in test mode without the simulation; elevation (simulated: relaunch / already admin / declined / standard account / other account handed back / setting off / `/noelevate`, arguments kept, classic `V`, ADMIN); `/auto` with stdin closed and a time limit (exit 0, no prompt, run log, with a simulated elevation; essentials off asks nothing); `install.cmd` argument pass-through; Windows Terminal relaunch (simulated with `MYWINKIT_SIMULATE_WT_LAUNCH`): elevated wt launch with arguments kept (incl. `;`) and the exit code through the hand-off file, the over-the-shoulder 75 through it, wt failure or no wt = the console window, no admin = relaunch without UAC, `-InTerminal` / `WT_SESSION` = no relaunch, one relaunch only, `/auto` stays; classic `L` submenu; classic result badges and `R` retry; loader decisions (pwsh/Terminal present / absent / forced classic); auto mode installs without the question (dry run, simulated ok and failed installs end in the classic menu; a failed Terminal install isn't retried the same day); essentials off via `local-settings.json` (older `autoInstallPwsh` name): declining and dry-run accepting the PowerShell 7 install; classic `K` toggles the override; a classic-menu run |
-| `tools/test-config.ps1` | 5.1 + pwsh | config read chain (remote / cache / corrupt cache / bundled / defaults; terminal.json cached too), JSON writer (ASCII, round trip) and canonical form of all four `config/*.json`, terminal.json ASCII + no personal data (user and host names, `C:\Users\` paths, IPs), catalogue Ids (unique across Packages + Removed, no `RetiredIds` reuse, Python 3.14 on Id 62), terminal.json `dev-folder` start folder and the path-free my-win-kit profile, heals kept local, no config-write functions exported, publish, self-update (accept / reuse / decline / broken zip), `irm \| iex` bootstrap |
+| `tools/test-config.ps1` | 5.1 + pwsh | config read chain (remote / cache / corrupt cache / bundled / defaults; terminal.json cached too), JSON writer (ASCII, round trip) and canonical form of all four `config/*.json`, terminal.json ASCII + no personal data (user and host names, `C:\Users\` paths, IPs), catalogue Ids (unique across Packages + Removed, no `RetiredIds` reuse, Python 3.14 on Id 62), terminal.json `dev-folder` start folder and the path-free my-win-kit profile, heals kept local, no config-write functions exported, the stable launcher copy, self-update (no question / reuse / `-NoUpdate` / broken zip), `irm | iex` bootstrap (+ no BOM) |\| iex` bootstrap |
 | `tools/render-screens.ps1 -OutDir <dir>` | pwsh (+5.1 for classic) | not a test: captures every screen as `.txt` (layout) and truecolor `.ans` (view with `Get-Content x.ans -Raw` in Windows Terminal) at 120 × 30, and prints the main-menu height |
 
 test-core, smoke-tui, smoke-loader and render-screens point `MYWINKIT_CONFIG_URL` at the repo's own `config/`

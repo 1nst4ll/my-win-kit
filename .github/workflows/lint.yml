@@ -1,6 +1,6 @@
 name: lint
 
-# Quality gate only. Delivery to PCs is tools/publish.ps1 (OneDrive), not CI.
+# Quality gate only. PCs get the kit from GitHub main (self-update at every start), not from CI.
 # Nothing here installs software: every test runs the kit in -DryRun mode.
 on:
   push:
