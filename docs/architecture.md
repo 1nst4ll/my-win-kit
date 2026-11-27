@@ -27,6 +27,8 @@ config/catalog.json settings.json winget-id-overrides.json terminal.json   # liv
 src/core.psm1                      # install engine, shared by both menus (5.1-compatible)
 src/tui-spectre.ps1                # modern menu (PowerShell 7.4+ + PwshSpectreConsole)
 src/tui-classic.ps1                # fallback menu (Windows PowerShell 5.1)
+src/launch.ps1  src/uninstall.ps1  # Start menu / Desktop launcher + uninstaller (copied to %LOCALAPPDATA% by the online install)
+assets/my-win-kit.ico              # the kit icon (drawn by tools/build-icon.ps1)
 win11-tweaks.ps1                   # registry tweaks menu (launched from both menus or on its own)
 tools/publish.ps1                  # repo → OneDrive copy (one way)
 tools/lint.ps1  tools/test-core.ps1  tools/smoke-tui.ps1  tools/smoke-loader.ps1
@@ -535,6 +537,38 @@ The loader (Windows PowerShell 5.1) keeps every PC on the newest kit without git
 - The repo is public, so none of this needs a sign-in. If it ever went private, the raw/zip URLs would return 404:
   no self-update, no `irm | iex`, and config would come from the cache or the bundled copy.
 - Test hooks: `MYWINKIT_RAW_URL`, `MYWINKIT_ZIP_URL` (`file:///` allowed), `MYWINKIT_BOOTSTRAP_ARGS`.
+
+## Online install: Start menu, Desktop, uninstall
+
+The online install (`irm https://raw.githubusercontent.com/1nst4ll/my-win-kit/main/install.ps1 | iex`, or a USB
+`.cmd` that runs it) also installs the kit for the signed-in user, right after the download and before the child copy
+relaunches as administrator (`Register-KitShortcuts -Installer` in the loader), so everything lands in the user's own
+profile. No admin rights; all per user:
+
+- Into `%LOCALAPPDATA%\my-win-kit\`: `launch.ps1` (from `src/launch.ps1`), `uninstall.ps1` (from `src/uninstall.ps1`),
+  `my-win-kit.ico` (from `assets/my-win-kit.ico`) and `install.json` (the version, and where the shortcuts and the
+  registry entry went, for the uninstaller).
+- Start menu folder `my-win-kit` (`my-win-kit`, `Uninstall my-win-kit`) and a Desktop `my-win-kit` shortcut (the
+  Desktop folder Windows reports: OneDrive's when OneDrive backs up the Desktop). All three run
+  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File <state>\launch.ps1` (or `uninstall.ps1`) and carry the kit icon.
+- Settings > Apps entry `HKCU:\...\CurrentVersion\Uninstall\my-win-kit` (DisplayName, DisplayVersion, Publisher,
+  DisplayIcon, InstallLocation, URLInfoAbout, UninstallString, InstallDate, NoModify, NoRepair).
+- **`launch.ps1`** runs the newest `app\<version>\install.ps1` with its arguments (that loader then self-updates as
+  usual); with no copy on the PC it downloads the kit the same way as the online install.
+- **Refresh:** a later start of a different version (from a downloaded copy; never the elevated copy) re-runs the
+  registration without `-Installer`: the copied scripts, the icon, the Start menu shortcuts and DisplayVersion follow
+  the version; an existing Desktop shortcut is refreshed, a deleted one is not re-created. The OneDrive copy has no
+  `assets\` folder and never registers. Running the online install again re-creates everything (idempotent).
+- **`uninstall.ps1`** copies itself to `%TEMP%` and runs from there (so it can delete its own folder), asks once
+  (`[Y/n]`), then removes the Start menu folder, the Desktop shortcut, the Settings > Apps entry and the state folder
+  (only a folder named `my-win-kit` or one holding `install.json`). Apps the kit installed stay installed, and it says
+  so. A file in use (a kit window still open) is reported; run it again after closing the window.
+- **The icon** is drawn from scratch by `tools/build-icon.ps1` (System.Drawing, gruvbox colours, every size drawn
+  natively; 16, 24 and 32 px pixel by pixel) into `assets/my-win-kit.ico` (16 to 256 px, PNG entries). Re-run it after
+  changing the design and commit the `.ico`.
+- Test hooks: `MYWINKIT_STARTMENU_DIR` (the folder itself), `MYWINKIT_DESKTOP_DIR`, `MYWINKIT_UNINSTALL_KEY` (a
+  registry path). With `MYWINKIT_STATE_DIR` set, all three are required, otherwise registration is skipped: tests
+  never touch the real Start menu, Desktop or registry. `uninstall.ps1 -Yes` skips the question.
 
 ## Run log (which front-end ran)
 

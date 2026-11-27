@@ -29,7 +29,7 @@ function Check([bool]$Ok, [string]$What) {
 }
 function New-Scratch([string]$Tag) { $d = Join-Path ([IO.Path]::GetTempPath()) ("my-win-kit-$Tag-" + [guid]::NewGuid()); New-Item -ItemType Directory -Path $d -Force | Out-Null; return $d }
 function Copy-Kit([string]$Dest) {
-    foreach ($d in 'src', 'config') { New-Item -ItemType Directory -Path (Join-Path $Dest $d) -Force | Out-Null; Copy-Item -Path (Join-Path $repo "$d\*") -Destination (Join-Path $Dest $d) -Force }
+    foreach ($d in 'src', 'config', 'assets') { New-Item -ItemType Directory -Path (Join-Path $Dest $d) -Force | Out-Null; Copy-Item -Path (Join-Path $repo "$d\*") -Destination (Join-Path $Dest $d) -Force }
     foreach ($f in 'install.ps1', 'install.cmd', 'win11-tweaks.ps1') { Copy-Item -LiteralPath (Join-Path $repo $f) -Destination $Dest }
 }
 function Get-LatestLog([string]$State) {
@@ -38,7 +38,7 @@ function Get-LatestLog([string]$State) {
 }
 
 Write-Host "test-config: PowerShell $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))"
-$keepEnv = @{}; foreach ($n in 'MYWINKIT_STATE_DIR', 'MYWINKIT_CONFIG_URL', 'MYWINKIT_RAW_URL', 'MYWINKIT_ZIP_URL', 'MYWINKIT_BOOTSTRAP_ARGS', 'MYWINKIT_RUNLOG') { $keepEnv[$n] = [Environment]::GetEnvironmentVariable($n) }
+$keepEnv = @{}; foreach ($n in 'MYWINKIT_STATE_DIR', 'MYWINKIT_CONFIG_URL', 'MYWINKIT_RAW_URL', 'MYWINKIT_ZIP_URL', 'MYWINKIT_BOOTSTRAP_ARGS', 'MYWINKIT_RUNLOG', 'MYWINKIT_STARTMENU_DIR', 'MYWINKIT_DESKTOP_DIR', 'MYWINKIT_UNINSTALL_KEY') { $keepEnv[$n] = [Environment]::GetEnvironmentVariable($n) }
 $scratch = @()
 try {
     # ---------------------------------------------------------------- read chain
@@ -167,6 +167,48 @@ try {
     $raw = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($loader)); $okParse = $true
     try { [void][scriptblock]::Create($raw) } catch { $okParse = $false }
     Check ($okParse -and [int][char]$raw[0] -ne 0xFEFF) 'irm | iex: install.ps1 has no BOM and parses as downloaded text'
+    Check ($log -match 'shortcuts: skipped \(test mode' -and -not (Test-Path (Join-Path $st5 'install.json'))) 'shortcuts: test mode without the hooks never touches the real Start menu / Desktop / registry'
+
+    # ---------------------------------------------------------------- online install: shortcuts, refresh, uninstall
+    $st6 = New-Scratch 'cfg-instate'; $scratch += $st6; $env:MYWINKIT_STATE_DIR = $st6
+    $smRoot = New-Scratch 'cfg-startmenu'; $scratch += $smRoot; $sm = Join-Path $smRoot 'my-win-kit'
+    $dk = New-Scratch 'cfg-desktop'; $scratch += $dk; $deskLnk = Join-Path $dk 'my-win-kit.lnk'
+    $regParent = 'HKCU:\Software\my-win-kit-test\' + [guid]::NewGuid(); $regKey = "$regParent\my-win-kit"
+    $env:MYWINKIT_STARTMENU_DIR = $sm; $env:MYWINKIT_DESKTOP_DIR = $dk; $env:MYWINKIT_UNINSTALL_KEY = $regKey
+    try {
+        $o = & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -LiteralPath '$loader' -Raw | Invoke-Expression" 2>&1 | Out-String
+        $ws = New-Object -ComObject WScript.Shell
+        $lnks = @(Get-ChildItem -LiteralPath $sm -Filter '*.lnk' -ErrorAction SilentlyContinue | ForEach-Object Name | Sort-Object)
+        $ico = Join-Path $st6 'my-win-kit.ico'
+        $okLnk = $true
+        foreach ($p in @((Join-Path $sm 'my-win-kit.lnk'), (Join-Path $sm 'Uninstall my-win-kit.lnk'), $deskLnk)) {
+            if (-not (Test-Path -LiteralPath $p)) { $okLnk = $false; continue }
+            $l = $ws.CreateShortcut($p)
+            if ($l.IconLocation -ne "$ico,0" -or $l.TargetPath -notmatch 'WindowsPowerShell\\v1\.0\\powershell\.exe$') { $okLnk = $false }
+        }
+        Check (($lnks -join '|') -eq 'my-win-kit.lnk|Uninstall my-win-kit.lnk' -and $okLnk -and (Test-Path -LiteralPath $ico) -and $o -match 'Added my-win-kit to the Start menu') 'install: Start menu (kit + Uninstall) and Desktop shortcuts, all with the kit icon'
+        Check ($ws.CreateShortcut((Join-Path $sm 'my-win-kit.lnk')).Arguments -match [regex]::Escape((Join-Path $st6 'launch.ps1')) -and $ws.CreateShortcut((Join-Path $sm 'Uninstall my-win-kit.lnk')).Arguments -match 'uninstall\.ps1') 'install: shortcuts run launch.ps1 / uninstall.ps1 from the state folder'
+        $rk = Get-ItemProperty -LiteralPath $regKey -ErrorAction SilentlyContinue
+        Check ($rk -and $rk.DisplayName -eq 'my-win-kit' -and $rk.DisplayVersion -eq '9.9.9' -and $rk.DisplayIcon -eq $ico -and $rk.UninstallString -match 'uninstall\.ps1' -and $rk.NoModify -eq 1 -and $rk.NoRepair -eq 1) 'install: Settings > Apps entry (name, version, icon, uninstall command)'
+        # the launcher picks the newest downloaded copy
+        $o = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $st6 'launch.ps1') -NoUpdate -Classic -DryRun -ClassicTestInput 'Q' 2>&1 | Out-String
+        Check ((Get-LatestLog $st6) -match 'frontend: CLASSIC started' -and $o -match 'v9\.9\.9') 'launcher: starts the newest kit copy (v9.9.9)'
+        # running the installer again: same shortcuts, nothing added
+        $o = & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -LiteralPath '$loader' -Raw | Invoke-Expression" 2>&1 | Out-String
+        $n2 = @(Get-ChildItem -LiteralPath $sm -ErrorAction SilentlyContinue).Count
+        Check ($n2 -eq 2 -and (Test-Path -LiteralPath $deskLnk) -and @(Get-ChildItem -LiteralPath $dk).Count -eq 1 -and (Test-Path -LiteralPath $regKey)) 'install: running it again is idempotent'
+        # a later start of another version refreshes, but a deleted Desktop shortcut stays deleted
+        Remove-Item -LiteralPath $deskLnk
+        $inst = Join-Path $st6 'install.json'; [IO.File]::WriteAllText($inst, ([IO.File]::ReadAllText($inst) -replace '"Version": "[0-9.]+"', '"Version": "0.0.1"'))
+        $o = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $st6 'app\9.9.9\install.ps1') -NoUpdate -Classic -DryRun -ClassicTestInput 'Q' 2>&1 | Out-String
+        Check ([IO.File]::ReadAllText($inst) -match '"Version": "9\.9\.9"' -and -not (Test-Path -LiteralPath $deskLnk) -and (Get-LatestLog $st6) -match 'shortcuts: v9\.9\.9 registered') 'refresh: a new version updates the entry; a deleted Desktop shortcut is not re-created'
+        # uninstall removes everything
+        $o = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $st6 'uninstall.ps1') -StateDir $st6 -Yes 2>&1 | Out-String
+        Check (-not (Test-Path -LiteralPath $sm) -and -not (Test-Path -LiteralPath $regKey) -and -not (Test-Path -LiteralPath $st6) -and $o -match 'uninstalled' -and $o -match 'Apps the kit installed stay installed') 'uninstall: Start menu folder, Settings > Apps entry and the kit folder removed; apps kept'
+    } finally {
+        Remove-Item -LiteralPath $regParent -Recurse -Force -ErrorAction SilentlyContinue
+        if (-not (Get-ChildItem -LiteralPath 'HKCU:\Software\my-win-kit-test' -ErrorAction SilentlyContinue)) { Remove-Item -LiteralPath 'HKCU:\Software\my-win-kit-test' -Force -ErrorAction SilentlyContinue }
+    }
     $env:MYWINKIT_BOOTSTRAP_ARGS = ''
 } finally {
     foreach ($n in $keepEnv.Keys) { [Environment]::SetEnvironmentVariable($n, $keepEnv[$n]) }

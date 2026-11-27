@@ -169,6 +169,11 @@ downloads it into `%LOCALAPPDATA%\my-win-kit\app\`, checks it, and runs it. On a
 ```powershell
 irm https://raw.githubusercontent.com/1nst4ll/my-win-kit/main/install.ps1 | iex
 ```
+
+That online install (also handy on a USB stick as a `.cmd` that runs the same line) adds **my-win-kit** to the
+Start menu and the Desktop, with its own icon, and an entry in Settings > Apps. Next time, start it from either
+shortcut. To remove it: Start menu > my-win-kit > **Uninstall my-win-kit**, or Settings > Apps > my-win-kit >
+Uninstall. That removes the shortcuts and the kit's own files; the apps it installed stay installed.
 ## Adding or changing an app in the repo
 
 1. Edit [config/catalog.json](config/catalog.json), one line per app: `Id` (permanent, never reused; to drop an

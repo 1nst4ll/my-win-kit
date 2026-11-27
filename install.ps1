@@ -264,6 +264,82 @@ function Install-KitCopy([version]$Version) {
     } finally { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
+# ---------------------------------------------------------------- Start menu / Desktop shortcuts + uninstaller
+
+function Get-KitRegPaths {
+    <#
+    Where the shortcuts and the Apps & Features entry go (per user, no admin).
+    Test hooks: MYWINKIT_STARTMENU_DIR, MYWINKIT_DESKTOP_DIR, MYWINKIT_UNINSTALL_KEY.
+    With MYWINKIT_STATE_DIR set (tests) all three hooks are required, else $null:
+    a test must never touch the real Start menu, Desktop or registry.
+    #>
+    $sm = $env:MYWINKIT_STARTMENU_DIR; $dt = $env:MYWINKIT_DESKTOP_DIR; $key = $env:MYWINKIT_UNINSTALL_KEY
+    if ($env:MYWINKIT_STATE_DIR -and -not ($sm -and $dt -and $key)) { return $null }
+    if (-not $sm) { $sm = Join-Path ([Environment]::GetFolderPath('Programs')) 'my-win-kit' }
+    if (-not $dt) { $dt = [Environment]::GetFolderPath('Desktop') }
+    if (-not $key) { $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\my-win-kit' }
+    return [pscustomobject]@{ StartMenuDir = $sm; DesktopLnk = (Join-Path $dt 'my-win-kit.lnk'); UninstallKey = $key }
+}
+function Register-KitShortcuts([string]$KitDir, [switch]$Installer) {
+    <#
+    Copies launch.ps1, uninstall.ps1 and the icon from $KitDir into the state
+    folder (%LOCALAPPDATA%\my-win-kit), then creates or refreshes: Start menu
+    folder "my-win-kit" (my-win-kit + Uninstall my-win-kit), the Desktop
+    shortcut and the Apps & Features entry. -Installer (the online install):
+    always creates the Desktop shortcut; without it (a later start) an existing
+    Desktop shortcut is refreshed but a deleted one is not re-created.
+    Records the paths in <state>\install.json for the uninstaller. Never throws.
+    #>
+    $paths = Get-KitRegPaths
+    if (-not $paths) { Write-RunLog 'shortcuts: skipped (test mode without the MYWINKIT_STARTMENU_DIR/DESKTOP_DIR/UNINSTALL_KEY hooks)'; return $false }
+    try {
+        $need = @{ 'src\launch.ps1' = 'launch.ps1'; 'src\uninstall.ps1' = 'uninstall.ps1'; 'assets\my-win-kit.ico' = 'my-win-kit.ico' }
+        foreach ($k in $need.Keys) { if (-not (Test-Path -LiteralPath (Join-Path $KitDir $k))) { throw "this kit copy has no $k" } }
+        if (-not (Test-Path -LiteralPath $stateDir)) { New-Item -ItemType Directory -Path $stateDir -Force | Out-Null }
+        foreach ($k in $need.Keys) { Copy-Item -LiteralPath (Join-Path $KitDir $k) -Destination (Join-Path $stateDir $need[$k]) -Force }
+        $ver = Get-LocalKitVersion $KitDir
+        $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $icon = Join-Path $stateDir 'my-win-kit.ico'
+        $runArgs = '-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f (Join-Path $stateDir 'launch.ps1')
+        $unArgs = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -StateDir "{1}"' -f (Join-Path $stateDir 'uninstall.ps1'), $stateDir
+        $ws = New-Object -ComObject WScript.Shell
+        $mk = {
+            param($Path, $Arguments, $Description)
+            $l = $ws.CreateShortcut($Path)
+            $l.TargetPath = $ps; $l.Arguments = $Arguments; $l.WorkingDirectory = $env:USERPROFILE
+            $l.IconLocation = "$icon,0"; $l.Description = $Description
+            $l.Save()
+        }
+        if (-not (Test-Path -LiteralPath $paths.StartMenuDir)) { New-Item -ItemType Directory -Path $paths.StartMenuDir -Force | Out-Null }
+        & $mk (Join-Path $paths.StartMenuDir 'my-win-kit.lnk') $runArgs 'Install and update apps, Windows tweaks (my-win-kit)'
+        & $mk (Join-Path $paths.StartMenuDir 'Uninstall my-win-kit.lnk') $unArgs 'Remove my-win-kit (its shortcuts and downloaded files; installed apps stay)'
+        $desk = 'not touched'
+        if ($Installer -or (Test-Path -LiteralPath $paths.DesktopLnk)) {
+            $dd = Split-Path -Parent $paths.DesktopLnk
+            if (-not (Test-Path -LiteralPath $dd)) { New-Item -ItemType Directory -Path $dd -Force | Out-Null }
+            & $mk $paths.DesktopLnk $runArgs 'Install and update apps, Windows tweaks (my-win-kit)'
+            $desk = $paths.DesktopLnk
+        }
+        $key = $paths.UninstallKey
+        if (-not (Test-Path -LiteralPath $key)) { New-Item -Path $key -Force | Out-Null }
+        $vals = [ordered]@{
+            DisplayName = 'my-win-kit'; DisplayVersion = "$ver"; Publisher = 'my-win-kit (github.com/1nst4ll/my-win-kit)'
+            DisplayIcon = $icon; InstallLocation = $stateDir; URLInfoAbout = 'https://github.com/1nst4ll/my-win-kit'
+            UninstallString = ('"{0}" {1}' -f $ps, $unArgs); InstallDate = (Get-Date -Format 'yyyyMMdd')
+        }
+        foreach ($n in $vals.Keys) { New-ItemProperty -LiteralPath $key -Name $n -Value $vals[$n] -PropertyType String -Force | Out-Null }
+        foreach ($n in 'NoModify', 'NoRepair') { New-ItemProperty -LiteralPath $key -Name $n -Value 1 -PropertyType DWord -Force | Out-Null }
+        $rec = '{{ "Version": "{0}", "StartMenuDir": "{1}", "DesktopLnk": "{2}", "UninstallKey": "{3}" }}' -f $ver, ($paths.StartMenuDir -replace '\\', '\\'), ($paths.DesktopLnk -replace '\\', '\\'), ($key -replace '\\', '\\')
+        [IO.File]::WriteAllText((Join-Path $stateDir 'install.json'), $rec)
+        Write-RunLog "shortcuts: v$ver registered - Start menu $($paths.StartMenuDir), Desktop $desk, uninstall key $key"
+        return $true
+    } catch {
+        Write-RunLog "shortcuts: FAILED - $($_.Exception.Message)"
+        Write-Say "Could not add the Start menu / Desktop shortcuts: $($_.Exception.Message)" 'Yellow'
+        return $false
+    }
+}
+
 # irm | iex: no script folder -> download the kit and start it from %LOCALAPPDATA%
 if (-not $root) {
     Write-Say "my-win-kit $Dot downloading the kit from github.com/$Repo..." 'Cyan'
@@ -272,6 +348,8 @@ if (-not $root) {
     if ($rv) { $dir = Install-KitCopy $rv }
     if (-not $dir) { $n = Get-NewestKitCopy; if ($n) { $dir = $n.Path; Write-Say "Using the copy already on this PC (v$($n.Version))." 'Yellow' } }
     if (-not $dir) { Write-Say 'Could not download the kit. Check the internet connection (and that the repo is public), then try again.' 'Red'; return }
+    # Start menu + Desktop shortcuts and the Apps & Features entry, as the signed-in user (before any elevation)
+    if (Register-KitShortcuts -KitDir $dir -Installer) { Write-Say "Added my-win-kit to the Start menu and the Desktop (uninstall: Start menu or Settings > Apps)." 'Green' }
     # & ([scriptblock]::Create((irm <url>))) -Auto passes arguments; plain irm | iex has none
     $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $dir 'install.ps1'), '-NoUpdate') + (Get-ForwardArgs)
     if ($env:MYWINKIT_BOOTSTRAP_ARGS) { $childArgs += @($env:MYWINKIT_BOOTSTRAP_ARGS -split '\s+' | Where-Object { $_ }) }
@@ -304,6 +382,20 @@ if (-not $NoUpdate) {
         & powershell.exe @childArgs
         exit $LASTEXITCODE
     }
+}
+
+# Installed with the online installer (install.json present)? Keep the shortcuts and the
+# Apps & Features entry on this version. Only when the version changed; never in the elevated copy.
+if (-not $ElevatedChild) {
+    try {
+        $instFile = Join-Path $stateDir 'install.json'
+        if (Test-Path -LiteralPath $instFile) {
+            $instVer = ([IO.File]::ReadAllText($instFile) | ConvertFrom-Json).Version
+            $myVer = Get-LocalKitVersion $root
+            # (the OneDrive copy has no assets\ folder: refreshed only from a downloaded copy)
+            if ($myVer -and "$instVer" -ne "$myVer" -and (Test-Path -LiteralPath (Join-Path $root 'assets\my-win-kit.ico'))) { [void](Register-KitShortcuts -KitDir $root) }
+        }
+    } catch { Write-RunLog "shortcuts: refresh skipped - $($_.Exception.Message)" }
 }
 
 # ---------------------------------------------------------------- fresh-system bootstrap
