@@ -15,6 +15,7 @@
 | [config/catalog.json](../config/catalog.json) **on GitHub `main`** | The app catalogue: groups, packages (name, method, Id/URL, default on/off, detection), removed packages, `RetiredIds`, the direct-download rules. Edited by hand in the repo (the menu never writes it). Every PC reads the live copy at start. Fields: [Catalog fields](#catalog-fields). | Never copy it into docs. |
 | [config/settings.json](../config/settings.json) **on GitHub `main`** | Kit settings shared by every PC (`removeShortcuts`, `dryRunByDefault`, `autoInstallEssentials`, `elevateAtStart`). Edited by hand in the repo; Settings shows them read-only. | Per-PC state (last selection, last failures: `%LOCALAPPDATA%\my-win-kit\state.json`) and per-PC preferences (`local-settings.json`, e.g. this PC's `autoInstallEssentials` / `elevateAtStart` override). |
 | [config/terminal.json](../config/terminal.json) **on GitHub `main`** | The Windows Terminal settings every PC gets (essentials step): default profile, the Claude Code profile, profile defaults, globals, key bindings, starting folder. Fields: [Windows Terminal settings](#windows-terminal-settings). | The PC's own Terminal settings (merged into, never replaced). |
+| [config/tailnet.json](../config/tailnet.json) **on GitHub `main`** | What the Tailnet setup (catalogue Id 63) applies: `allowFrom` (the only addresses that reach SSH / RDP / ping), the trusted public SSH keys, the Tailscale options, the SSH login shell, RDP and ping on/off. Fields: [Tailnet setup](#tailnet-setup). | Tailnet ACLs, tags, device names (Tailscale admin console). |
 | [config/winget-id-overrides.json](../config/winget-id-overrides.json) **on GitHub `main`** | Shared winget-ID heals (old → new, `msstore:` prefix = Store). Edited by hand. Heals a PC learns itself stay in that PC's `cache\local-overrides.json` until copied in here. | |
 | `$script:KitVersion` in [src/core.psm1](../src/core.psm1) | The kit version. The loader compares it with GitHub `main` for the self-update. | |
 | `$script:Fixes` in [win11-tweaks.ps1](../win11-tweaks.ps1#L87) | The tweak catalogue (registry keys, apply/check/revert). | |
@@ -230,7 +231,9 @@ No UI. Both menus call the same functions, so behaviour is identical in both.
   - **builtin:**
     - `enable-rdp`: registry + NLA + the firewall group by its resource string (`Enable-NetFirewallRule -Group
       '@FirewallAPI.dll,-28752'`, the same on every Windows language; the display name "Remote Desktop" is localized),
-      elevated via UAC when needed (`Get-KitEnableRdpScript`); prints the Tailscale IP if present.
+      elevated via UAC when needed (`Get-KitEnableRdpScript`); prints the Tailscale IP if present. The registry
+      lines (`$script:RdpEnableLines`) are shared with the Tailnet setup.
+    - `tailnet` (`Invoke-KitTailnetSetup`): see [Tailnet setup](#tailnet-setup).
     - `dev-folder`: `Get-KitDevFolderPath` = the first folder that already exists of `D:\dev\github`,
       `%SystemDrive%\dev\github`, `D:\dev\git`, `%SystemDrive%\dev\git` (the D: ones only when D: is ready and a
       **Fixed** disk: `System.IO.DriveInfo`; a CD/DVD, USB stick or network drive doesn't count); none → `D:\dev\github`
@@ -430,7 +433,7 @@ picker, `Show-Picker`, built on `[Console]::ReadKey`.
 
 **Decision (2026-11-25, Daniel):** in-menu saving to GitHub can't be relied on (gh install, sign-in and real
 keyboard entry are untested on other PCs), so the menu never writes config. GitHub is the single home:
-`config/catalog.json`, `config/settings.json`, `config/winget-id-overrides.json` and `config/terminal.json` on
+`config/catalog.json`, `config/settings.json`, `config/winget-id-overrides.json`, `config/terminal.json` and `config/tailnet.json` on
 `main`. Daniel edits them
 by hand in the repo; every deployed copy reads the latest at start-up. There is no local overlay, no import step and
 no GitHub CLI dependency.
@@ -456,6 +459,46 @@ no GitHub CLI dependency.
   an app, move its line to `Removed` (hidden, Id kept); a new app takes an Id above every Id in Packages, Removed
   and `RetiredIds` (the next free one is in STATUS).
 - **Test hooks:** `MYWINKIT_REPO`, `MYWINKIT_BRANCH`, `MYWINKIT_CONFIG_URL` (another base, or a `file:///` folder).
+
+### Tailnet setup
+
+Catalogue Id 63 (`builtin` `tailnet`, group Remote access, `Interactive` because the Tailscale sign-in needs the
+console; off by default, so `*` and `/auto` never run it). It puts a PC in the tailnet the way the reference PC is
+set up, driven by `config/tailnet.json`:
+
+| Key | Meaning |
+|---|---|
+| `allowFrom` | The only remote addresses for SSH (22), RDP (3389) and ping: the tailnet ranges `100.64.0.0/10` and `fd7a:115c:a1e0::/48`. `Test-KitConfigDoc` refuses a copy that is empty or names `Any`, `0.0.0.0/0`, `::/0`, `LocalSubnet`, `Internet` …, so a bad GitHub copy falls back to the cache / bundled copy. |
+| `authorizedKeys` | Public keys as `<type> <base64>` (no comments; refused otherwise). Added to `%ProgramData%\ssh\administrators_authorized_keys`. |
+| `tailscale` | `unattended`, `acceptRoutes`, `exitNodeAllowLan`, `autoUpdate` → `tailscale set` flags (`Get-KitTailscaleSetArgs`). |
+| `sshDefaultShell` | OpenSSH `DefaultShell` (HKLM\SOFTWARE\OpenSSH). |
+| `enableRdp`, `allowPing` | Turn RDP (with NLA) / the ping rules on. |
+
+Steps (`Invoke-KitTailnetSetup`), each reported as done / already / failed and never stopping the rest:
+
+1. **Tailscale** missing → catalogue Id 50 through `Invoke-KitPackage`.
+2. **Sign-in:** not `Running` → `tailscale set <flags>`, then `tailscale up --timeout=300s` attached to the console
+   (the sign-in link shows there and the browser opens), a second try with the flags on `up`. Then `tailscale set
+   <flags>` (`up` with changed flags errors, `set` doesn't).
+3. **Admin script** (`Get-KitTailnetAdminScript`, one UAC prompt via `Invoke-KitElevatedScript`; it writes one JSON
+   result per step): the Tailscale adapter's network → Private (found by `InterfaceDescription`); OpenSSH Server
+   (`Add-WindowsCapability` when `sshd` is missing), `sshd` Automatic + running, `DefaultShell`; keys merged with
+   `Merge-KitAuthorizedKeys` (existing lines, options and comments kept; only missing keys added) and the file ACL
+   set to Administrators + SYSTEM by SID with inheritance off (`icacls`); every enabled inbound allow rule for TCP 22
+   and TCP/UDP 3389 plus the Remote Desktop group (by resource string) limited to `allowFrom`, a
+   `my-win-kit-Tailnet-SSH-In` rule when no SSH rule exists; RDP on (registry only when it isn't already); ping
+   rules `my-win-kit-Tailnet-Ping-v4` / `-v6` (ICMPv4 8, ICMPv6 128). No rule is ever set to `Any`.
+4. **Result:** the Tailscale IPv4, the MagicDNS name and `ssh <user>@<host>`.
+
+Detection (`Detect: tailnet`): no `tailscale.exe` → not set up, without a child process. Otherwise
+`Get-KitTailnetState` reads, without admin rights, `tailscale status --json` / `debug prefs` (15 s limits), the
+adapter's network, `sshd`, `DefaultShell`, the SSH rules by `Name` (`OpenSSH-Server-In-TCP`, `sshd`, the kit's own),
+the Remote Desktop group and the ping rules; `Test-KitTailnetState` turns that into one row per step (`$true` /
+`$false` / `$null` = can't be read here, e.g. the keys file without admin). Set up = no row is `$false`. Addresses
+are compared as CIDR (`ConvertTo-KitCidr`: Windows stores `100.64.0.0/10` as `100.64.0.0/255.192.0.0`).
+Dry run lists the steps that would change. About 1.5–3 s on a PC with Tailscale (firewall CIM calls).
+Test hook: `MYWINKIT_TAILSCALE_EXE` (a missing path = Tailscale not installed). test-core runs the generated admin
+script against stubbed cmdlets (firewall, services, capability, registry, `icacls`, scratch `ProgramData`).
 
 ### Windows Terminal settings
 
@@ -497,11 +540,11 @@ or C:, else a new `D:\dev\github` or `C:\dev\github`, created; or a folder, envi
 `Groups`: `Key`, `Label`, `Letter` (classic-menu hotkey). `Packages` (and `Removed`), required: `Id` (permanent,
 never renumbered or reused), `Name` (unique), `Group`, `On` (in the recommended set), `Method` (`winget` | `msstore`
 | `script` | `direct` | `npm` | `builtin`), `Ref` (winget ID | Store product ID | script URL | Direct key | npm
-package | builtin name: `enable-rdp`, `dev-folder`, `wsl-ubuntu`), `Desc`. Optional: `AI` (listed under Update AI
+package | builtin name: `enable-rdp`, `dev-folder`, `wsl-ubuntu`, `tailnet`), `Desc`. Optional: `AI` (listed under Update AI
 tools, which updates it only when installed; never ticks or installs it), `Interactive` (needs the console, never
 under a spinner), `Elevated` (script: runs as administrator, own window when the menu isn't elevated), `Shell`
 (`pwsh` = run the script in PowerShell 7 instead of Windows PowerShell), `Detect` (built-in install check:
-`dev-folder`, `ctt-profile`, `wsl-ubuntu`, `hermes`), `Exe` (file, or folder, that proves a script/npm install, env vars
+`dev-folder`, `ctt-profile`, `wsl-ubuntu`, `hermes`, `tailnet`), `Exe` (file, or folder, that proves a script/npm install, env vars
 expanded), `Version` (command whose
 output has the installed version), `Update` (native updater, e.g. `claude update`), `Appx` (MSIX package name),
 `Uninstall` (regex on the uninstall DisplayName), `Fallback` (winget ID when a direct download can't be resolved),

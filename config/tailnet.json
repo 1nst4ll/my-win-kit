@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "_about": "Tailnet setup (catalogue Id 63), shared by every PC. Edited by hand in the repo. allowFrom: the only addresses that may reach SSH (22), RDP (3389) and ping; never Any. authorizedKeys: public keys only (type + key, no comments), ADDED to %ProgramData%\\ssh\\administrators_authorized_keys, existing lines are kept. tailscale: tailscale set flags (unattended = runs before anyone signs in).",
+  "allowFrom": [
+    "100.64.0.0/10",
+    "fd7a:115c:a1e0::/48"
+  ],
+  "authorizedKeys": [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFABB4ZuJiDJ5H5MS5EdQfeqkvXlNtIi3F27IaVt9cxU",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJLnVMJBTPYdTjQgR5wdRX5+Nxg23RitBIhe+WXGTTtu",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPNDELRipygmGYhUbwnkLAup2FKAjgkfEK91qgfg5UAy"
+  ],
+  "tailscale": { "unattended": true, "acceptRoutes": true, "exitNodeAllowLan": true, "autoUpdate": true },
+  "sshDefaultShell": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+  "enableRdp": true,
+  "allowPing": true
+}

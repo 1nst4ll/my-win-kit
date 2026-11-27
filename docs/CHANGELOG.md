@@ -2,6 +2,25 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-26: v2.8.4 (branch `tailnet-setup`): Tailnet setup
+
+- Daniel: "add to the kit script that will setup the machine to work in my tailnet". His choices: SSH and RDP from
+  the **tailnet only**, and trust **this PC's public SSH keys**.
+- New catalogue entry **Tailnet setup** (Id 63, Remote access, builtin `tailnet`, Interactive, off) and
+  `config/tailnet.json` (allowed ranges, 3 public keys, Tailscale options, SSH shell, RDP, ping), read through the
+  usual GitHub → cache → bundled chain. A copy with a wide range (`Any` …) or a key comment is refused.
+- Steps, copied from the reference PC: Tailscale installed, signed in (browser), `tailscale set --unattended
+  --accept-routes --exit-node-allow-lan-access --auto-update`; then one admin script: Tailscale network Private,
+  OpenSSH Server automatic + running, PowerShell as the SSH shell, keys added to `administrators_authorized_keys`
+  (existing lines kept, ACL Administrators + SYSTEM), every inbound rule for SSH 22 / RDP 3389 and the Remote
+  Desktop group limited to `100.64.0.0/10` + `fd7a:115c:a1e0::/48`, RDP on with NLA, ping from the tailnet. Each step
+  is reported (done / already / failed); detection marks a finished PC as set up.
+- Enable RDP Host shares the RDP registry lines (`$script:RdpEnableLines`); its old commented "lock to Tailscale"
+  line is gone (the Tailnet setup does it).
+- Tests: test-core checks the entry, the config, CIDR comparison, the keys merge, the generated admin script
+  (parses, never `Any`) and runs it against stubbed Windows cmdlets (a fresh PC: every step done, only tailnet
+  ranges; a finished PC: nothing changed). test-config checks canonical form, caching and the refused copies.
+
 ## 2026-11-26: v2.8.3 (branch `installer-shortcuts`): Start menu, Desktop shortcut and uninstaller
 
 - Daniel: "i want instaler to add menu start icon and desktop icon also have uninstaller in the menu. installer

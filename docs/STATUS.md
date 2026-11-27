@@ -7,6 +7,11 @@
 
 _A new session can start from this line, no handover needed._
 
+- **Kit v2.8.4 on branch `tailnet-setup` (not merged, waiting for Daniel's go):** new **Tailnet setup** (catalogue
+  Id 63, Remote access, off) + `config/tailnet.json`. Daniel: "add to the kit script that will setup the machine to
+  work in my tailnet"; his choices: SSH/RDP from the tailnet only, trust this PC's 3 public SSH keys. Tested with
+  stubbed cmdlets and a read-only dry run on the main PC (it would limit the SSH, RDP and ping rules to the tailnet;
+  the rest already holds). Not yet run for real on any PC. See CHANGELOG.
 - **Kit v2.8.3 is live:** PR #8 merged into `main` (6190c65) on 2026-11-26 with Daniel's go ("merge"); CI green on both jobs; the post-merge publish copied 4 files to OneDrive. USB stick folder (Desktop `my-win-kit-usb`: online installer `.cmd` + v2.8.2 zip) made for Daniel.
   Daniel: "i want instaler to add menu start icon and desktop icon also have uninstaller in the menu ... script link
   does [need the icon] and build one from scratch". The online install now adds a Start menu folder (my-win-kit +
@@ -85,13 +90,13 @@ _A new session can start from this line, no handover needed._
 | Config home | `config/catalog.json`, `config/settings.json`, `config/winget-id-overrides.json`, `config/terminal.json` on GitHub `main`, edited by hand |
 | Publish target | `$env:OneDrive\[98] Shortcuts` (the OneDrive folder every PC syncs) |
 | Last publish | 2026-11-26: merge of PR #8 (kit v2.8.3, 6190c65), 4 files copied. Before that: PR #7 (kit v2.8.2), 3 files |
-| Apps in `config/catalog.json` | 59 total: 33 in the recommended set, 22 DEV (off), 3 POST (off); 3 removed (Perplexity 8, Samsung Quick Share 33, Python 3.13 41). NoAdmin: 6 (OneDrive, VS Code, GitHub Desktop, Cursor, Claude Code CLI, Antigravity IDE). SelfUpdates: 8 (Office, Chrome, OneDrive, Dropbox, Acrobat Reader, Teams, WhatsApp, AnyDesk). Unsigned: 1 (Hermes) |
-| By method | 45 winget, 2 Store, 6 script, 2 direct, 1 npm, 3 builtin. AI-flagged (Update AI tools): 9 (Claude Desktop, Claude Code CLI, KiloCode CLI, Cursor, Codex CLI, Antigravity IDE, Antigravity, Antigravity CLI, Hermes Agent) |
-| Next free app Id | 63 (above every Id in Packages, Removed, RetiredIds; use it when adding an app to `config/catalog.json` by hand) |
-| Kit version | 2.8.3 (`$script:KitVersion` in src/core.psm1) |
+| Apps in `config/catalog.json` | 60 total: 33 in the recommended set, 22 DEV (off), 3 POST (off), Tailnet setup (off); 3 removed (Perplexity 8, Samsung Quick Share 33, Python 3.13 41). NoAdmin: 6 (OneDrive, VS Code, GitHub Desktop, Cursor, Claude Code CLI, Antigravity IDE). SelfUpdates: 8 (Office, Chrome, OneDrive, Dropbox, Acrobat Reader, Teams, WhatsApp, AnyDesk). Unsigned: 1 (Hermes) |
+| By method | 45 winget, 2 Store, 6 script, 2 direct, 1 npm, 4 builtin. AI-flagged (Update AI tools): 9 (Claude Desktop, Claude Code CLI, KiloCode CLI, Cursor, Codex CLI, Antigravity IDE, Antigravity, Antigravity CLI, Hermes Agent) |
+| Next free app Id | 64 (above every Id in Packages, Removed, RetiredIds; use it when adding an app to `config/catalog.json` by hand) |
+| Kit version | 2.8.3 on `main`; 2.8.4 on branch `tailnet-setup` (`$script:KitVersion` in src/core.psm1) |
 | Shared settings | `removeShortcuts` true, `dryRunByDefault` false, `elevateAtStart` true; `autoInstallEssentials` true (was `autoInstallPwsh`, still read) |
 | Modern menu needs | PowerShell 7.4+, PwshSpectreConsole ≥ 2.3 (tested with 2.6.3 on pwsh 7.7.0); no GitHub CLI or sign-in |
-| Startup (this PC) | ~750 ms launch → banner → quit, plus the config fetch (3 small files; 4 with `terminal.json`). The essentials checks add ~0.3 s when everything is already set up (core import ~55 ms, Terminal settings compare ~260 ms in 5.1) |
+| Startup (this PC) | ~750 ms launch → banner → quit, plus the config fetch (5 small files). The essentials checks add ~0.3 s when everything is already set up (core import ~55 ms, Terminal settings compare ~260 ms in 5.1) |
 | Screen heights (120 × 30) | main 17, start 14, app picker 29, review ≤ 29, results ≤ 25 (26 with the Retry row), Update 11, Update everything review ≤ 28, AI 26 (9 tools; pick 18), tweaks ≤ 24, settings 25 (27 with local fixes), classic 29 incl. the prompt line (1 row spare: one more row of apps in a group needs a layout change) |
 | Run logs | `%LOCALAPPDATA%\my-win-kit\logs\run-*.log` (newest 30 kept); config cache and this PC's learned heals (`local-overrides.json`) in `...\cache`, downloaded kit copies in `...\app`, per-PC preferences in `...\local-settings.json`, the loader's "failed today, retry tomorrow" notes (Terminal, Claude Code, font) in `...\loader.json`. Terminal settings backups: `settings.json.bak-my-win-kit-<date>` next to Terminal's `settings.json` |
 | Latest direct versions seen | Antigravity IDE 2.8.0, Antigravity 2.35.1 (2026-11-25, from antigravity.google/download); Nerd Fonts v3.5.1 (`CascadiaCode.zip`, 56.6 MB, 2026-11-26) |

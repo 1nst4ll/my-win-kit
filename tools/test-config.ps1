@@ -7,7 +7,8 @@
       - read chain: "GitHub" (a file:/// config URL) -> cache -> bundled; corrupt cache;
         missing settings file -> defaults
       - JSON writer: ASCII-only, stable round trip, one package per line; every
-        config/*.json is in canonical form (they are edited by hand in the repo)
+        config/*.json is in canonical form (they are edited by hand in the repo);
+        tailnet.json holds public keys only and a wide-open copy is refused
       - catalogue Ids unique across Packages and Removed, no RetiredId reused
       - learned heals stay on this PC (local-overrides.json), applied at the next start
       - publish: config/*.json shipped, protected legacy files untouched
@@ -74,7 +75,7 @@ try {
     $doc = ConvertFrom-KitJsonText ([IO.File]::ReadAllText((Join-Path $repo 'config\catalog.json')))
     $t1 = ConvertTo-KitJsonDocument $doc; $t2 = ConvertTo-KitJsonDocument (ConvertFrom-KitJsonText $t1)
     Check ($t1 -eq $t2) 'JSON writer: stable round trip'
-    foreach ($cf in 'catalog.json', 'settings.json', 'winget-id-overrides.json', 'terminal.json') {
+    foreach ($cf in 'catalog.json', 'settings.json', 'winget-id-overrides.json', 'terminal.json', 'tailnet.json') {
         $txt = [IO.File]::ReadAllText((Join-Path $repo "config\$cf"))
         Check ($txt -eq (ConvertTo-KitJsonDocument (ConvertFrom-KitJsonText $txt))) "config/$cf is in canonical form (ConvertTo-KitJsonDocument)"
     }
@@ -95,8 +96,28 @@ try {
     Check ($kp.Count -eq 1 -and $kp[0]['commandline'] -like '*%OneDrive%\`[98`] Shortcuts\install.cmd*') 'terminal.json: a my-win-kit profile starts install.cmd from the OneDrive kit folder through %OneDrive% (no personal path)'
     $cj = ConvertFrom-KitJsonText ([IO.File]::ReadAllText((Join-Path $repo 'config\catalog.json')))
     $allIds = @(@($cj['Packages']) + @($cj['Removed']) | Where-Object { $_ } | ForEach-Object { [int]$_['Id'] })
-    Check ($allIds -contains 62 -and @($cj['Removed'] | Where-Object { $_['Id'] -eq 41 }).Count -eq 1 -and ($allIds | Measure-Object -Maximum).Maximum -eq 62) 'catalog: Python 3.14 took Id 62 (Python 3.13, Id 41, in Removed); the next free Id is 63'
+    Check ($allIds -contains 62 -and @($cj['Removed'] | Where-Object { $_['Id'] -eq 41 }).Count -eq 1) 'catalog: Python 3.14 took Id 62 (Python 3.13, Id 41, in Removed)'
+    Check ($allIds -contains 63 -and @($cj['Packages'] | Where-Object { $_['Id'] -eq 63 -and $_['Ref'] -eq 'tailnet' }).Count -eq 1 -and ($allIds | Measure-Object -Maximum).Maximum -eq 63) 'catalog: the Tailnet setup took Id 63; the next free Id is 64'
     Check (Test-Path (Join-Path $state 'cache\terminal.json')) 'read: terminal.json fetched and cached like the other config files'
+
+    # ---------------------------------------------------------------- config/tailnet.json (public repo: public keys only; never wide open)
+    $nj = [IO.File]::ReadAllText((Join-Path $repo 'config\tailnet.json'))
+    Check (-not @([Text.Encoding]::UTF8.GetBytes($nj) | Where-Object { $_ -gt 127 }).Count) 'tailnet.json: ASCII-only'
+    $npers = @(@('C:\\Users\\', $env:USERNAME, $env:COMPUTERNAME, '@', 'BEGIN ', 'PRIVATE') | Where-Object { $_ -and $nj.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+    Check (-not $npers.Count) "tailnet.json: public keys only, no comments, user or host names$(if ($npers.Count) { ': ' + ($npers -join ', ') })"
+    Check (Test-Path (Join-Path $state 'cache\tailnet.json')) 'read: tailnet.json fetched and cached like the other config files'
+    $keepUrl = $env:MYWINKIT_CONFIG_URL
+    $env:MYWINKIT_CONFIG_URL = ([Uri]$remote).AbsoluteUri
+    $goodTn = [IO.File]::ReadAllText((Join-Path $remote 'tailnet.json'))
+    [IO.File]::WriteAllText((Join-Path $remote 'tailnet.json'), $goodTn.Replace('"100.64.0.0/10",', '"Any",'))
+    $cat = @(Initialize-Kit -KitRoot $kit)
+    $tnc = Get-KitTailnetConfig
+    Check ($tnc -and @($tnc['allowFrom']) -notcontains 'Any' -and @($tnc['allowFrom']) -contains '100.64.0.0/10') 'tailnet.json on "GitHub" with allowFrom Any -> refused, the cached copy is used'
+    [IO.File]::WriteAllText((Join-Path $remote 'tailnet.json'), $goodTn.Replace('",' + "`n" + '    "ssh-ed25519', ' user@host",' + "`n" + '    "ssh-ed25519'))
+    $cat = @(Initialize-Kit -KitRoot $kit)
+    Check (-not @(@((Get-KitTailnetConfig)['authorizedKeys']) | Where-Object { "$_" -like '*@*' }).Count) 'tailnet.json on "GitHub" with a key comment -> refused, the cached copy is used'
+    [IO.File]::WriteAllText((Join-Path $remote 'tailnet.json'), $goodTn)
+    $env:MYWINKIT_CONFIG_URL = $keepUrl
 
     # ---------------------------------------------------------------- hand-edited catalogue: Ids are permanent
     $all = @(@($doc['Packages']) + @($doc['Removed']) | Where-Object { $_ } | ForEach-Object { [int]$_['Id'] })
