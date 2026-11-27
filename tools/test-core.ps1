@@ -595,6 +595,142 @@ $env:MYWINKIT_SIMULATE_SAC = $keepSac
 Write-Host 'Enable RDP + PowerShell 7 fallback + test hooks:'
 $rdp = Get-KitEnableRdpScript
 Check ($rdp.Contains("Enable-NetFirewallRule -Group '@FirewallAPI.dll,-28752'") -and -not $rdp.Contains('-DisplayGroup')) 'RDP firewall group by its resource string (works on Polish Windows), no localized -DisplayGroup'
+
+Write-Host 'Tailnet setup (63):'
+$tn = $byId[63]
+Check ($tn -and $tn.Method -eq 'builtin' -and $tn.Ref -eq 'tailnet' -and $tn.Interactive -and $tn.Group -eq 'REMO' -and -not $tn.Default -and $tn.Detect -eq 'tailnet') 'Tailnet setup (63): builtin, REMO, interactive (browser sign-in), off, Detect tailnet'
+$tord = @(Get-KitRunOrder @($byId[63], $byId[50]))
+Check ($tord[0].Id -eq 50 -and $tord[1].Id -eq 63) 'run order: Tailscale (50) before the Tailnet setup (63)'
+$tcfg = Get-KitTailnetConfig
+$tAllow = @($tcfg['allowFrom'])
+Check ($tAllow.Count -eq 2 -and $tAllow -contains '100.64.0.0/10' -and $tAllow -contains 'fd7a:115c:a1e0::/48') "config/tailnet.json: allowFrom = the tailnet ranges only ($($tAllow -join ', '))"
+$tKeys = @($tcfg['authorizedKeys'])
+Check ($tKeys.Count -ge 1 -and -not @($tKeys | Where-Object { "$_" -notmatch '^ssh-ed25519 [A-Za-z0-9+/=]+$' }).Count) "config/tailnet.json: $($tKeys.Count) public key(s), type + key only (no comments, host or user names)"
+$ts0 = $tcfg['tailscale']
+Check ($ts0['unattended'] -and $ts0['acceptRoutes'] -and $ts0['exitNodeAllowLan'] -and $ts0['autoUpdate'] -and $tcfg['enableRdp'] -and $tcfg['allowPing']) 'config/tailnet.json: unattended, accept-routes, exit-node LAN access, auto-update, RDP and ping on'
+Check (((Get-KitTailscaleSetArgs -Config $tcfg) -join ' ') -eq 'set --unattended --accept-routes --exit-node-allow-lan-access --auto-update') 'tailscale set flags from config'
+Check ((ConvertTo-KitCidr '100.64.0.0/255.192.0.0') -eq '100.64.0.0/10' -and (ConvertTo-KitCidr 'FD7A:115C:A1E0::/48') -eq 'fd7a:115c:a1e0::/48') 'firewall address notation: Windows mask form and IPv6 case compare as CIDR'
+Check ((Test-KitTailnetAddresses -Actual @('fd7a:115c:a1e0::/48', '100.64.0.0/255.192.0.0') -Allow $tAllow) -and -not (Test-KitTailnetAddresses -Actual @('Any') -Allow $tAllow) -and -not (Test-KitTailnetAddresses -Actual @('100.64.0.0/10') -Allow $tAllow) -and -not (Test-KitTailnetAddresses -Actual @('100.64.0.0/10', 'fd7a:115c:a1e0::/48', 'LocalSubnet') -Allow $tAllow)) 'a rule counts as limited only when its addresses are exactly allowFrom (Any, missing or extra -> not)'
+$exist = @('# keys', 'from="10.0.0.1" ssh-ed25519 AAAAKEYONE old@laptop', 'ssh-rsa AAAAOTHER someone', '')
+$mk = Merge-KitAuthorizedKeys -Existing $exist -Keys @('ssh-ed25519 AAAAKEYONE', 'ssh-ed25519 AAAAKEYTWO')
+Check ($mk.Added -eq 1 -and @($mk.Lines).Count -eq 4 -and $mk.Lines[0] -eq '# keys' -and $mk.Lines[1] -eq $exist[1] -and $mk.Lines[2] -eq $exist[2] -and $mk.Lines[3] -eq 'ssh-ed25519 AAAAKEYTWO') 'keys merge: existing lines kept as they are (options, comments, other keys), only the missing key added'
+Check ((Merge-KitAuthorizedKeys -Existing $mk.Lines -Keys @('ssh-ed25519 AAAAKEYONE', 'ssh-ed25519 AAAAKEYTWO')).Added -eq 0) 'keys merge: a second run adds nothing'
+$tas = Get-KitTailnetAdminScript -Config $tcfg -ResultFile 'C:\scratch\r.json'
+$tTok = $null; $tErr = $null; [void][System.Management.Automation.Language.Parser]::ParseInput($tas, [ref]$tTok, [ref]$tErr)
+Check (-not @($tErr).Count) 'tailnet admin script parses'
+Check ($tas.Contains("`$allow = @('100.64.0.0/10', 'fd7a:115c:a1e0::/48')") -and -not [regex]::IsMatch($tas, '(?i)-RemoteAddress\s+(?!\$allow\b)')) 'tailnet admin script: every -RemoteAddress is allowFrom (never Any)'
+Check ($tas.Contains("-Group `$rdpGroup") -and $tas.Contains("'@FirewallAPI.dll,-28752'") -and $tas.Contains('Limit-InboundPort 22') -and $tas.Contains('Limit-InboundPort 3389') -and -not $tas.Contains('-DisplayGroup')) 'tailnet admin script: every inbound 22 / 3389 rule and the Remote Desktop group (by resource string) limited'
+Check ($tas.Contains('*S-1-5-32-544:F') -and $tas.Contains('*S-1-5-18:F') -and $tas.Contains('/inheritance:r')) 'tailnet admin script: authorized keys ACL = Administrators + SYSTEM (by SID), no inheritance'
+$wide = [ordered]@{}; foreach ($k in $tcfg.Keys) { $wide[$k] = $tcfg[$k] }; $wide['allowFrom'] = @('100.64.0.0/10', 'Any')
+$threw = $false; try { [void](Get-KitTailnetAdminScript -Config $wide -ResultFile 'C:\scratch\r.json') } catch { $threw = $true }
+Check $threw 'allowFrom with Any -> refused (no script)'
+$full = @{ TsInstalled = $true; Backend = 'Running'; Prefs = @{ unattended = $true; acceptRoutes = $true; exitNodeAllowLan = $true; autoUpdate = $true }; NetCategory = 'Private'
+    SshdPresent = $true; SshdAuto = $true; SshdRunning = $true; DefaultShell = [string]$tcfg['sshDefaultShell']; KeysMissing = 0; SshFw = $true; RdpOn = $true; RdpFw = $true; PingFw = $true }
+$rowsOk = @(Test-KitTailnetState -State $full -Config $tcfg)
+Check ($rowsOk.Count -eq 10 -and -not @($rowsOk | Where-Object { $_.Ok -ne $true }).Count) 'state check: a finished PC -> all 10 steps hold'
+$s2 = $full.Clone(); $s2.KeysMissing = $null
+Check (-not @(Test-KitTailnetState -State $s2 -Config $tcfg | Where-Object { $_.Ok -eq $false }).Count) 'state check: keys unreadable without admin -> unknown, not "needs work"'
+$s3 = $full.Clone(); $s3.SshFw = $false; $s3.Prefs = @{ unattended = $true; acceptRoutes = $true; exitNodeAllowLan = $true; autoUpdate = $false }
+$bad3 = @(Test-KitTailnetState -State $s3 -Config $tcfg | Where-Object { $_.Ok -eq $false } | ForEach-Object Step)
+Check (($bad3 -join ',') -eq 'prefs,firewall-ssh') "state check: SSH open to Any + auto-update off -> prefs, firewall-ssh ($($bad3 -join ','))"
+$s4 = $full.Clone(); $s4.TsInstalled = $false
+$bad4 = @(Test-KitTailnetState -State $s4 -Config $tcfg | Where-Object { $_.Ok -eq $false } | ForEach-Object Step)
+Check (($bad4 -join ',') -eq 'tailscale,signin,prefs,network') "state check: no Tailscale -> tailscale, signin, prefs, network ($($bad4 -join ','))"
+# The generated admin script, run in a child process against mocked Windows: every cmdlet it uses
+# (firewall, services, capabilities, registry, ACL, icacls) is a stub; ProgramData is a scratch folder.
+$tailnetMocks = @'
+param([string]$Scenario, [string]$CallsFile)
+$compliant = ($Scenario -eq 'done')
+$global:Calls = [System.Collections.Generic.List[string]]::new()
+$global:MockState = @{ Profile = $(if ($compliant) { 'Private' } else { 'Public' }); Sshd = $compliant
+    SshdStart = $(if ($compliant) { 'Automatic' } else { 'Manual' }); SshdStatus = $(if ($compliant) { 'Running' } else { 'Stopped' })
+    Shell = $(if ($compliant) { 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' } else { '' }); Deny = $(if ($compliant) { 0 } else { 1 }) }
+$ok = @('100.64.0.0/255.192.0.0', 'fd7a:115c:a1e0::/48'); $ad = $(if ($compliant) { $ok } else { @('Any') })
+$g = '@FirewallAPI.dll,-28752'
+$global:Rules = @{
+    'OpenSSH-Server-In-TCP' = @{ Port = '22'; Proto = 'TCP'; Group = ''; Enabled = 'True'; Addr = $ad }
+    'RemoteDesktop-UserMode-In-TCP' = @{ Port = '3389'; Proto = 'TCP'; Group = $g; Enabled = 'True'; Addr = $ad }
+    'RemoteDesktop-UserMode-In-UDP' = @{ Port = '3389'; Proto = 'UDP'; Group = $g; Enabled = $(if ($compliant) { 'True' } else { 'False' }); Addr = $ad }
+    'RemoteDesktop-Shadow-In-TCP' = @{ Port = 'Any'; Proto = 'TCP'; Group = $g; Enabled = 'True'; Addr = $ad }
+    'Custom-3389' = @{ Port = '3389'; Proto = 'TCP'; Group = ''; Enabled = 'True'; Addr = $ad }
+}
+if ($compliant) {
+    $global:Rules['my-win-kit-Tailnet-Ping-v4'] = @{ Port = ''; Proto = 'ICMPv4'; Group = ''; Enabled = 'True'; Addr = $ok }
+    $global:Rules['my-win-kit-Tailnet-Ping-v6'] = @{ Port = ''; Proto = 'ICMPv6'; Group = ''; Enabled = 'True'; Addr = $ok }
+}
+function New-R($n) { [pscustomobject]@{ Name = $n; Direction = 'Inbound'; Action = 'Allow'; Enabled = $global:Rules[$n].Enabled } }
+function Get-NetAdapter { [CmdletBinding()] param() [pscustomobject]@{ InterfaceDescription = 'Tailscale Tunnel'; ifIndex = 42 } }
+function Get-NetConnectionProfile { [CmdletBinding()] param($InterfaceIndex) [pscustomobject]@{ NetworkCategory = $global:MockState.Profile } }
+function Set-NetConnectionProfile { [CmdletBinding()] param($InterfaceIndex, $NetworkCategory) $global:Calls.Add("profile $NetworkCategory"); $global:MockState.Profile = $NetworkCategory }
+function Get-Service { [CmdletBinding()] param($Name) if ($global:MockState.Sshd) { [pscustomobject]@{ Name = 'sshd'; StartType = $global:MockState.SshdStart; Status = $global:MockState.SshdStatus } } }
+function Get-WindowsCapability { [CmdletBinding()] param([switch]$Online, $Name) [pscustomobject]@{ Name = 'OpenSSH.Server~~~~0.0.1.0'; State = 'NotPresent' } }
+function Add-WindowsCapability { [CmdletBinding()] param([switch]$Online, $Name) $global:Calls.Add("capability $Name"); $global:MockState.Sshd = $true }
+function Set-Service { [CmdletBinding()] param($Name, $StartupType) $global:Calls.Add("sshd $StartupType"); $global:MockState.SshdStart = $StartupType }
+function Start-Service { [CmdletBinding()] param($Name) $global:Calls.Add('sshd start'); $global:MockState.SshdStatus = 'Running' }
+function Get-ItemProperty { [CmdletBinding()] param($Path, $Name)
+    if ($Name -eq 'DefaultShell') { if ($global:MockState.Shell) { return [pscustomobject]@{ DefaultShell = $global:MockState.Shell } }; throw 'no value' }
+    if ($Name -eq 'fDenyTSConnections') { return [pscustomobject]@{ fDenyTSConnections = $global:MockState.Deny } }
+    if ($Name -eq 'UserAuthentication') { return [pscustomobject]@{ UserAuthentication = $(if ($global:MockState.Deny -eq 0) { 1 } else { 0 }) } }
+    throw "unexpected Get-ItemProperty $Path $Name" }
+function Set-ItemProperty { [CmdletBinding()] param($Path, $Name, $Value) $global:Calls.Add("reg $Name=$Value"); if ($Name -eq 'fDenyTSConnections') { $global:MockState.Deny = $Value } }
+function New-ItemProperty { [CmdletBinding()] param($Path, $Name, $Value, $PropertyType, [switch]$Force) $global:Calls.Add("reg $Name=$Value"); $global:MockState.Shell = $Value }
+function Test-Path { [CmdletBinding()] param([Parameter(Position = 0)]$Path, $LiteralPath) $p = if ($LiteralPath) { $LiteralPath } else { $Path }; if ("$p" -like 'HKLM:*') { return $true }; Microsoft.PowerShell.Management\Test-Path -LiteralPath $p }
+function New-Item { [CmdletBinding()] param($Path, $ItemType, [switch]$Force) if ("$Path" -like 'HKLM:*') { $global:Calls.Add("regkey $Path"); return }; Microsoft.PowerShell.Management\New-Item -Path $Path -ItemType $ItemType -Force:$Force }
+function icacls.exe { $global:Calls.Add('icacls ' + ($args -join ' ')) }
+function Get-Acl { [CmdletBinding()] param($LiteralPath) [pscustomobject]@{ AreAccessRulesProtected = $compliant; Access = @() } }
+function Get-NetFirewallPortFilter { [CmdletBinding()] param($Protocol) foreach ($n in @($global:Rules.Keys)) { $r = $global:Rules[$n]; if ($r.Proto -eq $Protocol) { [pscustomobject]@{ RuleName = $n; LocalPort = $r.Port; Protocol = $r.Proto } } } }
+function Get-NetFirewallRule { [CmdletBinding()] param([Parameter(ValueFromPipeline = $true)]$InputObject, $Name, $Group)
+    process { if ($InputObject) { New-R $InputObject.RuleName } }
+    end {
+        foreach ($n in @($Name)) { if ($n -and $global:Rules.ContainsKey($n)) { New-R $n } }
+        if ($Group) { foreach ($n in @($global:Rules.Keys)) { if ($global:Rules[$n].Group -eq $Group) { New-R $n } } }
+    } }
+function Get-NetFirewallAddressFilter { [CmdletBinding()] param([Parameter(ValueFromPipeline = $true)]$InputObject) process { [pscustomobject]@{ RemoteAddress = $global:Rules[$InputObject.Name].Addr } } }
+function Set-NetFirewallRule { [CmdletBinding()] param($Name, $Group, $RemoteAddress, $Enabled)
+    $t = if ($Name) { @($Name) } else { @($global:Rules.Keys | Where-Object { $global:Rules[$_].Group -eq $Group }) }
+    foreach ($x in $t) { if ($RemoteAddress) { $global:Calls.Add("fw $x addr " + (@($RemoteAddress) -join ',')); $global:Rules[$x].Addr = @($RemoteAddress) }; if ($Enabled) { $global:Rules[$x].Enabled = "$Enabled" } } }
+function New-NetFirewallRule { [CmdletBinding()] param($Name, $DisplayName, $Direction, $Protocol, $LocalPort, $IcmpType, $Action, $Profile, $RemoteAddress)
+    $global:Calls.Add("fw new $Name addr " + (@($RemoteAddress) -join ',')); $global:Rules[$Name] = @{ Port = "$LocalPort"; Proto = $Protocol; Group = ''; Enabled = 'True'; Addr = @($RemoteAddress) } }
+function Enable-NetFirewallRule { [CmdletBinding()] param($Group) $global:Calls.Add('fw enable group'); foreach ($n in @($global:Rules.Keys)) { if ($global:Rules[$n].Group -eq $Group) { $global:Rules[$n].Enabled = 'True' } } }
+'@
+function Invoke-TailnetMock([string]$Scenario) {
+    $dir = Join-Path $env:TEMP ('my-win-kit-tailnet-mock-' + [guid]::NewGuid().ToString('N'))
+    $pd = Join-Path $dir 'ProgramData'; New-Item -ItemType Directory -Path (Join-Path $pd 'ssh') -Force | Out-Null
+    $kf = Join-Path $pd 'ssh\administrators_authorized_keys'
+    if ($Scenario -eq 'done') { [IO.File]::WriteAllText($kf, ((@('ssh-rsa AAAAEXISTING kept@laptop') + $tKeys) -join "`r`n") + "`r`n") }
+    else { [IO.File]::WriteAllText($kf, "ssh-rsa AAAAEXISTING kept@laptop`r`n") }
+    $res = Join-Path $dir 'result.json'; $calls = Join-Path $dir 'calls.txt'
+    $body = Get-KitTailnetAdminScript -Config $tcfg -ResultFile $res
+    $i = $body.LastIndexOf("`nexit 0")
+    $body = $body.Substring(0, $i) + "`n[IO.File]::WriteAllLines(`$CallsFile, [string[]]@(`$global:Calls))`nexit 0`n"
+    $f = Join-Path $dir 'harness.ps1'
+    [IO.File]::WriteAllText($f, $tailnetMocks + "`n`$env:ProgramData = '$pd'`n" + $body)
+    $o = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $f -Scenario $Scenario -CallsFile $calls 2>&1 | Out-String
+    $r = @{ Ec = $LASTEXITCODE; Out = $o; Steps = @{}; Calls = @(); Keys = @() }
+    if (Test-Path -LiteralPath $res) { $arr = [IO.File]::ReadAllText($res) | ConvertFrom-Json; foreach ($x in @($arr)) { $r.Steps[[string]$x.Step] = "$($x.Status): $($x.Detail)" } }
+    if (Test-Path -LiteralPath $calls) { $r.Calls = @([IO.File]::ReadAllLines($calls)) }
+    $r.Keys = @([IO.File]::ReadAllLines($kf) | Where-Object { $_.Trim() })
+    Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+    return $r
+}
+$mf = Invoke-TailnetMock 'fresh'
+$st = $mf.Steps
+Check ($mf.Ec -eq 0 -and $st.Count -eq 7) "mocked fresh PC: the admin script ran all 7 steps (exit $($mf.Ec))$(if ($mf.Ec -ne 0 -or $st.Count -ne 7) { ': ' + $mf.Out.Trim() })"
+Check (-not @($st.Values | Where-Object { $_ -notlike 'done:*' }).Count) ("mocked fresh PC: every step done -> " + ((@($st.PSBase.Keys | Sort-Object) | ForEach-Object { "$_=$($st[$_])" }) -join ' | '))
+Check ($mf.Calls -contains 'profile Private' -and $mf.Calls -contains 'sshd Automatic' -and $mf.Calls -contains 'sshd start' -and @($mf.Calls | Where-Object { $_ -like 'capability OpenSSH.Server*' }).Count -eq 1 -and $mf.Calls -contains 'reg fDenyTSConnections=0' -and $mf.Calls -contains 'reg UserAuthentication=1') 'mocked fresh PC: network Private, OpenSSH installed + automatic + started, RDP on with NLA'
+$fwAddr = @($mf.Calls | Where-Object { $_ -match ' addr ' })
+Check ($fwAddr.Count -ge 6 -and -not @($fwAddr | Where-Object { $_ -notmatch ' addr 100\.64\.0\.0/10,fd7a:115c:a1e0::/48$' }).Count) "mocked fresh PC: all $($fwAddr.Count) firewall changes use exactly the tailnet ranges (SSH, RDP group, the stray 3389 rule, ping)"
+Check (@($fwAddr | Where-Object { $_ -like 'fw OpenSSH-Server-In-TCP *' }).Count -eq 1 -and @($fwAddr | Where-Object { $_ -like 'fw Custom-3389 *' }).Count -eq 1 -and @($fwAddr | Where-Object { $_ -like 'fw new my-win-kit-Tailnet-Ping-v4 *' }).Count -eq 1) 'mocked fresh PC: the existing SSH rule and an unrelated 3389 rule limited too, ping rules created'
+Check ($mf.Keys.Count -eq (1 + $tKeys.Count) -and $mf.Keys[0] -eq 'ssh-rsa AAAAEXISTING kept@laptop' -and @($mf.Calls | Where-Object { $_ -like 'icacls *' }).Count -ge 1) "mocked fresh PC: keys file keeps its line and gains the $($tKeys.Count) keys; ACL set with icacls"
+$md = Invoke-TailnetMock 'done'
+Check ($md.Ec -eq 0 -and $md.Steps.Count -eq 7 -and -not @($md.Steps.Values | Where-Object { $_ -notlike 'already:*' }).Count -and $md.Calls.Count -eq 0 -and $md.Keys.Count -eq (1 + $tKeys.Count)) "mocked finished PC: every step 'already', nothing changed ($($md.Calls.Count) calls)$(if ($md.Calls.Count) { ': ' + ($md.Calls -join ' | ') + ' / ' + ((@($md.Steps.PSBase.Keys | Sort-Object) | ForEach-Object { "$_=$($md.Steps[$_])" }) -join ' | ') })"
+
+$keepTsExe = $env:MYWINKIT_TAILSCALE_EXE; $env:MYWINKIT_TAILSCALE_EXE = Join-Path $env:TEMP 'my-win-kit-no-tailscale\tailscale.exe'
+try {
+    Check ($null -eq (Get-KitDetect -Name 'tailnet')) 'detect: no Tailscale -> not set up (no child process)'
+    $tr = Invoke-KitPackage -Package $tn -DryRun
+    Check ($tr.Status -eq 'dryrun' -and $tr.Detail.Contains('would set: Tailscale, sign-in')) "dry run lists the steps, changes nothing: $($tr.Detail)"
+} finally { $env:MYWINKIT_TAILSCALE_EXE = $keepTsExe }
 $psRel = '{ "tag_name": "v7.7.0", "assets": [ { "name": "PowerShell-7.7.0-win-x64.zip", "size": 1, "browser_download_url": "https://github.com/PowerShell/PowerShell/releases/download/v7.7.0/PowerShell-7.7.0-win-x64.zip" }, { "name": "PowerShell-7.7.0.msixbundle", "size": 120000000, "browser_download_url": "https://github.com/PowerShell/PowerShell/releases/download/v7.7.0/PowerShell-7.7.0.msixbundle" }, { "name": "PowerShellPreview-7.8.0-preview.1.msixbundle", "size": 1, "browser_download_url": "https://example.invalid/p.msixbundle" } ] }'
 $ms = Get-KitPwshMsixAsset -Json $psRel
 Check ($ms.Tag -eq 'v7.7.0' -and $ms.Name -eq 'PowerShell-7.7.0.msixbundle' -and $ms.Url -eq 'https://github.com/PowerShell/PowerShell/releases/download/v7.7.0/PowerShell-7.7.0.msixbundle') "PowerShell 7: the .msixbundle from the GitHub API answer ($($ms.Name))"

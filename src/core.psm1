@@ -10,7 +10,7 @@
     Install methods: winget, msstore, script (vendor one-liner, run in a
     CHILD process so a vendor `exit` cannot close the menu), direct (latest
     installer resolved from the vendor's download page + Authenticode check),
-    npm, builtin (enable-rdp, dev-folder, wsl-ubuntu). NoAdmin packages run
+    npm, builtin (enable-rdp, dev-folder, wsl-ubuntu, tailnet). NoAdmin packages run
     at the signed-in user's normal rights when the kit is elevated
     (Invoke-KitDeElevated: one-shot scheduled task, RunLevel LUA).
 
@@ -24,7 +24,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:KitVersion  = '2.8.5'   # bump with user-visible changes (shown in the menu banner)
+$script:KitVersion  = '2.8.6'   # bump with user-visible changes (shown in the menu banner)
 $script:KitRoot     = $null
 $script:BaseData    = $null
 $script:Catalog     = @()
@@ -112,7 +112,7 @@ function ConvertTo-KitPackage($h, [hashtable]$Order, [string]$Origin = 'config')
 
 $script:Repo = if ($env:MYWINKIT_REPO) { $env:MYWINKIT_REPO } else { '1nst4ll/my-win-kit' }
 $script:Branch = if ($env:MYWINKIT_BRANCH) { $env:MYWINKIT_BRANCH } else { 'main' }
-$script:ConfigFiles = @('catalog.json', 'settings.json', 'winget-id-overrides.json', 'terminal.json')
+$script:ConfigFiles = @('catalog.json', 'settings.json', 'winget-id-overrides.json', 'terminal.json', 'tailnet.json')
 $script:Config = @{}          # file name -> parsed document (ordered hashtables)
 $script:ConfigSource = @{}    # file name -> @{ Kind = github|cache|bundled|default; Detail }
 $script:Warnings = [System.Collections.Generic.List[string]]::new()
@@ -193,6 +193,13 @@ function Test-KitConfigDoc([string]$Name, $Doc) {
         if (@($Doc['Packages']).Count -lt 1) { throw 'catalog.json has no packages' }
     }
     if ($Name -eq 'terminal.json' -and -not $Doc['defaultProfile']) { throw 'terminal.json needs defaultProfile' }
+    if ($Name -eq 'tailnet.json') {
+        # a wide-open range would expose SSH/RDP: a bad copy on GitHub falls back to the cache / bundled copy
+        $al = @($Doc['allowFrom'] | Where-Object { "$_" })
+        if (-not $al.Count) { throw 'tailnet.json needs allowFrom' }
+        foreach ($a in $al) { if ($script:TailnetWide -contains "$a".Trim().ToLowerInvariant()) { throw "tailnet.json allowFrom must not contain '$a'" } }
+        foreach ($k in @($Doc['authorizedKeys'])) { if ("$k" -notmatch '^(ssh-|ecdsa-|sk-)\S+ [A-Za-z0-9+/=]+$') { throw 'tailnet.json authorizedKeys: public keys only, as "<type> <base64>" (no comments)' } }
+    }
     return $true
 }
 
@@ -1228,17 +1235,20 @@ function Invoke-KitCommandLine {
 }
 
 $script:RdpFirewallGroup = '@FirewallAPI.dll,-28752'   # the "Remote Desktop" rule group, by its resource string (same on every Windows language)
+# RDP on with Network Level Authentication (shared by Enable RDP Host and the Tailnet setup)
+$script:RdpEnableLines = @"
+    Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
+    Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 1
+"@
 
 function Get-KitEnableRdpScript {
     <# The script the RDP helper runs (elevated). The firewall group is named by its resource string, so Polish Windows works too. #>
     return @"
 `$ErrorActionPreference = 'Stop'
 try {
-    Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
-    Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 1
+$($script:RdpEnableLines)
     Enable-NetFirewallRule -Group '$($script:RdpFirewallGroup)'
-    # Lock RDP to the Tailscale range (uncomment to use):
-    # Set-NetFirewallRule -Group '$($script:RdpFirewallGroup)' -RemoteAddress 100.64.0.0/10
+    # The Tailnet setup (catalogue Id 63) also limits these rules to the tailnet.
     exit 0
 } catch { exit 1 }
 "@
@@ -1266,6 +1276,488 @@ function Invoke-KitEnableRdp {
         if ($ip) { $detail += ", Tailscale IP $ip" }
     }
     return @{ Ec = [int]$ec; Detail = $detail }
+}
+
+# ---------------------------------------------------------------- tailnet setup (catalogue Id 63, config/tailnet.json)
+# Tailscale unattended + signed in, the Tailscale network Private, OpenSSH Server with key
+# login, RDP on, and SSH / RDP / ping reachable ONLY from config/tailnet.json allowFrom.
+# Every step is idempotent. The admin part runs as one elevated script that writes a
+# result per step; the read-only state check (Get-KitTailnetState) also serves detection.
+
+$script:TailnetWide = @('any', '*', '0.0.0.0/0', '::/0', 'internet', 'localsubnet', 'localsubnet4', 'localsubnet6', 'intranet', 'defaultgateway')
+$script:TailnetRuleSsh  = 'my-win-kit-Tailnet-SSH-In'
+$script:TailnetRulePing = 'my-win-kit-Tailnet-Ping'
+$script:TailnetStepName = @{ tailscale = 'Tailscale'; signin = 'sign-in'; prefs = 'Tailscale options'; network = 'network Private'; sshd = 'OpenSSH'
+    shell = 'SSH shell'; keys = 'SSH keys'; 'firewall-ssh' = 'SSH firewall'; rdp = 'RDP'; ping = 'ping'; admin = 'admin steps' }
+function Get-KitTailnetStepName([string]$Step) { if ($script:TailnetStepName.ContainsKey($Step)) { return $script:TailnetStepName[$Step] }; return $Step }
+
+function ConvertTo-KitCidr {
+    <#
+    One firewall address in a comparable form: 100.64.0.0/10 and the way Windows
+    stores it (100.64.0.0/255.192.0.0) both become 100.64.0.0/10; IPv6 lower-case.
+    #>
+    param([string]$Address)
+    $a = "$Address".Trim().ToLowerInvariant()
+    $m = [regex]::Match($a, '^(\d+\.\d+\.\d+\.\d+)/(\d+\.\d+\.\d+\.\d+)$')
+    if ($m.Success) {
+        $bits = 0
+        foreach ($o in ($m.Groups[2].Value -split '\.')) { $n = [int]$o; while ($n -gt 0) { $bits += ($n -band 1); $n = $n -shr 1 } }
+        return "$($m.Groups[1].Value)/$bits"
+    }
+    return $a
+}
+
+function Test-KitTailnetAddresses {
+    <# A rule's RemoteAddress list is exactly allowFrom (order and notation ignored). #>
+    param([string[]]$Actual, [string[]]$Allow)
+    $x = @(@($Actual) | Where-Object { "$_" } | ForEach-Object { ConvertTo-KitCidr $_ } | Sort-Object -Unique)
+    $y = @(@($Allow) | Where-Object { "$_" } | ForEach-Object { ConvertTo-KitCidr $_ } | Sort-Object -Unique)
+    if (-not $y.Count -or $x.Count -ne $y.Count) { return $false }
+    for ($i = 0; $i -lt $x.Count; $i++) { if ($x[$i] -ne $y[$i]) { return $false } }
+    return $true
+}
+
+function Merge-KitAuthorizedKeys {
+    <#
+    authorized_keys lines + the keys from config that are missing. A key is its
+    type + base64 part (options and comments ignored). Existing lines are never
+    removed or changed. Returns @{ Lines; Added }.
+    #>
+    param([string[]]$Existing = @(), [string[]]$Keys = @())
+    function Get-KeyId([string]$Line) {
+        $t = @("$Line".Trim() -split '\s+')
+        if ("$Line".Trim().StartsWith('#')) { return $null }
+        for ($i = 0; $i -lt $t.Count - 1; $i++) { if ($t[$i] -match '^(ssh-|ecdsa-|sk-)') { return ($t[$i] + ' ' + $t[$i + 1]) } }
+        return $null
+    }
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $have = @{}
+    foreach ($l in @($Existing)) {
+        if ($null -eq $l) { continue }
+        $lines.Add([string]$l)
+        $id = Get-KeyId $l; if ($id) { $have[$id] = $true }
+    }
+    while ($lines.Count -and -not $lines[$lines.Count - 1].Trim()) { $lines.RemoveAt($lines.Count - 1) }
+    $added = 0
+    foreach ($k in @($Keys)) {
+        $id = Get-KeyId $k
+        if (-not $id -or $have.ContainsKey($id)) { continue }
+        $lines.Add($id); $have[$id] = $true; $added++
+    }
+    return @{ Lines = @($lines); Added = $added }
+}
+
+function Get-KitTailnetConfig {
+    <# config/tailnet.json (read at start: GitHub -> cache -> bundled), or $null when there is none. #>
+    $d = $null
+    if ($script:Config.ContainsKey('tailnet.json')) { $d = $script:Config['tailnet.json'] }
+    if ($d -is [System.Collections.IDictionary] -and $d.Contains('allowFrom') -and @($d['allowFrom']).Count) { return $d }
+    return $null
+}
+
+function Get-KitTailscaleExe {
+    if ($env:MYWINKIT_TAILSCALE_EXE) { return $env:MYWINKIT_TAILSCALE_EXE }   # tests: a missing path = not installed
+    return (Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe')
+}
+
+function Get-KitTailscaleStatus {
+    <# tailscale status --json + debug prefs (read-only, 15 s limit each): @{ Backend; Ip; DnsName; Prefs } ($null fields = unknown). #>
+    $exe = Get-KitTailscaleExe
+    $s = @{ Backend = $null; Ip = $null; DnsName = $null; Prefs = $null }
+    if (-not (Test-Path -LiteralPath $exe)) { return $s }
+    try {
+        $r = Invoke-KitProcess -FilePath $exe -ArgumentList @('status', '--json') -TimeoutSec 15
+        $j = (@($r.Out) -join "`n") | ConvertFrom-Json
+        $s.Backend = [string](Get-KitProp $j 'BackendState')
+        $ips = @(Get-KitProp $j 'TailscaleIPs' | Where-Object { "$_" -match '^\d+\.\d+\.\d+\.\d+$' })
+        if ($ips.Count) { $s.Ip = [string]$ips[0] }
+        $self = Get-KitProp $j 'Self'
+        if ($self) { $dn = [string](Get-KitProp $self 'DNSName'); if ($dn) { $s.DnsName = $dn.TrimEnd('.') } }
+    } catch {}
+    try {
+        $r = Invoke-KitProcess -FilePath $exe -ArgumentList @('debug', 'prefs') -TimeoutSec 15
+        $p = (@($r.Out) -join "`n") | ConvertFrom-Json
+        $au = Get-KitProp $p 'AutoUpdate'
+        $s.Prefs = @{
+            unattended = [bool](Get-KitProp $p 'ForceDaemon'); acceptRoutes = [bool](Get-KitProp $p 'RouteAll')
+            exitNodeAllowLan = [bool](Get-KitProp $p 'ExitNodeAllowLANAccess'); autoUpdate = [bool](Get-KitProp $au 'Apply')
+        }
+    } catch {}
+    return $s
+}
+
+function Get-KitTailnetState {
+    <#
+    What this PC has now, read-only and without administrator rights. Fields that
+    cannot be read here are $null (unknown); Test-KitTailnetState skips them. The
+    authorized keys file is readable only as administrator.
+    #>
+    param($Config)
+    $st = @{ TsInstalled = $false; Backend = $null; Ip = $null; DnsName = $null; Prefs = $null; NetCategory = $null
+             SshdPresent = $null; SshdAuto = $null; SshdRunning = $null; DefaultShell = $null; KeysMissing = $null
+             SshFw = $null; RdpOn = $null; RdpFw = $null; PingFw = $null }
+    $st.TsInstalled = Test-Path -LiteralPath (Get-KitTailscaleExe)
+    if ($st.TsInstalled) {
+        $t = Get-KitTailscaleStatus
+        $st.Backend = $t.Backend; $st.Ip = $t.Ip; $st.DnsName = $t.DnsName; $st.Prefs = $t.Prefs
+        try {
+            $ad = @(Get-NetAdapter -ErrorAction Stop | Where-Object { "$($_.InterfaceDescription)" -like 'Tailscale*' })
+            if ($ad.Count) { $np = @(Get-NetConnectionProfile -InterfaceIndex $ad[0].ifIndex -ErrorAction SilentlyContinue); if ($np.Count) { $st.NetCategory = [string]$np[0].NetworkCategory } }
+        } catch {}
+    }
+    $allow = @(); if ($Config) { $allow = @($Config['allowFrom']) }
+    try {
+        $svc = Get-Service -Name sshd -ErrorAction SilentlyContinue
+        $st.SshdPresent = [bool]$svc
+        if ($svc) { $st.SshdAuto = ("$($svc.StartType)" -eq 'Automatic'); $st.SshdRunning = ("$($svc.Status)" -eq 'Running') }
+    } catch {}
+    try { $st.DefaultShell = [string](Get-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -ErrorAction Stop).DefaultShell } catch { $st.DefaultShell = '' }
+    $kf = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'
+    if ($Config) {
+        try {
+            if (Test-Path -LiteralPath $kf) { $st.KeysMissing = (Merge-KitAuthorizedKeys -Existing ([IO.File]::ReadAllLines($kf)) -Keys @($Config['authorizedKeys'])).Added }
+            else { $st.KeysMissing = @($Config['authorizedKeys']).Count }
+        } catch { $st.KeysMissing = $null }   # not readable without admin
+    }
+    try {
+        # enabled inbound allow rules for SSH, found by their language-neutral Name
+        $ssh = @(Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP', 'sshd', $script:TailnetRuleSsh -ErrorAction SilentlyContinue | Where-Object { "$($_.Enabled)" -eq 'True' -and "$($_.Direction)" -eq 'Inbound' -and "$($_.Action)" -eq 'Allow' })
+        if ($ssh.Count) { $st.SshFw = -not @($ssh | Where-Object { -not (Test-KitTailnetAddresses -Actual @(($_ | Get-NetFirewallAddressFilter).RemoteAddress) -Allow $allow) }).Count } else { $st.SshFw = $false }
+        $rdp = @(Get-NetFirewallRule -Group $script:RdpFirewallGroup -ErrorAction SilentlyContinue)
+        if ($rdp.Count) { $st.RdpFw = -not @($rdp | Where-Object { "$($_.Enabled)" -ne 'True' -or -not (Test-KitTailnetAddresses -Actual @(($_ | Get-NetFirewallAddressFilter).RemoteAddress) -Allow $allow) }).Count } else { $st.RdpFw = $false }
+        $png = @(Get-NetFirewallRule -Name "$($script:TailnetRulePing)-v4", "$($script:TailnetRulePing)-v6" -ErrorAction SilentlyContinue | Where-Object { "$($_.Enabled)" -eq 'True' })
+        $st.PingFw = ($png.Count -eq 2 -and -not @($png | Where-Object { -not (Test-KitTailnetAddresses -Actual @(($_ | Get-NetFirewallAddressFilter).RemoteAddress) -Allow $allow) }).Count)
+    } catch {}
+    try { $st.RdpOn = ((Get-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -ErrorAction Stop).fDenyTSConnections -eq 0) } catch {}
+    return $st
+}
+
+function Test-KitTailnetState {
+    <#
+    The setup steps against a state (Get-KitTailnetState, or a stub in tests):
+    one row per step, Ok = $true (holds) / $false (needs work) / $null (unknown here).
+    #>
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)]$Config)
+    $ts = $Config['tailscale']; if (-not ($ts -is [System.Collections.IDictionary])) { $ts = @{} }
+    $rows = [System.Collections.Generic.List[object]]::new()
+    function Row([string]$Step, $Ok, [string]$Label) { $rows.Add([pscustomobject]@{ Step = $Step; Ok = $Ok; Label = $Label }) }
+    Row 'tailscale' ([bool]$State['TsInstalled']) 'Tailscale installed'
+    $bk = $State['Backend']
+    Row 'signin' $(if (-not $State['TsInstalled']) { $false } elseif ($null -eq $bk) { $null } else { $bk -eq 'Running' }) 'signed in to the tailnet'
+    $pr = $State['Prefs']; $prOk = $null
+    if (-not $State['TsInstalled']) { $prOk = $false }
+    elseif ($pr) { $prOk = $true; foreach ($k in 'unattended', 'acceptRoutes', 'exitNodeAllowLan', 'autoUpdate') { if ($ts[$k] -and -not $pr[$k]) { $prOk = $false } } }
+    Row 'prefs' $prOk 'Tailscale options (unattended, routes, LAN, auto-update)'
+    $nc = $State['NetCategory']
+    Row 'network' $(if (-not $State['TsInstalled']) { $false } elseif ($null -eq $nc) { $null } else { $nc -in 'Private', 'DomainAuthenticated' }) 'Tailscale network is Private'
+    $sp = $State['SshdPresent']
+    Row 'sshd' $(if ($null -eq $sp) { $null } else { [bool]($sp -and $State['SshdAuto'] -and $State['SshdRunning']) }) 'OpenSSH Server running, starts with Windows'
+    $want = [string]$Config['sshDefaultShell']
+    Row 'shell' $(if (-not $want) { $true } elseif ($null -eq $State['DefaultShell']) { $null } else { $State['DefaultShell'] -eq $want }) 'SSH login shell'
+    $km = $State['KeysMissing']
+    Row 'keys' $(if ($null -eq $km) { $null } else { $km -eq 0 }) 'SSH keys trusted for admin login'
+    $sf = $State['SshFw']
+    Row 'firewall-ssh' $(if ($null -eq $sf) { $null } else { [bool]$sf }) 'SSH (22) only from the tailnet'
+    if ($Config['enableRdp']) {
+        $ro = $State['RdpOn']; $rf = $State['RdpFw']
+        Row 'rdp' $(if ($null -eq $ro -or $null -eq $rf) { $null } else { [bool]($ro -and $rf) }) 'Remote Desktop on, only from the tailnet'
+    }
+    if ($Config['allowPing']) {
+        $pf = $State['PingFw']
+        Row 'ping' $(if ($null -eq $pf) { $null } else { [bool]$pf }) 'ping from the tailnet'
+    }
+    return @($rows)
+}
+
+function ConvertTo-KitPsArray([string[]]$Items) {
+    <# @('a','b') for a generated script (single quotes doubled). #>
+    return '@(' + ((@($Items) | ForEach-Object { "'" + ("$_" -replace "'", "''") + "'" }) -join ', ') + ')'
+}
+
+function Get-KitTailnetAdminScript {
+    <#
+    The script the Tailnet setup runs as administrator: network profile, OpenSSH
+    Server + login shell, authorized keys (add only; ACL Administrators + SYSTEM),
+    firewall (every inbound allow rule for TCP 22 and TCP/UDP 3389, the Remote
+    Desktop group, ping) limited to allowFrom, RDP on. One result per step goes to
+    -ResultFile as JSON. Never sets a rule to Any.
+    #>
+    param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)][string]$ResultFile)
+    $allow = @($Config['allowFrom'] | ForEach-Object { [string]$_ })
+    foreach ($a in $allow) { if ($script:TailnetWide -contains $a.Trim().ToLowerInvariant()) { throw "tailnet.json allowFrom must not contain '$a'" } }
+    if (-not $allow.Count) { throw 'tailnet.json allowFrom is empty' }
+    $keys = @($Config['authorizedKeys'] | ForEach-Object { [string]$_ })
+    $shell = [string]$Config['sshDefaultShell']
+    $mergeDef = (Get-Command Merge-KitAuthorizedKeys).Definition
+    $cidrDef = (Get-Command ConvertTo-KitCidr).Definition
+    $addrDef = (Get-Command Test-KitTailnetAddresses).Definition
+    return @"
+`$ErrorActionPreference = 'Stop'
+`$allow = $(ConvertTo-KitPsArray $allow)
+`$keys = $(ConvertTo-KitPsArray $keys)
+`$shell = '$($shell -replace "'", "''")'
+`$enableRdp = `$$([bool]$Config['enableRdp'])
+`$allowPing = `$$([bool]$Config['allowPing'])
+`$rdpGroup = '$($script:RdpFirewallGroup)'
+`$res = [System.Collections.Generic.List[object]]::new()
+function Add-Res([string]`$Step, [string]`$Status, [string]`$Detail) { `$res.Add([pscustomobject]@{ Step = `$Step; Status = `$Status; Detail = `$Detail }) }
+function Merge-KitAuthorizedKeys {
+$mergeDef
+}
+function ConvertTo-KitCidr {
+$cidrDef
+}
+function Test-KitTailnetAddresses {
+$addrDef
+}
+function Test-Limited(`$Rule) { return (Test-KitTailnetAddresses -Actual @((`$Rule | Get-NetFirewallAddressFilter).RemoteAddress) -Allow `$allow) }
+function Limit-InboundPort([int]`$Port, [string[]]`$Protocols) {
+    # every enabled inbound allow rule for this port -> RemoteAddress = allowFrom; returns how many changed
+    `$n = 0
+    foreach (`$pr in `$Protocols) {
+        `$pf = @(Get-NetFirewallPortFilter -Protocol `$pr -ErrorAction SilentlyContinue | Where-Object { @(`$_.LocalPort) -contains "`$Port" })
+        foreach (`$r in @(`$pf | Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { "`$(`$_.Direction)" -eq 'Inbound' -and "`$(`$_.Action)" -eq 'Allow' -and "`$(`$_.Enabled)" -eq 'True' })) {
+            if (-not (Test-Limited `$r)) { Set-NetFirewallRule -Name `$r.Name -RemoteAddress `$allow; `$n++ }
+        }
+    }
+    return `$n
+}
+
+# network: the Tailscale adapter's network is Private (never Public)
+try {
+    `$ad = @(Get-NetAdapter | Where-Object { "`$(`$_.InterfaceDescription)" -like 'Tailscale*' })
+    if (-not `$ad.Count) { Add-Res 'network' 'failed' 'no Tailscale network adapter (is Tailscale running?)' }
+    else {
+        `$np = @(Get-NetConnectionProfile -InterfaceIndex `$ad[0].ifIndex -ErrorAction SilentlyContinue)
+        if (-not `$np.Count) { Add-Res 'network' 'failed' 'the Tailscale network is not connected yet' }
+        elseif ("`$(`$np[0].NetworkCategory)" -in 'Private', 'DomainAuthenticated') { Add-Res 'network' 'already' 'Private' }
+        else { Set-NetConnectionProfile -InterfaceIndex `$ad[0].ifIndex -NetworkCategory Private; Add-Res 'network' 'done' "was `$(`$np[0].NetworkCategory), now Private" }
+    }
+} catch { Add-Res 'network' 'failed' `$_.Exception.Message }
+
+# sshd: OpenSSH Server present, starts with Windows, running; login shell
+try {
+    `$n = @()
+    if (-not (Get-Service -Name sshd -ErrorAction SilentlyContinue)) {
+        foreach (`$c in @(Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Where-Object { "`$(`$_.State)" -ne 'Installed' })) { Add-WindowsCapability -Online -Name `$c.Name | Out-Null }
+        `$n += 'OpenSSH Server installed'
+    }
+    `$svc = Get-Service -Name sshd
+    if ("`$(`$svc.StartType)" -ne 'Automatic') { Set-Service -Name sshd -StartupType Automatic; `$n += 'starts with Windows' }
+    if ("`$(`$svc.Status)" -ne 'Running') { Start-Service -Name sshd; `$n += 'started' }
+    if (`$n.Count) { Add-Res 'sshd' 'done' (`$n -join ', ') } else { Add-Res 'sshd' 'already' 'running' }
+} catch { Add-Res 'sshd' 'failed' `$_.Exception.Message }
+try {
+    if (-not `$shell) { Add-Res 'shell' 'already' 'not set by config' }
+    else {
+        `$cur = ''; try { `$cur = [string](Get-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell).DefaultShell } catch {}
+        if (`$cur -eq `$shell) { Add-Res 'shell' 'already' `$shell }
+        else {
+            if (-not (Test-Path 'HKLM:\SOFTWARE\OpenSSH')) { New-Item -Path 'HKLM:\SOFTWARE\OpenSSH' -Force | Out-Null }
+            New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -Value `$shell -PropertyType String -Force | Out-Null
+            Add-Res 'shell' 'done' `$shell
+        }
+    }
+} catch { Add-Res 'shell' 'failed' `$_.Exception.Message }
+
+# keys: add the missing ones (existing lines kept); ACL Administrators + SYSTEM only, no inheritance
+try {
+    `$dir = Join-Path `$env:ProgramData 'ssh'; `$f = Join-Path `$dir 'administrators_authorized_keys'
+    if (-not (Test-Path -LiteralPath `$dir)) { New-Item -ItemType Directory -Path `$dir -Force | Out-Null }
+    `$old = @(); if (Test-Path -LiteralPath `$f) { `$old = @([IO.File]::ReadAllLines(`$f)) }
+    `$merged = Merge-KitAuthorizedKeys -Existing `$old -Keys `$keys
+    `$n = @()
+    if (`$merged.Added -gt 0 -or -not (Test-Path -LiteralPath `$f)) {
+        [IO.File]::WriteAllText(`$f, ((@(`$merged.Lines) -join "``r``n") + "``r``n"), (New-Object Text.UTF8Encoding `$false))
+        `$n += "`$(`$merged.Added) key(s) added"
+    }
+    `$acl = Get-Acl -LiteralPath `$f
+    `$okSid = @('S-1-5-32-544', 'S-1-5-18')
+    `$other = @(`$acl.Access | ForEach-Object { try { `$_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } catch { "`$(`$_.IdentityReference)" } } | Where-Object { `$okSid -notcontains `$_ } | Sort-Object -Unique)
+    if (-not `$acl.AreAccessRulesProtected -or `$other.Count) {
+        & icacls.exe `$f /inheritance:r /grant:r '*S-1-5-32-544:F' '*S-1-5-18:F' | Out-Null
+        foreach (`$o in `$other) { & icacls.exe `$f /remove:g "*`$o" | Out-Null }
+        `$n += 'access limited to Administrators + SYSTEM'
+    }
+    if (`$n.Count) { Add-Res 'keys' 'done' (`$n -join ', ') } else { Add-Res 'keys' 'already' "`$(@(`$keys).Count) key(s) present" }
+} catch { Add-Res 'keys' 'failed' `$_.Exception.Message }
+
+# firewall-ssh: every inbound allow rule for TCP 22 -> allowFrom; a rule of our own if there is none
+try {
+    `$c = Limit-InboundPort 22 @('TCP')
+    `$any = @(Get-NetFirewallPortFilter -Protocol TCP -ErrorAction SilentlyContinue | Where-Object { @(`$_.LocalPort) -contains '22' } | Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { "`$(`$_.Direction)" -eq 'Inbound' -and "`$(`$_.Action)" -eq 'Allow' -and "`$(`$_.Enabled)" -eq 'True' })
+    if (-not `$any.Count) {
+        New-NetFirewallRule -Name '$($script:TailnetRuleSsh)' -DisplayName 'my-win-kit: SSH from the tailnet' -Direction Inbound -Protocol TCP -LocalPort 22 -Action Allow -Profile Any -RemoteAddress `$allow | Out-Null
+        `$c++
+    }
+    if (`$c) { Add-Res 'firewall-ssh' 'done' "`$c rule(s) limited to the tailnet" } else { Add-Res 'firewall-ssh' 'already' 'tailnet only' }
+} catch { Add-Res 'firewall-ssh' 'failed' `$_.Exception.Message }
+
+# rdp: on with NLA, the Remote Desktop group enabled + limited; any other 3389 rule limited too
+try {
+    `$n = @()
+    if (`$enableRdp) {
+        `$was = (Get-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections).fDenyTSConnections
+        `$nla = 0; try { `$nla = (Get-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication).UserAuthentication } catch {}
+        if (`$was -ne 0 -or `$nla -ne 1) {
+$($script:RdpEnableLines)
+            `$n += 'Remote Desktop turned on (NLA)'
+        }
+        `$grp = @(Get-NetFirewallRule -Group `$rdpGroup -ErrorAction SilentlyContinue)
+        if (@(`$grp | Where-Object { "`$(`$_.Enabled)" -ne 'True' }).Count) { Enable-NetFirewallRule -Group `$rdpGroup; `$n += 'firewall group on' }
+        `$bad = @(`$grp | Where-Object { -not (Test-Limited `$_) })
+        if (`$bad.Count) { Set-NetFirewallRule -Group `$rdpGroup -RemoteAddress `$allow; `$n += "`$(`$bad.Count) group rule(s) limited" }
+    }
+    `$c = Limit-InboundPort 3389 @('TCP', 'UDP')
+    if (`$c) { `$n += "`$c other 3389 rule(s) limited" }
+    if (`$n.Count) { Add-Res 'rdp' 'done' (`$n -join ', ') } else { Add-Res 'rdp' 'already' 'on, tailnet only' }
+} catch { Add-Res 'rdp' 'failed' `$_.Exception.Message }
+
+# ping: echo requests from allowFrom (ICMPv4 type 8, ICMPv6 type 128)
+if (`$allowPing) {
+    try {
+        `$n = 0
+        foreach (`$v in @(@('v4', 'ICMPv4', '8'), @('v6', 'ICMPv6', '128'))) {
+            `$name = '$($script:TailnetRulePing)-' + `$v[0]
+            `$r = Get-NetFirewallRule -Name `$name -ErrorAction SilentlyContinue
+            if (-not `$r) { New-NetFirewallRule -Name `$name -DisplayName "my-win-kit: ping from the tailnet (`$(`$v[1]))" -Direction Inbound -Protocol `$v[1] -IcmpType `$v[2] -Action Allow -Profile Any -RemoteAddress `$allow | Out-Null; `$n++ }
+            else {
+                if ("`$(`$r.Enabled)" -ne 'True' -or -not (Test-Limited `$r)) { Set-NetFirewallRule -Name `$name -Enabled True -RemoteAddress `$allow; `$n++ }
+            }
+        }
+        if (`$n) { Add-Res 'ping' 'done' "`$n rule(s) set" } else { Add-Res 'ping' 'already' 'allowed from the tailnet' }
+    } catch { Add-Res 'ping' 'failed' `$_.Exception.Message }
+}
+
+try { [IO.File]::WriteAllText('$($ResultFile -replace "'", "''")', (ConvertTo-Json -InputObject @(`$res) -Depth 3), (New-Object Text.UTF8Encoding `$false)) } catch { exit 2 }
+exit 0
+"@
+}
+
+function Invoke-KitElevatedScript {
+    <# Run a generated PowerShell script as administrator (UAC when needed). Returns the exit code; 1223 = prompt declined. #>
+    param([Parameter(Mandatory)][string]$Body, [string]$Name = 'my-win-kit-elevated')
+    $tmp = Join-Path $env:TEMP ('{0}-{1}.ps1' -f $Name, [guid]::NewGuid().ToString('N'))
+    [IO.File]::WriteAllText($tmp, $Body, (New-Object Text.UTF8Encoding $true))
+    try {
+        if (Test-KitAdmin) { return [int](Invoke-KitProcess -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $tmp)).Ec }
+        try { $proc = Start-Process powershell.exe -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$tmp`"" -Verb RunAs -WindowStyle Hidden -PassThru -ErrorAction Stop }
+        catch { return 1223 }
+        $proc.WaitForExit(); return [int]$proc.ExitCode
+    } finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+}
+
+function Get-KitTailscaleSetArgs {
+    <# tailscale set flags from config/tailnet.json "tailscale" (only the ones switched on). #>
+    param($Config)
+    $ts = $Config['tailscale']; if (-not ($ts -is [System.Collections.IDictionary])) { $ts = @{} }
+    $a = @('set')
+    if ($ts['unattended']) { $a += '--unattended' }
+    if ($ts['acceptRoutes']) { $a += '--accept-routes' }
+    if ($ts['exitNodeAllowLan']) { $a += '--exit-node-allow-lan-access' }
+    if ($ts['autoUpdate']) { $a += '--auto-update' }
+    return $a
+}
+
+function Invoke-KitTailnetSetup {
+    <#
+    The Tailnet setup (catalogue Id 63, Interactive). Steps in order, each
+    reported and never stopping the rest needlessly: Tailscale installed
+    (catalogue Id 50), signed in (browser; the console shows the link), its
+    options set, then the admin script (network, OpenSSH, keys, firewall, RDP,
+    ping). Returns @{ Status = done|current|dryrun|failed; Detail; To; Steps }.
+    #>
+    param([switch]$DryRun, [scriptblock]$OnStatus)
+    $notify = $OnStatus
+    function Send-Note([string]$t) { if ($notify) { try { & $notify $t } catch {} } }
+    $cfg = Get-KitTailnetConfig
+    if (-not $cfg) { return @{ Status = 'failed'; Detail = 'no config/tailnet.json'; To = ''; Steps = @() } }
+    $state = Get-KitTailnetState -Config $cfg
+    $plan = @(Test-KitTailnetState -State $state -Config $cfg)
+    foreach ($row in $plan) { Write-KitLog ("  tailnet check {0,-13} {1}" -f $row.Step, $(if ($row.Ok -eq $true) { 'ok' } elseif ($row.Ok -eq $false) { 'needs work' } else { 'unknown here' })) }
+    if ($DryRun) {
+        $need = @($plan | Where-Object { $_.Ok -eq $false } | ForEach-Object { Get-KitTailnetStepName $_.Step })
+        $unk = @($plan | Where-Object { $null -eq $_.Ok } | ForEach-Object { Get-KitTailnetStepName $_.Step })
+        $parts = @()
+        if ($need.Count) { $parts += 'would set: ' + ($need -join ', ') }
+        if ($unk.Count) { $parts += 'checks as admin: ' + ($unk -join ', ') }
+        $d = if ($parts.Count) { $parts -join '; ' } else { 'already set up' }
+        return @{ Status = 'dryrun'; Detail = $d; To = ''; Steps = $plan }
+    }
+    $steps = [System.Collections.Generic.List[object]]::new()
+    function Add-Step([string]$Step, [string]$Status, [string]$Detail) { $steps.Add([pscustomobject]@{ Step = $Step; Status = $Status; Detail = $Detail }); Write-KitLog "  tailnet $Step`: $Status - $Detail" }
+    $exe = Get-KitTailscaleExe
+
+    # a. Tailscale installed (catalogue Id 50)
+    if (-not (Test-Path -LiteralPath $exe)) {
+        $tp = @($script:Catalog | Where-Object { $_.Id -eq 50 }) | Select-Object -First 1
+        if (-not $tp) { Add-Step 'tailscale' 'failed' 'Tailscale (Id 50) is not in the catalogue' }
+        else {
+            Send-Note 'installing Tailscale'
+            $r = Invoke-KitPackage -Package $tp -Mode install -OnStatus $OnStatus
+            Update-KitPath
+            if ((Test-KitResultOk $r) -and (Test-Path -LiteralPath $exe)) { Add-Step 'tailscale' 'done' 'installed' }
+            else { Add-Step 'tailscale' 'failed' "install: $($r.Status) $($r.Detail)".Trim() }
+        }
+    } else { Add-Step 'tailscale' 'already' 'installed' }
+
+    # b. signed in + options
+    if (Test-Path -LiteralPath $exe) {
+        $setArgs = Get-KitTailscaleSetArgs -Config $cfg
+        $t = Get-KitTailscaleStatus
+        if ($t.Backend -ne 'Running') {
+            Send-Note 'Tailscale sign-in: a browser opens (or open the link shown below); sign in to your tailnet, then come back'
+            if ($setArgs.Count -gt 1) { $sr = Invoke-KitProcess -FilePath $exe -ArgumentList $setArgs -TimeoutSec 30; Write-KitLog "  tailscale $($setArgs -join ' ') -> exit $($sr.Ec)" }
+            # attached to the console: the sign-in link must be visible (Interactive entry)
+            Write-KitLog '  tailscale up --timeout=300s  (console attached: browser sign-in)'
+            & $exe up --timeout=300s
+            $t = Get-KitTailscaleStatus
+            if ($t.Backend -ne 'Running') {
+                $flags = @($setArgs | Where-Object { $_ -ne 'set' -and $_ -ne '--auto-update' })
+                Write-KitLog "  tailscale up $($flags -join ' ') --timeout=300s  (second try with the flags)"
+                & $exe up @flags --timeout=300s
+                $t = Get-KitTailscaleStatus
+            }
+            if ($t.Backend -eq 'Running') { Add-Step 'signin' 'done' 'signed in' } else { Add-Step 'signin' 'failed' "not signed in (state: $($t.Backend)); run this again and finish the sign-in in the browser" }
+        } else { Add-Step 'signin' 'already' 'signed in' }
+        if ($t.Backend -eq 'Running' -and $setArgs.Count -gt 1) {
+            $before = $t.Prefs
+            $sr = Invoke-KitProcess -FilePath $exe -ArgumentList $setArgs -TimeoutSec 30
+            if ($sr.Ec -eq 0) {
+                $after = (Get-KitTailscaleStatus).Prefs
+                $same = $before -and $after -and (@('unattended', 'acceptRoutes', 'exitNodeAllowLan', 'autoUpdate') | Where-Object { $before[$_] -ne $after[$_] }).Count -eq 0
+                Add-Step 'prefs' $(if ($same) { 'already' } else { 'done' }) ($setArgs[1..($setArgs.Count - 1)] -join ' ')
+            } else { Add-Step 'prefs' 'failed' ("tailscale set exit $($sr.Ec): " + (@($sr.Err) + @($sr.Out) | Where-Object { "$_".Trim() } | Select-Object -First 1)).TrimEnd(' ', ':') }
+        }
+    }
+
+    # c-f. administrator part, one UAC prompt
+    Send-Note 'network, OpenSSH, keys, firewall, Remote Desktop (Windows asks for admin)'
+    $resFile = Join-Path $env:TEMP ('my-win-kit-tailnet-{0}.json' -f [guid]::NewGuid().ToString('N'))
+    try {
+        $ec = Invoke-KitElevatedScript -Body (Get-KitTailnetAdminScript -Config $cfg -ResultFile $resFile) -Name 'my-win-kit-tailnet'
+        Write-KitLog "  tailnet admin script exit $ec"
+        if ($ec -eq 1223) { Add-Step 'admin' 'failed' 'administrator prompt declined (network, SSH, firewall and RDP not set)' }
+        elseif (Test-Path -LiteralPath $resFile) {
+            $arr = [IO.File]::ReadAllText($resFile) | ConvertFrom-Json   # (5.1 emits a JSON array as ONE object: enumerate the variable)
+            foreach ($x in @($arr)) { Add-Step ([string]$x.Step) ([string]$x.Status) ([string]$x.Detail) }
+        } else { Add-Step 'admin' 'failed' "admin script exit $ec, no results (see log)" }
+    } finally { Remove-Item -LiteralPath $resFile -Force -ErrorAction SilentlyContinue }
+
+    # g. how to reach this PC
+    $t = Get-KitTailscaleStatus
+    $where = @()
+    if ($t.Ip) { $where += $t.Ip }
+    if ($t.DnsName) { $where += $t.DnsName; $where += "ssh $($env:USERNAME)@$(($t.DnsName -split '\.')[0])" }
+    $failed = @($steps | Where-Object Status -eq 'failed')
+    $changed = @($steps | Where-Object Status -eq 'done')
+    if ($failed.Count) {
+        $d = 'not finished: ' + (@($failed | ForEach-Object { "$(Get-KitTailnetStepName $_.Step) ($($_.Detail))" }) -join '; ')
+        return @{ Status = 'failed'; Detail = $d; To = ''; Steps = @($steps) }
+    }
+    $d = if ($changed.Count) { 'set: ' + (@($changed | ForEach-Object { Get-KitTailnetStepName $_.Step }) -join ', ') } else { 'already set up' }
+    if ($where.Count) { $d += '; ' + ($where -join ', ') }
+    return @{ Status = $(if ($changed.Count) { 'done' } else { 'current' }); Detail = $d; To = ''; Steps = @($steps) }
 }
 
 # ---------------------------------------------------------------- built-in checks and actions
@@ -1529,6 +2021,14 @@ function Get-KitDetect {
                 $sp = Join-Path $root 'venv\Lib\site-packages'
                 $di = @(Get-ChildItem -LiteralPath $sp -Directory -Filter 'hermes_agent-*.dist-info' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
                 if ($di.Count) { $v = Get-KitVersionText ($di[0].Name -replace '^hermes_agent-', '' -replace '\.dist-info$', ''); if ($v) { return $v } }
+                return ''
+            }
+            'tailnet'     {
+                # set up = every step that can be read here holds (no Tailscale = not set up, no child process)
+                if (-not (Test-Path -LiteralPath (Get-KitTailscaleExe))) { return $null }
+                $cfg = Get-KitTailnetConfig; if (-not $cfg) { return $null }
+                $rows = @(Test-KitTailnetState -State (Get-KitTailnetState -Config $cfg) -Config $cfg)
+                if (@($rows | Where-Object { $_.Ok -eq $false }).Count) { return $null }
                 return ''
             }
             'wsl-ubuntu'  {
@@ -2800,6 +3300,11 @@ function Invoke-KitPackage {
                         Write-KitLog "  dev folder: $($r.Status) - $($r.Detail)"
                         return New-KitResult $p $r.Status $from $r.To $r.Detail '' $sw.Elapsed.TotalSeconds
                     }
+                    'tailnet' {
+                        $r = Invoke-KitTailnetSetup -DryRun:$DryRun -OnStatus $OnStatus
+                        Write-KitLog "  tailnet: $($r.Status) - $($r.Detail)"
+                        return New-KitResult $p $r.Status $from $r.To $r.Detail '' $sw.Elapsed.TotalSeconds
+                    }
                     'wsl-ubuntu' {
                         $r = Invoke-KitWslUbuntu -DryRun:$DryRun -OnStatus $OnStatus
                         Write-KitLog "  wsl: $($r.Status) - $($r.Detail)"
@@ -2856,4 +3361,6 @@ Export-ModuleMember -Function Initialize-Kit, Get-KitVersion, Get-KitUpdates, Ge
     Test-KitNerdFont, Get-KitNerdFontRelease, Get-KitSha256FromList, Get-KitFileSha256, ConvertTo-KitFontRegName, Install-KitNerdFont,
     Test-KitClaudeCode, Install-KitClaudeCode,
     Get-KitWingetInstallArgs, Get-KitWingetResult, Get-KitInstallFolder, Get-KitBlockingProcesses, Get-KitInUse, Test-KitSmartAppControl, Test-KitAppControlBlock,
-    Get-KitEnableRdpScript, Get-KitPwshMsixAsset, Test-KitResultOk
+    Get-KitEnableRdpScript, Get-KitPwshMsixAsset, Test-KitResultOk,
+    ConvertTo-KitCidr, Test-KitTailnetAddresses, Merge-KitAuthorizedKeys, Get-KitTailnetConfig, Get-KitTailnetState, Test-KitTailnetState,
+    Get-KitTailnetAdminScript, Get-KitTailscaleSetArgs, Invoke-KitTailnetSetup

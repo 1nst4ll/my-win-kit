@@ -41,6 +41,7 @@
     { "Id": 20, "Name": "AnyDesk", "Group": "REMO", "On": true, "Method": "winget", "Ref": "AnyDesk.AnyDesk", "Desc": "Remote desktop (updates itself)", "SelfUpdates": true },
     { "Id": 21, "Name": "RealVNC Viewer", "Group": "REMO", "On": true, "Method": "msstore", "Ref": "XP99DVCPGKTXNJ", "Desc": "VNC viewer (Microsoft Store)" },
     { "Id": 50, "Name": "Tailscale", "Group": "REMO", "On": true, "Method": "winget", "Ref": "Tailscale.Tailscale", "Desc": "Private mesh VPN" },
+    { "Id": 63, "Name": "Tailnet setup", "Group": "REMO", "On": false, "Method": "builtin", "Ref": "tailnet", "Desc": "Joins the tailnet: Tailscale signed in + unattended, SSH (keys) and RDP from the tailnet only (asks for admin)", "Interactive": true, "Detect": "tailnet" },
     { "Id": 22, "Name": "Bitwarden", "Group": "SECU", "On": true, "Method": "winget", "Ref": "Bitwarden.Bitwarden", "Desc": "Password manager" },
     { "Id": 23, "Name": "NordVPN", "Group": "SECU", "On": true, "Method": "winget", "Ref": "NordSecurity.NordVPN", "Desc": "VPN" },
     { "Id": 24, "Name": "CapCut", "Group": "MEDI", "On": true, "Method": "winget", "Ref": "ByteDance.CapCut", "Desc": "Video editor" },

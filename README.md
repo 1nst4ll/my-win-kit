@@ -120,6 +120,12 @@ blocked apps at once; they also stay selected, so `I` retries them later.
 - **Dev folder** (recommended set): uses the dev folder the PC already has (`D:\dev\github`, `C:\dev\github`,
   `D:\dev\git` or `C:\dev\git`, in that order); without one it creates `D:\dev\github`, or `C:\dev\github` when the
   PC has no local D: disk. It never moves or renames a folder.
+- **Tailnet setup** (Remote access, off): puts the PC in the tailnet. It installs Tailscale if needed, asks you to
+  sign in once in the browser, turns on unattended mode (works before anyone signs in to Windows), then, with one
+  admin prompt, turns on OpenSSH Server with key login and Remote Desktop, and limits SSH, RDP and ping to the
+  tailnet only. It ends with the PC's Tailscale address and an `ssh` line. What it applies (the trusted public keys,
+  the allowed ranges) is in [config/tailnet.json](config/tailnet.json); details in
+  [architecture.md](docs/architecture.md#tailnet-setup).
 - **WSL + Ubuntu** (Dev tools, off): installs or updates WSL, then the newest Ubuntu LTS. Windows asks for admin,
   may need a restart (run it again afterwards), and Ubuntu asks for a Linux user name and password; type `exit`
   to come back to the kit.
