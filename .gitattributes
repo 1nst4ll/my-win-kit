@@ -1,12 +1,10 @@
-# Keep bytes exactly as they are on disk: the kit files are LF today (verified
-# 2026-11-24) and tools/publish.ps1 hash-compares them with the OneDrive copies,
-# so any checkout-time EOL conversion would look like a change on every PC.
+# Kit files are LF (pinned here so a checkout never converts them; the
+# downloaded kit copies and the repo stay byte-identical).
 * text=auto eol=lf
 *.ps1  text eol=lf
 *.psd1 text eol=lf
 *.cmd  text eol=lf
 *.md   text eol=lf
 *.yml  text eol=lf
-.githooks/* text eol=lf
 *.ico binary
 *.png binary

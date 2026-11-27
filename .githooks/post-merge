@@ -1,5 +1,0 @@
-#!/bin/sh
-# Publish the kit to OneDrive after a pull/merge lands on main.
-# Enable once per clone:  git config core.hooksPath .githooks
-# Never fails the merge: publish problems are printed, exit is always 0.
-exec "$(git rev-parse --show-toplevel)/.githooks/publish-on-main" post-merge

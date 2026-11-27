@@ -496,6 +496,19 @@ $script:TestMode = $WhatIfLoader -or $script:HasClassicTI -or $PSBoundParameters
 $script:IsAdmin = Test-LoaderAdmin
 $script:OtherUserExit = 75   # the elevated copy found it runs as another account: hand back to the parent
 
+# The stable launcher (<state>\launch.ps1): what the Start menu / Desktop shortcuts and the Windows
+# Terminal "my-win-kit" profile run. Kept current from this copy at every start, as the signed-in user.
+if (-not $ElevatedChild -and (-not $script:TestMode -or $env:MYWINKIT_STATE_DIR)) {
+    try {
+        $lsrc = Join-Path $root 'src\launch.ps1'; $ldst = Join-Path $stateDir 'launch.ps1'
+        if ((Test-Path -LiteralPath $lsrc) -and (-not (Test-Path -LiteralPath $ldst) -or [IO.File]::ReadAllText($lsrc) -ne [IO.File]::ReadAllText($ldst))) {
+            if (-not (Test-Path -LiteralPath $stateDir)) { New-Item -ItemType Directory -Path $stateDir -Force | Out-Null }
+            Copy-Item -LiteralPath $lsrc -Destination $ldst -Force
+            Write-RunLog "launcher: $ldst updated from $root"
+        }
+    } catch { Write-RunLog "launcher: not updated - $($_.Exception.Message)" }
+}
+
 # ---------------------------------------------------------------- run inside Windows Terminal (not the blue console)
 # The kit relaunches itself into a Windows Terminal tab when Terminal is installed: elevated (the
 # admin-once step), or as it is (already elevated, or no admin). wt.exe returns at once, so the
