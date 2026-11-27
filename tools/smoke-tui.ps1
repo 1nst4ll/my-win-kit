@@ -65,9 +65,11 @@ $scenarios = @(
     @{ Name = 'update everything: review lists kit apps + other apps on this PC, esc back twice -> q'
        Keys = 'DownArrow,Enter,Enter,Escape,Escape,text:q'
        Expect = @('Update everything', 'Review', 'see you next time') }
-    @{ Name = 'update everything: package-manager rows (sample) in the review; pick screen: PACKAGE MANAGERS ticked, PIP PACKAGES unticked; esc back -> q'
-       Keys = 'DownArrow,Enter,Enter,DownArrow,Enter,Escape,Escape,Escape,text:q'
-       Expect = @('12 packages', '1 pip package', 'pip left out', '+ 12 packages)', 'Choose which to update', 'PACKAGE MANAGERS', 'PIP PACKAGES', 'see you next time') }
+    # End = the last list row: the package groups sit at the bottom of the pick list, below however many kit /
+    # other apps this machine has, so jumping there keeps the check the same on every PC and CI runner
+    @{ Name = 'update everything: package-manager rows (sample) in the review; pick screen: End shows PACKAGE MANAGERS + PIP PACKAGES; esc back -> q'
+       Keys = 'DownArrow,Enter,Enter,DownArrow,Enter,End,Escape,Escape,Escape,text:q'
+       Expect = @('12 packages', '1 pip package', 'pip left out', '+ 12 packages)', 'Choose which to update', 'PACKAGE MANAGERS', 'PIP PACKAGES', 'requests (Python 3.13)', 'see you next time') }
     @{ Name = 'settings: admin-at-start toggle (this PC), esc back'
        Keys = 'DownArrow,DownArrow,DownArrow,Enter,DownArrow,Enter,Escape,text:q'
        Expect = @('Ask for administrator rights once at start:', '(this PC, from the next start)', 'see you next time') }
