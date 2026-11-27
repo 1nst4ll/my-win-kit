@@ -2,6 +2,25 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-26: v2.8.3 (branch `installer-shortcuts`): Start menu, Desktop shortcut and uninstaller
+
+- Daniel: "i want instaler to add menu start icon and desktop icon also have uninstaller in the menu. installer
+  doesnt need the icon but script link does and build one from scratch".
+- The online install (`irm | iex`, or a USB `.cmd` running it) now installs the kit for the signed-in user, before
+  any elevation: `launch.ps1`, `uninstall.ps1` and the icon go to `%LOCALAPPDATA%\my-win-kit`; Start menu folder
+  my-win-kit (my-win-kit + Uninstall my-win-kit), a Desktop shortcut and a Settings > Apps entry (HKCU). Running it
+  again refreshes everything. A later start of a new version refreshes the entry and shortcuts but never re-creates
+  a Desktop shortcut the user deleted. See architecture.md → Online install.
+- New `src/launch.ps1` (runs the newest downloaded copy, else downloads the kit) and `src/uninstall.ps1` (runs from
+  `%TEMP%`, asks once, removes the shortcuts, the Settings entry and `%LOCALAPPDATA%\my-win-kit`; installed apps stay).
+- New icon, drawn from scratch: `tools/build-icon.ps1` (System.Drawing, gruvbox colours: a dark tile with three
+  window panes and an orange down arrow; 16/24/32 px drawn pixel by pixel) writes `assets/my-win-kit.ico`.
+  `.gitattributes` marks `*.ico` / `*.png` binary.
+- Test hooks `MYWINKIT_STARTMENU_DIR`, `MYWINKIT_DESKTOP_DIR`, `MYWINKIT_UNINSTALL_KEY`; with `MYWINKIT_STATE_DIR`
+  set and a hook missing, registration is skipped (tests never touch the real Start menu, Desktop or registry).
+- Tests: test-config gains 8 checks (no hooks → skipped; shortcuts + icon; shortcut targets; Settings entry;
+  launcher; idempotent re-run; refresh without re-creating a deleted Desktop shortcut; uninstall).
+
 ## 2026-11-26: v2.8.2 (branch `auto-update-kit`): the kit updates itself without asking
 
 - Daniel: "lets implement auto update of kit to latest version on start". The loader already checked GitHub `main`
