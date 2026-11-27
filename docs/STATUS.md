@@ -7,7 +7,13 @@
 
 _A new session can start from this line, no handover needed._
 
-- **Kit v2.8.7 on branch `update-all-managers` (not merged, waiting for Daniel's go):** Daniel: "can you include
+- **Next (agreed order, 2026-11-27):** 1. Daniel runs `install-online.cmd` on the main PC (Start menu + Desktop icon)
+  and a real Update everything. 2. Fix Open item 2 (self-update unzip fails under an inherited pwsh `PSModulePath`:
+  use `[IO.Compression.ZipFile]` instead of `Expand-Archive`); more urgent now that updates are automatic. 3. Tailnet
+  setup for real on a second PC. 4. v2.9 (close-and-retry for blocked + update at next sign-in). 5. Delete merged
+  branches and leftover `.claude/worktrees`. Open question for Daniel: delete the old kit files in
+  `OneDrive\[98] Shortcuts` once every PC has run the online installer?
+- **Kit v2.8.7 is live:** PR #11 merged into `main` (ed3d0a6) on 2026-11-27 with Daniel's go ("merge 11"); CI green on both jobs (after a smoke-tui fix: the pick screen jumps to End so the package groups show on any PC). Daniel: "can you include
   update all from windows store that is installed as well as pip npx and other packages". Update everything (and
   `/auto`) now also covers the Microsoft Store (update scan, as admin), npm globals, pip itself, pipx, uv,
   PowerShell Gallery modules, dotnet tools, Scoop, Chocolatey and rustup; single pip packages are listed unticked.
@@ -100,11 +106,11 @@ _A new session can start from this line, no handover needed._
 | Repo | github.com/1nst4ll/my-win-kit (**public**). `main` = the rebuild (merged 2026-11-25); `rebuild-tui` merged, can be deleted |
 | Config home | `config/catalog.json`, `config/settings.json`, `config/winget-id-overrides.json`, `config/terminal.json` on GitHub `main`, edited by hand |
 | Delivery | GitHub `main` only: PCs self-update at start; new PCs use `install-online.cmd`. OneDrive publish removed (v2.8.5); old copies in `OneDrive\[98] Shortcuts` are left in place and still update themselves |
-| Last merge to `main` | 2026-11-26: PR #10 (kit v2.8.6, Tailnet setup). Before that: PR #9 (kit v2.8.5, 551c11b, no more OneDrive publish); PR #8 (kit v2.8.3, 6190c65) was the last OneDrive publish (4 files) |
+| Last merge to `main` | 2026-11-27: PR #11 (kit v2.8.7, ed3d0a6, Update everything covers the package managers). Before that: PR #10 (kit v2.8.6, Tailnet setup); PR #9 (kit v2.8.5, 551c11b, no more OneDrive publish); PR #8 (kit v2.8.3, 6190c65) was the last OneDrive publish (4 files) |
 | Apps in `config/catalog.json` | 60 total: 33 in the recommended set, 22 DEV (off), 3 POST (off), Tailnet setup (off); 3 removed (Perplexity 8, Samsung Quick Share 33, Python 3.13 41). NoAdmin: 6 (OneDrive, VS Code, GitHub Desktop, Cursor, Claude Code CLI, Antigravity IDE). SelfUpdates: 8 (Office, Chrome, OneDrive, Dropbox, Acrobat Reader, Teams, WhatsApp, AnyDesk). Unsigned: 1 (Hermes) |
 | By method | 45 winget, 2 Store, 6 script, 2 direct, 1 npm, 4 builtin. AI-flagged (Update AI tools): 9 (Claude Desktop, Claude Code CLI, KiloCode CLI, Cursor, Codex CLI, Antigravity IDE, Antigravity, Antigravity CLI, Hermes Agent) |
 | Next free app Id | 64 (above every Id in Packages, Removed, RetiredIds; use it when adding an app to `config/catalog.json` by hand) |
-| Kit version | 2.8.6 on `main`; 2.8.7 on branch `update-all-managers` (`$script:KitVersion` in src/core.psm1) |
+| Kit version | 2.8.7 (`$script:KitVersion` in src/core.psm1) |
 | Shared settings | `removeShortcuts` true, `dryRunByDefault` false, `elevateAtStart` true; `autoInstallEssentials` true (was `autoInstallPwsh`, still read) |
 | Modern menu needs | PowerShell 7.4+, PwshSpectreConsole ≥ 2.3 (tested with 2.6.3 on pwsh 7.7.0); no GitHub CLI or sign-in |
 | Startup (this PC) | ~750 ms launch → banner → quit, plus the config fetch (5 small files). The essentials checks add ~0.3 s when everything is already set up (core import ~55 ms, Terminal settings compare ~260 ms in 5.1) |
