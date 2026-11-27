@@ -1,0 +1,4 @@
+@echo off
+rem my-win-kit online installer: downloads the newest kit from GitHub and starts it.
+rem Needs internet. Same switches as install.cmd: /auto /pause /dryrun /classic /noelevate
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor 3072; try { $t=(Invoke-RestMethod 'https://raw.githubusercontent.com/1nst4ll/my-win-kit/main/install.ps1' -UseBasicParsing).TrimStart([char]0xFEFF); & ([scriptblock]::Create($t)) %* } catch { Write-Host ('Could not start my-win-kit: '+$_.Exception.Message) -ForegroundColor Red; Read-Host 'Press Enter to close' }"

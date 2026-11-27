@@ -1,17 +1,23 @@
 # Status: where the kit is
 
-> **Owns:** every volatile fact (counts, dates, last publish, open bugs, what's next). Other docs link here.
+> **Owns:** every volatile fact (counts, dates, last merge, open bugs, what's next). Other docs link here.
 > _Last updated: 2026-11-26._
 
 ## ▶ Resume here (current focus)
 
 _A new session can start from this line, no handover needed._
 
-- **Kit v2.8.4 on branch `tailnet-setup` (not merged, waiting for Daniel's go):** new **Tailnet setup** (catalogue
-  Id 63, Remote access, off) + `config/tailnet.json`. Daniel: "add to the kit script that will setup the machine to
-  work in my tailnet"; his choices: SSH/RDP from the tailnet only, trust this PC's 3 public SSH keys. Tested with
-  stubbed cmdlets and a read-only dry run on the main PC (it would limit the SSH, RDP and ping rules to the tailnet;
-  the rest already holds). Not yet run for real on any PC. See CHANGELOG.
+- **Kit v2.8.6 is live (Tailnet setup):** PR #10 merged into `main` on 2026-11-26 with Daniel's go ("merge both");
+  version raised from 2.8.4 to 2.8.6 so it lands above PR #9. New **Tailnet setup** (catalogue Id 63, Remote access,
+  off) + `config/tailnet.json`. Daniel: "add to the kit script that will setup the machine to work in my tailnet";
+  his choices: SSH/RDP from the tailnet only, trust this PC's 3 public SSH keys. Tested with stubbed cmdlets and a
+  read-only dry run on the main PC (it would limit the SSH, RDP and ping rules to the tailnet; the rest already
+  holds). Not yet run for real on any PC. See CHANGELOG.
+- **Kit v2.8.5 is live:** PR #9 merged into `main` (551c11b) on 2026-11-26 with Daniel's go ("merge both"). No more
+  OneDrive publish: `tools/publish.ps1` and `.githooks/` are gone (this clone's `core.hooksPath` unset); the
+  Terminal *my-win-kit* profile runs `%LOCALAPPDATA%\my-win-kit\launch.ps1` (kept current by the loader at every
+  start); `install-online.cmd` is in the repo as the front door. The old OneDrive copies are left in place
+  (Daniel's call whether to delete them).
 - **Kit v2.8.3 is live:** PR #8 merged into `main` (6190c65) on 2026-11-26 with Daniel's go ("merge"); CI green on both jobs; the post-merge publish copied 4 files to OneDrive. USB stick folder (Desktop `my-win-kit-usb`: online installer `.cmd` + v2.8.2 zip) made for Daniel.
   Daniel: "i want instaler to add menu start icon and desktop icon also have uninstaller in the menu ... script link
   does [need the icon] and build one from scratch". The online install now adds a Start menu folder (my-win-kit +
@@ -73,14 +79,12 @@ _A new session can start from this line, no handover needed._
   cache → bundled copy) and **self-update** from GitHub. The menu never writes config: Daniel edits
   `config/*.json` in the repo and commits to `main`; PCs pick it up at their next start (raw CDN can lag ~5 min).
 - **Repo is public since 2026-11-25** (history rewritten to the noreply address; old repo deleted).
-- **Next:** try it on a second PC: `install.cmd` from the OneDrive folder, or
-  `irm https://raw.githubusercontent.com/1nst4ll/my-win-kit/main/install.ps1 | iex` on a fresh one.
+- **Next:** try it on a second PC: `install-online.cmd` (or the `irm | iex` one-liner) on a fresh one.
   Untested so far: real keyboard on the app search (`/`), PS7 install on a PC without it.
 - Git on Daniel's PC is still 2.55.0.5: its upgrade needs the admin prompt answered (run the kit again, or
   `winget upgrade Git.Git` from an elevated shell).
 - If anything looks wrong, read the newest `%LOCALAPPDATA%\my-win-kit\logs\run-*.log` first.
-- Watch-outs: `main` auto-publishes; do multi-step work on a branch. This clone has `core.hooksPath=.githooks`;
-  other clones need it too.
+- Watch-outs: `main` is live (every PC self-updates from it at its next start); do multi-step work on a branch.
 
 ## What's live
 
@@ -88,12 +92,12 @@ _A new session can start from this line, no handover needed._
 |---|---|
 | Repo | github.com/1nst4ll/my-win-kit (**public**). `main` = the rebuild (merged 2026-11-25); `rebuild-tui` merged, can be deleted |
 | Config home | `config/catalog.json`, `config/settings.json`, `config/winget-id-overrides.json`, `config/terminal.json` on GitHub `main`, edited by hand |
-| Publish target | `$env:OneDrive\[98] Shortcuts` (the OneDrive folder every PC syncs) |
-| Last publish | 2026-11-26: merge of PR #8 (kit v2.8.3, 6190c65), 4 files copied. Before that: PR #7 (kit v2.8.2), 3 files |
+| Delivery | GitHub `main` only: PCs self-update at start; new PCs use `install-online.cmd`. OneDrive publish removed (v2.8.5); old copies in `OneDrive\[98] Shortcuts` are left in place and still update themselves |
+| Last merge to `main` | 2026-11-26: PR #10 (kit v2.8.6, Tailnet setup). Before that: PR #9 (kit v2.8.5, 551c11b, no more OneDrive publish); PR #8 (kit v2.8.3, 6190c65) was the last OneDrive publish (4 files) |
 | Apps in `config/catalog.json` | 60 total: 33 in the recommended set, 22 DEV (off), 3 POST (off), Tailnet setup (off); 3 removed (Perplexity 8, Samsung Quick Share 33, Python 3.13 41). NoAdmin: 6 (OneDrive, VS Code, GitHub Desktop, Cursor, Claude Code CLI, Antigravity IDE). SelfUpdates: 8 (Office, Chrome, OneDrive, Dropbox, Acrobat Reader, Teams, WhatsApp, AnyDesk). Unsigned: 1 (Hermes) |
 | By method | 45 winget, 2 Store, 6 script, 2 direct, 1 npm, 4 builtin. AI-flagged (Update AI tools): 9 (Claude Desktop, Claude Code CLI, KiloCode CLI, Cursor, Codex CLI, Antigravity IDE, Antigravity, Antigravity CLI, Hermes Agent) |
 | Next free app Id | 64 (above every Id in Packages, Removed, RetiredIds; use it when adding an app to `config/catalog.json` by hand) |
-| Kit version | 2.8.3 on `main`; 2.8.4 on branch `tailnet-setup` (`$script:KitVersion` in src/core.psm1) |
+| Kit version | 2.8.6 (`$script:KitVersion` in src/core.psm1) |
 | Shared settings | `removeShortcuts` true, `dryRunByDefault` false, `elevateAtStart` true; `autoInstallEssentials` true (was `autoInstallPwsh`, still read) |
 | Modern menu needs | PowerShell 7.4+, PwshSpectreConsole ≥ 2.3 (tested with 2.6.3 on pwsh 7.7.0); no GitHub CLI or sign-in |
 | Startup (this PC) | ~750 ms launch → banner → quit, plus the config fetch (5 small files). The essentials checks add ~0.3 s when everything is already set up (core import ~55 ms, Terminal settings compare ~260 ms in 5.1) |

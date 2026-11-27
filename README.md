@@ -7,10 +7,11 @@ Current state, counts and open items: [docs/STATUS.md](docs/STATUS.md). How it w
 
 ## Start it
 
-The kit is already in **`OneDrive\[98] Shortcuts`** on every PC signed in to Daniel's OneDrive.
+**Already installed:** Start menu or Desktop > **my-win-kit**.
 
-1. Open `OneDrive\[98] Shortcuts`.
-2. Double-click `install.cmd`.
+**New PC:** download [`install-online.cmd`](install-online.cmd) (or keep it on a USB stick) and double-click it.
+It downloads the newest kit from GitHub, starts it, and adds my-win-kit to the Start menu and the Desktop. The
+same in a PowerShell window: `irm https://raw.githubusercontent.com/1nst4ll/my-win-kit/main/install.ps1 | iex`.
 
 ### What every PC gets automatically (the essentials)
 
@@ -25,7 +26,7 @@ At every start the kit checks these and sets up whatever is missing, **without a
    *Claude Code* profile (PowerShell 7 running `claude`) as the default tab, the Nerd Font, the *Dark+* colours at
    90% opacity, Ctrl+C / Ctrl+V copy and paste, Alt+Shift+D duplicate pane, and every tab starting in
    the dev folder (below; the kit's own profiles too), plus a
-   *my-win-kit* profile that starts the kit from the OneDrive folder. Your other profiles and settings stay; the
+   *my-win-kit* profile that starts the kit. Your other profiles and settings stay; the
    old file is backed up first as `settings.json.bak-my-win-kit-<date>`.
 6. **Windows Terminal as the default terminal app** (console programs open in Terminal).
 
@@ -68,8 +69,8 @@ nothing failed but something is blocked. Add `/dryrun` to see what it would do, 
 
 Most installs need winget (App Installer). If it's missing, the menu opens its Microsoft Store page.
 
-**Without OneDrive:** download the repo zip from GitHub, unzip, double-click `install.cmd`, or use the one-liner
-under [Updates and installing on a new PC](#updates-and-installing-on-a-new-pc).
+**Offline:** download the repo zip from GitHub, unzip, double-click `install.cmd` (no Start menu shortcuts that
+way; it updates itself once the PC is online).
 
 ## The modern menu
 
@@ -169,14 +170,14 @@ sign-in is needed: the repo is public.
 ## Updates and installing on a new PC
 
 The kit updates itself at every start, without asking: when GitHub has a newer version it
-downloads it into `%LOCALAPPDATA%\my-win-kit\app\`, checks it, and runs it. On a PC without the OneDrive folder
-(needs the repo to be public):
+downloads it into `%LOCALAPPDATA%\my-win-kit\app\`, checks it, and runs it. A new PC (needs the repo to be
+public) runs [`install-online.cmd`](install-online.cmd) or:
 
 ```powershell
 irm https://raw.githubusercontent.com/1nst4ll/my-win-kit/main/install.ps1 | iex
 ```
 
-That online install (also handy on a USB stick as a `.cmd` that runs the same line) adds **my-win-kit** to the
+That online install adds **my-win-kit** to the
 Start menu and the Desktop, with its own icon, and an entry in Settings > Apps. Next time, start it from either
 shortcut. To remove it: Start menu > my-win-kit > **Uninstall my-win-kit**, or Settings > Apps > my-win-kit >
 Uninstall. That removes the shortcuts and the kit's own files; the apps it installed stay installed.
@@ -189,8 +190,7 @@ Uninstall. That removes the shortcuts and the kit's own files; the apps it insta
 2. For winget, find the ID with `winget search <name>`. For a vendor one-liner use `Method = 'script'` and the
    URL. For a download-page installer add a `Direct` entry (page, link regex, signer, silent args).
 3. Run `powershell -File tools\test-core.ps1` (catalogue checks + dry run) and `tools\test-config.ps1`.
-4. Commit on `main` and push. PCs read the new config from GitHub at their next start; the commit hook also
-   publishes the kit files to OneDrive.
+4. Commit on `main` and push. PCs read the new config from GitHub at their next start.
 
 ## Self-healing package IDs
 
@@ -201,11 +201,8 @@ new ID straight into `config/catalog.json`.
 
 ## Working on the kit
 
-Edit only in this repo, never the OneDrive copies. Read [CLAUDE.md](CLAUDE.md) first. After cloning, run once:
-
-```powershell
-git config core.hooksPath .githooks   # turns on auto-publish to OneDrive
-```
+Edit only in this repo. Read [CLAUDE.md](CLAUDE.md) first. `main` is live: every PC picks up a merged change
+at its next start (code changes need a `KitVersion` bump in `src/core.psm1`), so work on a branch.
 
 Checks (all dry run, nothing installs):
 

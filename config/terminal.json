@@ -12,7 +12,7 @@
   },
   "profiles": [
     { "guid": "{b7a91c2d-4e83-4f6a-9d25-1c3f8ae60b74}", "name": "Claude Code", "commandline": "pwsh.exe -NoExit -Command claude", "icon": "\ud83e\udd16", "hidden": false },
-    { "guid": "{ded1ec90-a0a0-40b1-aaa0-dc04bef6d4b0}", "name": "my-win-kit", "commandline": "cmd.exe /d /c if exist \"%OneDrive%\\[98] Shortcuts\\install.cmd\" (\"%OneDrive%\\[98] Shortcuts\\install.cmd\") else (echo my-win-kit: install.cmd is not in the OneDrive kit folder on this PC & pause)", "hidden": false }
+    { "guid": "{ded1ec90-a0a0-40b1-aaa0-dc04bef6d4b0}", "name": "my-win-kit", "commandline": "cmd.exe /d /c if exist \"%LOCALAPPDATA%\\my-win-kit\\launch.ps1\" (powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%LOCALAPPDATA%\\my-win-kit\\launch.ps1\") else (echo my-win-kit: start the kit once with its installer, then this profile works & pause)", "hidden": false }
   ],
   "keybindings": [
     { "id": "Terminal.CopyToClipboard", "keys": "ctrl+c" },

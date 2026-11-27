@@ -11,7 +11,7 @@
         tailnet.json holds public keys only and a wide-open copy is refused
       - catalogue Ids unique across Packages and Removed, no RetiredId reused
       - learned heals stay on this PC (local-overrides.json), applied at the next start
-      - publish: config/*.json shipped, protected legacy files untouched
+      - the stable launcher (<state>\launch.ps1) is kept current at every start
       - self-update from a fake newer kit (file:/// zip): accept, re-use, decline, broken zip
       - irm | iex bootstrap with an empty $PSScriptRoot
     The menu never writes config, so nothing here talks to GitHub.
@@ -93,7 +93,7 @@ try {
     $tp = @(@($td['profiles']) | Where-Object { $_['guid'] -eq $td['defaultProfile'] })
     Check ($tp.Count -eq 1 -and $tp[0]['name'] -eq 'Claude Code' -and @($td['keybindings']).Count -eq 3 -and $td['startingDirectory']['prefer'] -eq 'dev-folder' -and $td['profileDefaults']['font']['face'] -eq 'CaskaydiaCove Nerd Font Mono') 'terminal.json: Claude Code profile is the default, 3 key bindings, start folder = the dev folder (keyword dev-folder), Nerd Font face'
     $kp = @(@($td['profiles']) | Where-Object { $_['name'] -eq 'my-win-kit' })
-    Check ($kp.Count -eq 1 -and $kp[0]['commandline'] -like '*%OneDrive%\`[98`] Shortcuts\install.cmd*') 'terminal.json: a my-win-kit profile starts install.cmd from the OneDrive kit folder through %OneDrive% (no personal path)'
+    Check ($kp.Count -eq 1 -and $kp[0]['commandline'] -like '*%LOCALAPPDATA%\my-win-kit\launch.ps1*' -and $kp[0]['commandline'] -notmatch 'OneDrive') 'terminal.json: the my-win-kit profile runs the stable launcher through %LOCALAPPDATA% (no personal path, no OneDrive)'
     $cj = ConvertFrom-KitJsonText ([IO.File]::ReadAllText((Join-Path $repo 'config\catalog.json')))
     $allIds = @(@($cj['Packages']) + @($cj['Removed']) | Where-Object { $_ } | ForEach-Object { [int]$_['Id'] })
     Check ($allIds -contains 62 -and @($cj['Removed'] | Where-Object { $_['Id'] -eq 41 }).Count -eq 1) 'catalog: Python 3.14 took Id 62 (Python 3.13, Id 41, in Removed)'
@@ -139,14 +139,6 @@ try {
     $writers = @(Get-Command -Module core -ErrorAction SilentlyContinue | Where-Object { ($_.Verb -in 'Save', 'Add', 'Set', 'Push', 'Remove', 'Restore' -and $_.Noun -match '^Kit(Config|Package|Setting|Pending)') -or $_.Noun -match '^KitGh' })
     Check ($writers.Count -eq 0) 'engine exports no config-write or gh functions'
 
-    # ---------------------------------------------------------------- publish
-    $target = New-Scratch 'cfg-publish [98]'; $scratch += $target
-    Set-Content -LiteralPath (Join-Path $target 'winget-id-overrides.json') -Value '{"legacy":true}'
-    $pub = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'tools\publish.ps1') -Target $target 2>&1 | Out-String
-    $committed = -not (& git -C $repo status --porcelain -- config 2>$null)
-    if ($committed) { Check ((Test-Path -LiteralPath (Join-Path $target 'config\catalog.json')) -and (Get-Content -LiteralPath (Join-Path $target 'winget-id-overrides.json') -Raw).Contains('legacy')) 'publish: config/*.json shipped, legacy root file untouched' }
-    else { Check ((Get-Content -LiteralPath (Join-Path $target 'winget-id-overrides.json') -Raw).Contains('legacy') -and $pub -match 'uncommitted') 'publish: legacy root file untouched (config uncommitted, skipped)' }
-
     # ---------------------------------------------------------------- self-update + bootstrap (file:/// "GitHub")
     $up = New-Scratch 'cfg-update'; $scratch += $up
     $newer = Join-Path $up 'src-tree\my-win-kit-main'; New-Item -ItemType Directory -Path $newer -Force | Out-Null; Copy-Kit $newer
@@ -168,6 +160,7 @@ try {
     $o = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $kit 'install.ps1') -NoUpdate -Classic -DryRun -ClassicTestInput 'Q' 2>&1 | Out-String
     $log = Get-LatestLog $st3
     Check (-not (Test-Path (Join-Path $st3 'app')) -and $o -notmatch 'Updating the kit' -and $log -notmatch 'update: ' -and $log -match 'frontend: CLASSIC started') 'self-update: -NoUpdate skips the check'
+    Check ((Test-Path (Join-Path $st3 'launch.ps1')) -and [IO.File]::ReadAllText((Join-Path $st3 'launch.ps1')) -eq [IO.File]::ReadAllText((Join-Path $kit 'src\launch.ps1')) -and $log -match 'launcher: .* updated') 'launcher: <state>\launch.ps1 copied from the running kit (shortcuts + Terminal profile run it)'
     # broken newer version -> fall back to this copy
     [IO.File]::WriteAllText($core, [IO.File]::ReadAllText($core) + "`nfunction Broken {")
     Remove-Item (Join-Path $up 'kit.zip'); Compress-Archive -Path (Join-Path $up 'src-tree\my-win-kit-main') -DestinationPath (Join-Path $up 'kit.zip')

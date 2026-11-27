@@ -2,7 +2,9 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
-## 2026-11-26: v2.8.4 (branch `tailnet-setup`): Tailnet setup
+## 2026-11-26: v2.8.6 (branch `tailnet-setup`, built as v2.8.4): Tailnet setup
+
+- Version raised from 2.8.4 to 2.8.6 at merge time, so PCs already on v2.8.5 (PR #9) pick it up.
 
 - Daniel: "add to the kit script that will setup the machine to work in my tailnet". His choices: SSH and RDP from
   the **tailnet only**, and trust **this PC's public SSH keys**.
@@ -20,6 +22,21 @@
 - Tests: test-core checks the entry, the config, CIDR comparison, the keys merge, the generated admin script
   (parses, never `Any`) and runs it against stubbed Windows cmdlets (a fresh PC: every step done, only tailnet
   ranges; a finished PC: nothing changed). test-config checks canonical form, caching and the refused copies.
+
+## 2026-11-26: v2.8.5 (branch `drop-onedrive-publish`): no more OneDrive publish
+
+- Daniel: "we do not need the deploy to tools folder anymore as we have update and installer". Every PC already
+  self-updates from GitHub `main` (v2.8.2) and new PCs install with the online installer (v2.8.3), so the copy to
+  `OneDrive\[98] Shortcuts` is redundant.
+- Removed `tools/publish.ps1`, `.githooks/` (post-commit, post-merge, publish-on-main) and test-config's publish
+  check. Commits on `main` no longer copy anything; PCs pick up a merge at their next start (code needs a
+  `KitVersion` bump).
+- The Windows Terminal *my-win-kit* profile ran `%OneDrive%\[98] Shortcuts\install.cmd`; it now runs the stable
+  launcher `%LOCALAPPDATA%\my-win-kit\launch.ps1`. The loader copies `src\launch.ps1` there at every start (as the
+  signed-in user; in test mode only into `MYWINKIT_STATE_DIR`), so the profile works on PCs that never ran the online
+  installer too.
+- New `install-online.cmd` in the repo root (the file Daniel keeps on a USB stick): the README's new front door.
+- The kit files already in `OneDrive\[98] Shortcuts` are left in place; they still start and update themselves.
 
 ## 2026-11-26: v2.8.3 (branch `installer-shortcuts`): Start menu, Desktop shortcut and uninstaller
 
