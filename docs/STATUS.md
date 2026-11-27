@@ -7,7 +7,7 @@
 
 _A new session can start from this line, no handover needed._
 
-- **Kit v2.8.6 is live (Tailnet setup):** PR #10 merged into `main` on 2026-11-26 with Daniel's go ("merge both");
+- **Kit v2.8.6 is live (Tailnet setup):** PR #10 merged into `main` on 2026-11-26 (CI green) with Daniel's go ("merge both");
   version raised from 2.8.4 to 2.8.6 so it lands above PR #9. New **Tailnet setup** (catalogue Id 63, Remote access,
   off) + `config/tailnet.json`. Daniel: "add to the kit script that will setup the machine to work in my tailnet";
   his choices: SSH/RDP from the tailnet only, trust this PC's 3 public SSH keys. Tested with stubbed cmdlets and a
