@@ -9,7 +9,7 @@ _A new session can start from this line, no handover needed._
 
 - **Kit v2.8.2 on branch `auto-update-kit` (not merged, waiting for Daniel's go):** the loader updates the kit to
   the newest GitHub version at every start without asking (was a Y/n question). `-NoUpdate` skips it. PCs still on
-  v2.8.1 ask one last time. See CHANGELOG.
+  v2.8.1 ask one last time. Also fixes the `irm | iex` one-liner (broken by a BOM in `install.ps1`). See CHANGELOG.
 - **Kit v2.8.1 is live:** PR #6 merged into `main` (72b7f06) on 2026-11-26 with Daniel's go ("merge"); CI green on both jobs; the post-merge publish copied 2 files to OneDrive. Fixes "Update everything" hanging on
   "Checking what's installed" on a laptop: `hermes --version` ran a git fetch that never finished, and
   `Invoke-KitProcess` had no time limit (see CHANGELOG). Now: Hermes's version is read from its package metadata

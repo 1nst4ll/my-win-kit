@@ -11,6 +11,9 @@
 - Removed: the `-UpdateAnswer` test switch, the remembered decline (`update.json` is no longer read) and the "input
   is redirected, don't ask" branch.
 - PCs on v2.8.1 or older ask one last time (their own loader still has the question); from v2.8.2 on, no question.
+- Fixed: the documented `irm https://raw.githubusercontent.com/1nst4ll/my-win-kit/main/install.ps1 | iex` failed on every
+  PC (5.1 and 7): `install.ps1` had a UTF-8 BOM, which `irm` keeps as a character in front of `param(`. Found while
+  building a USB online installer. The BOM is gone (the file is pure ASCII); test-config now parses the raw bytes.
 - Tests: test-config checks the update runs with no question and that `-NoUpdate` skips it (replaces the
   decline check).
 
