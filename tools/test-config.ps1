@@ -137,21 +137,21 @@ try {
     $env:MYWINKIT_CONFIG_URL = 'http://127.0.0.1:9/config'
     Remove-Item Env:MYWINKIT_RUNLOG -ErrorAction SilentlyContinue
     $st2 = New-Scratch 'cfg-upstate'; $scratch += $st2; $env:MYWINKIT_STATE_DIR = $st2
-    $o = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $kit 'install.ps1') -UpdateAnswer y -Classic -DryRun -ClassicTestInput 'Q' 2>&1 | Out-String
-    $log = Get-LatestLog $st2
-    Check ($o -match 'Update kit [0-9.]+ -> 9\.9\.9' -and (Test-Path (Join-Path $st2 'app\9.9.9\install.ps1')) -and $log -match 'running kit v9\.9\.9' -and $log -match 'frontend: CLASSIC started' -and $o -match 'v9\.9\.9') 'self-update: asked, downloaded, verified, ran v9.9.9'
     $o = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $kit 'install.ps1') -Classic -DryRun -ClassicTestInput 'Q' 2>&1 | Out-String
     $log = Get-LatestLog $st2
-    Check ($o -notmatch 'Update kit' -and $log -match 'newer copy already on this PC: v9\.9\.9') 'self-update: next start uses the downloaded copy without asking'
+    Check ($o -match 'Updating the kit [0-9.]+ -> 9\.9\.9' -and $o -notmatch '\[Y/n\]' -and $log -match 'installing v9\.9\.9 \(automatic\)' -and (Test-Path (Join-Path $st2 'app\9.9.9\install.ps1')) -and $log -match 'running kit v9\.9\.9' -and $log -match 'frontend: CLASSIC started' -and $o -match 'v9\.9\.9') 'self-update: no question, downloaded, verified, ran v9.9.9'
+    $o = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $kit 'install.ps1') -Classic -DryRun -ClassicTestInput 'Q' 2>&1 | Out-String
+    $log = Get-LatestLog $st2
+    Check ($o -notmatch 'Updating the kit' -and $log -match 'newer copy already on this PC: v9\.9\.9') 'self-update: next start uses the downloaded copy, no second download'
     $st3 = New-Scratch 'cfg-upstate'; $scratch += $st3; $env:MYWINKIT_STATE_DIR = $st3
-    $o = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $kit 'install.ps1') -UpdateAnswer n -Classic -DryRun -ClassicTestInput 'Q' 2>&1 | Out-String
-    $o2 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $kit 'install.ps1') -Classic -DryRun -ClassicTestInput 'Q' 2>&1 | Out-String
-    Check (-not (Test-Path (Join-Path $st3 'app')) -and $o2 -notmatch 'Update kit' -and (Get-LatestLog $st3) -match 'declined earlier') 'self-update: decline is remembered (asked once per version)'
+    $o = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $kit 'install.ps1') -NoUpdate -Classic -DryRun -ClassicTestInput 'Q' 2>&1 | Out-String
+    $log = Get-LatestLog $st3
+    Check (-not (Test-Path (Join-Path $st3 'app')) -and $o -notmatch 'Updating the kit' -and $log -notmatch 'update: ' -and $log -match 'frontend: CLASSIC started') 'self-update: -NoUpdate skips the check'
     # broken newer version -> fall back to this copy
     [IO.File]::WriteAllText($core, [IO.File]::ReadAllText($core) + "`nfunction Broken {")
     Remove-Item (Join-Path $up 'kit.zip'); Compress-Archive -Path (Join-Path $up 'src-tree\my-win-kit-main') -DestinationPath (Join-Path $up 'kit.zip')
     $st4 = New-Scratch 'cfg-upstate'; $scratch += $st4; $env:MYWINKIT_STATE_DIR = $st4
-    $o = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $kit 'install.ps1') -UpdateAnswer y -Classic -DryRun -ClassicTestInput 'Q' 2>&1 | Out-String
+    $o = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $kit 'install.ps1') -Classic -DryRun -ClassicTestInput 'Q' 2>&1 | Out-String
     $log = Get-LatestLog $st4
     Check ($log -match 'failed verification: parse error' -and $log -match 'frontend: CLASSIC started' -and -not (Test-Path (Join-Path $st4 'app\9.9.9'))) 'self-update: broken download rejected, kept the local copy'
     # irm | iex: empty $PSScriptRoot
@@ -163,6 +163,10 @@ try {
     $o = & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -LiteralPath '$loader' -Raw | Invoke-Expression; 'STILL-OPEN'" 2>&1 | Out-String
     $log = Get-LatestLog $st5
     Check ($o -match 'downloading the kit' -and (Test-Path (Join-Path $st5 'app\9.9.9\install.ps1')) -and $log -match 'bootstrap ->' -and $log -match 'frontend: CLASSIC started' -and $o -match 'STILL-OPEN') 'irm | iex: empty $PSScriptRoot -> downloaded to app\9.9.9, started, caller shell not closed'
+    # irm keeps a UTF-8 BOM as a character in front of param(): the text would not parse (Get-Content above hides that)
+    $raw = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($loader)); $okParse = $true
+    try { [void][scriptblock]::Create($raw) } catch { $okParse = $false }
+    Check ($okParse -and [int][char]$raw[0] -ne 0xFEFF) 'irm | iex: install.ps1 has no BOM and parses as downloaded text'
     $env:MYWINKIT_BOOTSTRAP_ARGS = ''
 } finally {
     foreach ($n in $keepEnv.Keys) { [Environment]::SetEnvironmentVariable($n, $keepEnv[$n]) }

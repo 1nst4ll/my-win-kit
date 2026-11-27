@@ -2,6 +2,21 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-26: v2.8.2 (branch `auto-update-kit`): the kit updates itself without asking
+
+- Daniel: "lets implement auto update of kit to latest version on start". The loader already checked GitHub `main`
+  at every start, but asked "Update kit X -> Y? [Y/n]" and remembered a "no" in `update.json`. Now it always
+  downloads, verifies and switches to the newer version ("Updating the kit X -> Y..." / "Updated to vY."), in the
+  menu and under `-Auto` alike; a failure still keeps the running copy. `-NoUpdate` is the only way to skip it.
+- Removed: the `-UpdateAnswer` test switch, the remembered decline (`update.json` is no longer read) and the "input
+  is redirected, don't ask" branch.
+- PCs on v2.8.1 or older ask one last time (their own loader still has the question); from v2.8.2 on, no question.
+- Fixed: the documented `irm https://raw.githubusercontent.com/1nst4ll/my-win-kit/main/install.ps1 | iex` failed on every
+  PC (5.1 and 7): `install.ps1` had a UTF-8 BOM, which `irm` keeps as a character in front of `param(`. Found while
+  building a USB online installer. The BOM is gone (the file is pure ASCII); test-config now parses the raw bytes.
+- Tests: test-config checks the update runs with no question and that `-NoUpdate` skips it (replaces the
+  decline check).
+
 ## 2026-11-26: v2.8.1 (branch `fix/scan-hang`): the scan no longer hangs on Hermes
 
 - Daniel: "the update is stuck on Checking what's installed" on a laptop. Cause, checked over ssh: the scan ran

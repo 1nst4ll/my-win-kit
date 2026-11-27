@@ -1,14 +1,14 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     my-win-kit loader: keeps the kit up to date and picks the best menu this PC can run.
 .DESCRIPTION
     Works on stock Windows PowerShell 5.1 with nothing else installed.
-      0. Self-update: if GitHub main has a newer kit version than this copy, ask once
-         ("Update kit 2.3.0 -> 2.4.0? [Y/n]"), download the repo zip into
+      0. Self-update, at every start, without asking: if GitHub main has a newer
+         kit version than this copy, download the repo zip into
          %LOCALAPPDATA%\my-win-kit\app\<version>, verify it, and run from there.
-         Any failure falls back to this copy. A newer copy already downloaded is
-         used without asking. /auto accepts the update without asking.
+         Any failure (offline, bad zip) falls back to this copy. A newer copy
+         already downloaded is used too. -NoUpdate skips the check.
       E. elevateAtStart on (default; this PC's choice in Settings, else
          config/settings.json) and not elevated: relaunch this kit as
          administrator (one UAC prompt, all arguments kept) and wait for it.
@@ -46,8 +46,6 @@
     Show what would run, install nothing (passed to either menu).
 .PARAMETER NoUpdate
     Skip the self-update check (also used when a downloaded copy re-runs itself).
-.PARAMETER UpdateAnswer
-    Testing: answer for the "update kit?" question (y or n).
 .PARAMETER NoPwsh
     Testing: behave as if PowerShell 7 were not installed. Same as
     environment variable MYWINKIT_SIMULATE_NO_PWSH=1.
@@ -102,7 +100,6 @@ param(
     [switch]$Classic,
     [switch]$DryRun,
     [switch]$NoUpdate,
-    [string]$UpdateAnswer,
     [switch]$NoPwsh,
     [switch]$NoTerminal,
     [switch]$WhatIfLoader,
@@ -174,7 +171,7 @@ function Get-ForwardArgs([string[]]$Skip = @()) {
     <# This run's arguments, for a relaunched copy (self-update, elevation, bootstrap). #>
     $a = @()
     foreach ($kv in $script:BoundArgs.GetEnumerator()) {
-        if ($kv.Key -in @('UpdateAnswer', 'NoUpdate', 'ElevatedChild', 'KitEnv', 'Rest') + $Skip) { continue }
+        if ($kv.Key -in @('NoUpdate', 'ElevatedChild', 'KitEnv', 'Rest') + $Skip) { continue }
         if ($kv.Value -is [System.Management.Automation.SwitchParameter]) { if ($kv.Value.IsPresent) { $a += "-$($kv.Key)" } }
         else { $a += @("-$($kv.Key)", [string]$kv.Value) }
     }
@@ -294,31 +291,12 @@ if (-not $NoUpdate) {
     $rv = Get-RemoteKitVersion
     Write-RunLog "update: this copy v$here, best local v$useVer, GitHub v$(if ($rv) { $rv } else { '?' })"
     if ($rv -and $useVer -and $rv -gt $useVer) {
-        $upFile = Join-Path $stateDir 'update.json'
-        $declined = ''; try { $declined = ([IO.File]::ReadAllText($upFile) | ConvertFrom-Json).declined } catch {}
-        if ($Auto -and -not $PSBoundParameters.ContainsKey('UpdateAnswer')) {
-            # unattended: take the newer version without asking (a failure keeps this copy)
-            Write-Say "Updating the kit $useVer -> $rv (unattended)..." 'Cyan'
-            Write-RunLog "update: /auto - installing v$rv without asking"
-            $d = Install-KitCopy $rv
-            if ($d) { $useDir = $d; $useVer = $rv; Write-Say "Updated to v$rv." 'Green' }
-            else { Write-Say "Keeping v$useVer." 'Yellow' }
-        } elseif ($declined -eq $rv.ToString() -and -not $PSBoundParameters.ContainsKey('UpdateAnswer')) {
-            Write-RunLog "update: v$rv was declined earlier - not asking again"
-        } elseif (-not $PSBoundParameters.ContainsKey('UpdateAnswer') -and [Console]::IsInputRedirected) {
-            Write-RunLog "update: v$rv available but input is redirected (CI/pipe) - not asking, keeping v$useVer"
-        } else {
-            if ($PSBoundParameters.ContainsKey('UpdateAnswer')) { $ua = $UpdateAnswer; Write-Say "Update kit $useVer -> $($rv)? [Y/n] $ua" 'Cyan' }
-            else { Write-Host "  Update kit $useVer -> $($rv)? [Y/n] " -ForegroundColor Cyan -NoNewline; $ua = Read-Host }
-            Write-RunLog "update: answer '$ua' for v$rv"
-            if ($ua -match '^[Nn]') {
-                try { [IO.File]::WriteAllText($upFile, ('{ "declined": "' + $rv + '" }')) } catch {}
-            } else {
-                $d = Install-KitCopy $rv
-                if ($d) { $useDir = $d; $useVer = $rv; Write-Say "Updated to v$rv." 'Green' }
-                else { Write-Say "Keeping v$useVer." 'Yellow' }
-            }
-        }
+        # Always take the newer version, without asking; any failure keeps this copy.
+        Write-Say "Updating the kit $useVer -> $rv..." 'Cyan'
+        Write-RunLog "update: installing v$rv (automatic)"
+        $d = Install-KitCopy $rv
+        if ($d) { $useDir = $d; $useVer = $rv; Write-Say "Updated to v$rv." 'Green' }
+        else { Write-Say "Keeping v$useVer." 'Yellow' }
     }
     if ($useDir) {
         $childArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $useDir 'install.ps1'), '-NoUpdate') + (Get-ForwardArgs)
@@ -422,7 +400,7 @@ function Join-ArgLine([string[]]$Arguments) {
     return ($parts -join ' ')
 }
 
-$script:TestMode = $WhatIfLoader -or $script:HasClassicTI -or $PSBoundParameters.ContainsKey('Answer') -or $PSBoundParameters.ContainsKey('UpdateAnswer') -or [bool]$env:MYWINKIT_STATE_DIR
+$script:TestMode = $WhatIfLoader -or $script:HasClassicTI -or $PSBoundParameters.ContainsKey('Answer') -or [bool]$env:MYWINKIT_STATE_DIR
 $script:IsAdmin = Test-LoaderAdmin
 $script:OtherUserExit = 75   # the elevated copy found it runs as another account: hand back to the parent
 
