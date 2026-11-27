@@ -80,7 +80,7 @@ Runs on stock Windows PowerShell 5.1 with nothing installed.
      non-elevated. The run log records `elevate: elevated = yes|no - <why>`.
    - Ordering: elevation comes before the essentials (PowerShell 7, Terminal, ...), so those run elevated (no
      prompt) and `pwsh` started for the modern menu inherits the token.
-   - Never a real prompt in tests: in test mode (`-WhatIfLoader`, `-ClassicTestInput`, `-Answer`, `-UpdateAnswer`,
+   - Never a real prompt in tests: in test mode (`-WhatIfLoader`, `-ClassicTestInput`, `-Answer`,
      or `MYWINKIT_STATE_DIR` set) the step is skipped unless `MYWINKIT_SIMULATE_UAC=accept|decline` simulates it
      (`accept` runs the child copy in the same console with `MYWINKIT_SIMULATE_ADMIN=1`). Other hooks:
      `MYWINKIT_SIMULATE_ADMIN=1|0`, `MYWINKIT_SIMULATE_ELEVATION=same|other`, `MYWINKIT_SIMULATE_SESSION_USER=same|other`,
@@ -519,9 +519,9 @@ switches). Claude Desktop stays on winget on purpose: Anthropic's latest-downloa
 The loader (Windows PowerShell 5.1) keeps every PC on the newest kit without git or OneDrive changes:
 
 - **Version check:** `KitVersion` from `src/core.psm1` on GitHub `main` (raw URL, 3 s timeout). Newer than the
-  running copy → "Update kit 2.4.0 -> 2.5.0? [Y/n]" once per version (a "no" is remembered in
-  `%LOCALAPPDATA%\my-win-kit\update.json`; no question when input is redirected, e.g. CI). `-Auto` takes the
-  newer version without asking (an earlier "no" doesn't apply); a failure still keeps the running copy.
+  running copy → it downloads and switches to it at every start, without asking ("Updating the kit 2.8.1 -> 2.8.2...",
+  then "Updated to v2.8.2."), in the menu and under `-Auto` alike. `-NoUpdate` skips the check. Any failure
+  (offline, 3 s timeout, bad zip) keeps the running copy and says "Keeping v<version>."
 - **Install:** the repo zip (`codeload.github.com/<repo>/zip/refs/heads/main`) → extract → verify (required files,
   every script parses, catalog.json parses, version matches) → `%LOCALAPPDATA%\my-win-kit\app\<version>` (the three
   newest kept). The loader then re-runs that copy's `install.ps1 -NoUpdate` with the same arguments. Any failure
@@ -534,8 +534,7 @@ The loader (Windows PowerShell 5.1) keeps every PC on the newest kit without git
   itself from GitHub.
 - The repo is public, so none of this needs a sign-in. If it ever went private, the raw/zip URLs would return 404:
   no self-update, no `irm | iex`, and config would come from the cache or the bundled copy.
-- Test hooks: `MYWINKIT_RAW_URL`, `MYWINKIT_ZIP_URL` (`file:///` allowed), `MYWINKIT_BOOTSTRAP_ARGS`,
-  `-UpdateAnswer`.
+- Test hooks: `MYWINKIT_RAW_URL`, `MYWINKIT_ZIP_URL` (`file:///` allowed), `MYWINKIT_BOOTSTRAP_ARGS`.
 
 ## Run log (which front-end ran)
 

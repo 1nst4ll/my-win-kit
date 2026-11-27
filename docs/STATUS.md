@@ -7,6 +7,9 @@
 
 _A new session can start from this line, no handover needed._
 
+- **Kit v2.8.2 on branch `auto-update-kit` (not merged, waiting for Daniel's go):** the loader updates the kit to
+  the newest GitHub version at every start without asking (was a Y/n question). `-NoUpdate` skips it. PCs still on
+  v2.8.1 ask one last time. See CHANGELOG.
 - **Kit v2.8.1 is live:** PR #6 merged into `main` (72b7f06) on 2026-11-26 with Daniel's go ("merge"); CI green on both jobs; the post-merge publish copied 2 files to OneDrive. Fixes "Update everything" hanging on
   "Checking what's installed" on a laptop: `hermes --version` ran a git fetch that never finished, and
   `Invoke-KitProcess` had no time limit (see CHANGELOG). Now: Hermes's version is read from its package metadata
@@ -14,8 +17,9 @@ _A new session can start from this line, no handover needed._
   - **Laptop cleaned 2026-11-26** (Daniel: "clean stacy"): the hung `hermes --version` scans and their `git fetch`
     processes ended, 8 leftover `tmp_pack_*` files (2.55 GB) deleted from Hermes's `.git\objects\pack`; its real
     packs untouched. Open question: `hermes update` on that shallow clone may be just as slow (same full fetch); not checked yet.
-  - `tools/test-config.ps1` has 4 failures (self-update / `irm | iex` checks) that also fail on unchanged `main`, so
-    v2.8.1 did not cause them; they pass in CI, so they are specific to this PC; not yet looked into.
+  - `tools/test-config.ps1` has 4 failures (self-update / `irm | iex` checks) when started from a pwsh-based shell:
+    the cause is Open item 2 (pwsh's `PSModulePath` inherited into 5.1 breaks `Expand-Archive`). With a clean
+    module path (`env -u PSModulePath powershell -File tools/test-config.ps1` from Git Bash) all pass (checked 2026-11-26).
 - **Session paused 2026-11-26 (Daniel: "commit and push and close this session").** `main` = kit v2.8.0, published;
   no open PRs. Open threads, in Daniel's order:
   1. **Git on the main PC is still 2.55.0.5.** The upgrade to 2.56.1 is blocked because Git for Windows refuses to
@@ -79,7 +83,7 @@ _A new session can start from this line, no handover needed._
 | Apps in `config/catalog.json` | 59 total: 33 in the recommended set, 22 DEV (off), 3 POST (off); 3 removed (Perplexity 8, Samsung Quick Share 33, Python 3.13 41). NoAdmin: 6 (OneDrive, VS Code, GitHub Desktop, Cursor, Claude Code CLI, Antigravity IDE). SelfUpdates: 8 (Office, Chrome, OneDrive, Dropbox, Acrobat Reader, Teams, WhatsApp, AnyDesk). Unsigned: 1 (Hermes) |
 | By method | 45 winget, 2 Store, 6 script, 2 direct, 1 npm, 3 builtin. AI-flagged (Update AI tools): 9 (Claude Desktop, Claude Code CLI, KiloCode CLI, Cursor, Codex CLI, Antigravity IDE, Antigravity, Antigravity CLI, Hermes Agent) |
 | Next free app Id | 63 (above every Id in Packages, Removed, RetiredIds; use it when adding an app to `config/catalog.json` by hand) |
-| Kit version | 2.8.1 (`$script:KitVersion` in src/core.psm1) |
+| Kit version | 2.8.2 on branch `auto-update-kit`; 2.8.1 on `main` (`$script:KitVersion` in src/core.psm1) |
 | Shared settings | `removeShortcuts` true, `dryRunByDefault` false, `elevateAtStart` true; `autoInstallEssentials` true (was `autoInstallPwsh`, still read) |
 | Modern menu needs | PowerShell 7.4+, PwshSpectreConsole ≥ 2.3 (tested with 2.6.3 on pwsh 7.7.0); no GitHub CLI or sign-in |
 | Startup (this PC) | ~750 ms launch → banner → quit, plus the config fetch (3 small files; 4 with `terminal.json`). The essentials checks add ~0.3 s when everything is already set up (core import ~55 ms, Terminal settings compare ~260 ms in 5.1) |

@@ -162,7 +162,7 @@ sign-in is needed: the repo is public.
 
 ## Updates and installing on a new PC
 
-The kit updates itself: when GitHub has a newer version it asks once ("Update kit 2.4.0 -> 2.5.0? [Y/n]"),
+The kit updates itself at every start, without asking: when GitHub has a newer version it
 downloads it into `%LOCALAPPDATA%\my-win-kit\app\`, checks it, and runs it. On a PC without the OneDrive folder
 (needs the repo to be public):
 
