@@ -203,7 +203,7 @@ function Invoke-ClassicRun([object[]]$Selection, [string]$Mode = 'install', [swi
         $inst = $null; if ($installed.ContainsKey($p.Id)) { $inst = $installed[$p.Id] }
         Write-C ('  [{0}/{1}] ' -f ($i + 1), $order.Count) $Pal.Orange -NoNewline
         Write-C ('{0,-24} ' -f $p.Name) $Pal.Fg -NoNewline
-        Write-C ('{0,-8} ' -f $(if ($p.Method -eq 'winget-upgrade') { 'upgrade' } else { $p.Method })) $Pal.Gray -NoNewline
+        Write-C ('{0,-8} ' -f $(if ($p.Group -eq 'PKG') { $p.Where } elseif ($p.Method -eq 'winget-upgrade') { 'upgrade' } else { $p.Method })) $Pal.Gray -NoNewline
         if ($p.Interactive -and -not $DryRun) { Write-C 'interactive - answer its prompts' $Pal.Purple }
         $onStatus = $null
         if ($p.Interactive -and -not $DryRun) { $onStatus = { param($m) Write-C "         $m" $Pal.Gray } }
@@ -269,8 +269,8 @@ if ($Auto) {
     Write-Host ''
     Write-Gradient '  my-win-kit - unattended run' 30
     $adm = if ($script:Admin) { 'as administrator (nothing else will ask)' } else { 'without administrator rights (installers may ask)' }
-    Write-C "  v$(Get-KitVersion) $($Gl.Dot) $adm $($Gl.Dot) $($plan.Install.Count) to install, $($plan.Update.Count) kit apps + $($plan.Other.Count) other apps to update" $Pal.Gray
-    Write-KitRunLog "auto: elevated=$(if ($script:Admin) { 'yes' } else { 'no' }); install [$(@($plan.Install | ForEach-Object Name) -join ', ')]; update [$(@($plan.Update | ForEach-Object Name) -join ', ')]; other PC apps [$(@($plan.Other | ForEach-Object Ref) -join ', ')]; skipped [$(@($plan.Skipped | ForEach-Object Name) -join ', ')]; updates itself [$(@($plan.SelfUpdating | ForEach-Object Name) -join ', ')]"
+    Write-C "  v$(Get-KitVersion) $($Gl.Dot) $adm $($Gl.Dot) $($plan.Install.Count) to install, $($plan.Update.Count) kit apps + $($plan.Other.Count) other apps + $($plan.Managers.Count) packages to update" $Pal.Gray
+    Write-KitRunLog "auto: elevated=$(if ($script:Admin) { 'yes' } else { 'no' }); install [$(@($plan.Install | ForEach-Object Name) -join ', ')]; update [$(@($plan.Update | ForEach-Object Name) -join ', ')]; other PC apps [$(@($plan.Other | ForEach-Object Ref) -join ', ')]; packages [$(@($plan.Managers | ForEach-Object Name) -join ', ')]; skipped [$(@($plan.Skipped | ForEach-Object Name) -join ', ')]; updates itself [$(@($plan.SelfUpdating | ForEach-Object Name) -join ', ')]"
     $results = @()
     if ($plan.Run.Count) {
         Invoke-ClassicRun $plan.Run 'install' -Unattended
@@ -326,18 +326,21 @@ while ($true) {
         Write-C '2' $Pal.Orange -NoNewline; Write-C ' AI tools only   ' $Pal.Fg -NoNewline; Write-C 'Enter back' $Pal.Gray
         $sub = Read-Answer '>'
         if ($sub -eq '1') {
-            Write-C '  Looking for updates (catalogue + winget upgrade)...' $Pal.Gray
+            Write-C '  Looking for updates (catalogue + winget upgrade + package managers)...' $Pal.Gray
             $script:updates = Get-KitUpdates -Installed $installed
             $plan = Get-KitUpdateAllPlan -Installed $installed -Updates $script:updates -Packages $cat
             Restore-Vt
             $cut = { param($list) $n = @($list | ForEach-Object Name); if ($n.Count -gt 8) { (($n | Select-Object -First 8) -join ', ') + " $($Gl.Ell) +$($n.Count - 8)" } else { $n -join ', ' } }
             Write-C "  Kit apps ($($plan.Kit.Count)): $(& $cut $plan.Kit)" $Pal.Fg
             Write-C "  Other apps on this PC ($($plan.Other.Count)): $(& $cut $plan.Other)" $Pal.Fg
+            Write-C "  Package managers ($($plan.Managers.Count)): $(& $cut $plan.Managers)" $Pal.Fg
             if ($plan.SelfUpdating.Count) { Write-C "  Updates itself, left out ($($plan.SelfUpdating.Count)): $(& $cut $plan.SelfUpdating)" $Pal.Gray }
-            if ($plan.Run.Count -or $plan.SelfUpdating.Count) {
-                $q = if ($plan.SelfUpdating.Count) { "Update all $($plan.Run.Count)? [Y/n, s = also the $($plan.SelfUpdating.Count) that update themselves]" } else { "Update all $($plan.Run.Count)? [Y/n]" }
+            if ($plan.ManagersOff.Count) { Write-C "  Single pip packages, left out ($($plan.ManagersOff.Count); bulk pip upgrades can break pinned dependencies)" $Pal.Gray }
+            $extra = @(@($plan.SelfUpdating) + @($plan.ManagersOff))
+            if ($plan.Run.Count -or $extra.Count) {
+                $q = if ($extra.Count) { "Update all $($plan.Run.Count)? [Y/n, s = also the $($extra.Count) left out]" } else { "Update all $($plan.Run.Count)? [Y/n]" }
                 $ok = Read-Answer $q
-                if ($ok -match '^[Ss]') { Invoke-ClassicRun (@($plan.Run) + @($plan.SelfUpdating)) 'update' }
+                if ($ok -match '^[Ss]') { Invoke-ClassicRun (@($plan.Run) + $extra) 'update' }
                 elseif ($ok -notmatch '^[Nn]' -and $plan.Run.Count) { Invoke-ClassicRun $plan.Run 'update' }
             } else { [void](Read-Answer 'Everything is up to date. Press Enter') }
         } elseif ($sub -eq '2') {

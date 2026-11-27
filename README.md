@@ -93,7 +93,16 @@ you: close the app, Smart App Control, installer type changed) and grey - skippe
   other apps; pinned ones and ones with an unknown version are left alone). Apps that update themselves (Chrome,
   Office, Teams, OneDrive, Dropbox, Acrobat Reader, AnyDesk, WhatsApp) are listed as *updates itself* and left out;
   *Choose which to update* lets you tick them anyway. A review table shows the groups and their counts first; Esc
-  goes back.
+  goes back. It also covers the **package managers** on the PC (each only when it is installed):
+  - **Microsoft Store:** asks the Store to update all its apps (needs the kit to run as administrator), plus the
+    Store apps winget can see.
+  - **npm** global packages (`npx` runs npm packages, so this covers it), **pipx** and **uv** tools, **pip**
+    itself in every Python, **PowerShell modules** from the PowerShell Gallery, **dotnet** global tools, **Scoop**,
+    **Chocolatey** (as administrator) and **rustup**.
+  - **Single pip packages are listed but start unticked** and `/auto` never touches them: upgrading every global
+    pip package at once can break packages that need an older version. Tick them in *Choose which to update*.
+  - Not covered: apps no package manager knows (portable apps, odd installers), Python packages inside project
+    virtual environments, and pinned winget / Chocolatey packages.
 - **Update** → **Update AI tools:** a table of every AI tool in the catalogue (Claude, Codex, Cursor, Antigravity,
   KiloCode, Hermes …) with installed vs latest versions, then one key updates **the ones installed on this PC**
   (winget upgrade, npm, or the tool's own updater). It never installs a missing tool: use Install apps for that.

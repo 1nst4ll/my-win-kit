@@ -262,7 +262,9 @@ No UI. Both menus call the same functions, so behaviour is identical in both.
   streams read at once, UTF-8), so the child gets its own hidden console and returns `Ec`, `Out`, `Err` and
   `Started`. `-TimeoutSec` (0 = no limit, used for installs and updates) caps scans and read-only probes:
   version commands 20 s, `winget export` 180 s, other read-only winget queries and `winget source update` 120 s,
-  `npm ls -g` 60 s, `npm view` 30 s, `wsl --list --online` 30 s, `tailscale ip` 10 s. On timeout it kills the
+  `npm ls -g` 60 s, `npm view` 30 s, `wsl --list --online` 30 s, `tailscale ip` 10 s, the package-manager
+  listings as in [Package managers](#package-managers). `Start-KitProcess` / `Wait-KitProcess` are its two halves,
+  so several listings can run at once. On timeout it kills the
   whole tree (`taskkill /T /F`, a grandchild can hold the pipes) and returns `TimedOut = $true`. `.cmd`/`.bat` files run via `cmd.exe /d /s /c`. Reason: PowerShell 7 in a conhost window switches
   the console's VT processing off for as long as a `&`-started program runs, and Spectre's live progress and
   spinners then print raw escape codes. Only `Interactive` items (MAS, WinUtil, an already-elevated Chris Titus
@@ -334,8 +336,34 @@ No UI. Both menus call the same functions, so behaviour is identical in both.
   --accept-source-agreements --disable-interactivity [--source]` through `Invoke-KitWinget` and classifies the exit
   with `Get-KitWingetOutcome` (the same buckets; a transient error is retried once). Menus never remember negative
   Ids as a selection or failure.
+- <a id="package-managers"></a>**Package managers in Update everything** (`Get-KitManagerUpdates`, called by
+  `Get-KitUpdateAllPlan` only when Update everything or `/auto` runs, never at kit start). Each source only when its
+  manager is on the PC; a missing one costs a `Get-Command`. The listings start together (`Start-KitProcess`, then
+  `Wait-KitProcess` with a limit counted from the start) and the parsers are pure functions (`ConvertFrom-Kit*`):
+
+  | Source | Listing (time limit) | Row(s), method | Update command | Rights |
+  |---|---|---|---|---|
+  | Microsoft Store | Store package key under HKCU AppModel `Repository\Packages` | one row, `store-scan` | CIM `root\cimv2\mdm\dmmap` `MDM_EnterpriseModernAppManagement_AppManagement01` `UpdateScanMethod` (the Store then installs its updates in the background) | admin (blocked without) |
+  | Store via winget | `winget upgrade --source msstore` (120 s) | per app, `winget-upgrade` + `--source msstore`; dropped when `winget upgrade` already listed it, or catalogue / pinned | `winget upgrade --id` | as winget |
+  | npm | `npm outdated -g --json` (60 s) | per package, `npm-global`; catalogue npm tools left out (they are kit rows) | `npm install -g <pkg>@latest` | user |
+  | pip, each Python | `py -0p` (15 s) + `python`/`python3` on PATH; not the WindowsApps alias, not uv-managed, not `EXTERNALLY-MANAGED`; `pip list --outdated --format=json` (90 s each) | `pip` itself ticked; every other package unticked (`ManagersOff`) | `python -m pip install --upgrade <pkg>` | user for a Python in the user profile, else as the kit |
+  | pipx / uv | `pipx list --short` / `uv tool list` (30 s) | one row each when tools exist, `pipx-all` / `uv-all` | `pipx upgrade-all` / `uv tool upgrade --all` | user |
+  | PowerShell modules | folders only: module versions whose `PSGetModuleInfo.xml` names PSGallery, per edition (7 / 5.1) and scope | one row per edition + scope, `psmodule` | that edition's `-EncodedCommand`: `Update-PSResource -Scope` (PSResourceGet), else `Update-Module` | user for CurrentUser, admin for AllUsers |
+  | dotnet tools | `dotnet tool list -g` (30 s) | one row, `dotnet-tool` | `dotnet tool update -g <id>` each | user |
+  | Scoop | `%SCOOP%` or `~\scoop\apps` has apps | one row, `scoop-all` | `scoop update`, `scoop update *` | user |
+  | Chocolatey | `choco outdated -r` (120 s); pinned left out | per package, `choco` | `choco upgrade <pkg> -y` | admin (blocked without) |
+  | rustup | `rustup check` (60 s) | one row when a toolchain has an update, `rustup` | `rustup update` | user |
+
+  Rows are items with Ids from -1001 down, group `PKG`, `Where` (source shown on screen), `How`, `Current`/`Latest`.
+  "user" rows carry `NoAdmin`, so `Test-KitDeElevate` runs them at the signed-in user's normal rights from an
+  elevated kit. `Invoke-KitPackage` hands every `$script:MgrMethods` row to `Invoke-KitMgrPackage` (commands from
+  `Get-KitMgrCommands`; exit 0 = updated, 3010/1641 = restart, else failed with the last output line). The plan adds
+  `Managers` (ticked, in `Run`) and `ManagersOff` (single pip packages: shown, unticked, never in `Run` or `/auto`,
+  because upgrading every global pip package can break packages that pin older versions). `npx` is not a store: it
+  runs npm packages, so the npm rows cover it. `MYWINKIT_SIMULATE_MANAGERS=none|sample` replaces the listing (tests,
+  screen renders).
 - **Unattended plan:** `Get-KitAutoPlan` = recommended apps that are missing (`Install`) + the update-everything
-  plan (`Update` = its kit half, `Other` = the rest of the PC); `Skipped` = Interactive / POST items it would otherwise touch
+  plan (`Update` = its kit half, `Other` = the rest of the PC, `Managers` = the ticked package-manager rows); `Skipped` = Interactive / POST items it would otherwise touch
   (recommended or installed); `SelfUpdating` = left alone. `Get-KitAutoExitCode`: 1 = something failed, 2 = nothing
   failed but something is blocked, 0 = all ok (restart needed and skipped are not failures).
 - **Failure reasons:** `Get-KitFailLine` picks the last output line that names a problem; winget, scripts and native

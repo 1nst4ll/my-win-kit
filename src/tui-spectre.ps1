@@ -996,6 +996,7 @@ function Show-UpdateAll {
         $script:Installed = Get-KitInstalled
         $ctx.Status = "[$($Hex.Fg)]Looking for updates (catalogue + winget upgrade)...[/]"
         $script:Updates = Get-KitUpdates -Installed $script:Installed
+        $ctx.Status = "[$($Hex.Fg)]Checking package managers (Store, npm, pip, modules $($Glyph.Ell))...[/]"
         $script:plan = Get-KitUpdateAllPlan -Installed $script:Installed -Updates $script:Updates
     })
     [void](Enable-KitConsoleVt)
@@ -1003,10 +1004,13 @@ function Show-UpdateAll {
     $plan = $script:plan
     while ($true) {
         Show-Header 'Update everything'
-        if ($plan.Run.Count -or $plan.SelfUpdating.Count) {
+        if ($plan.Run.Count -or $plan.SelfUpdating.Count -or $plan.ManagersOff.Count) {
             # rows that fit: window - header(3) - table frame + caption(5) - blank(1) - action list(~9) - spare(2)
-            $rows = @(@($plan.Kit | ForEach-Object { @{ Kind = 'kit'; P = $_ } }) + @($plan.SelfUpdating | ForEach-Object { @{ Kind = 'self'; P = $_ } }) + @($plan.Other | ForEach-Object { @{ Kind = 'pc'; P = $_ } }))
-            $trim = Get-TrimmedRows $rows ([Math]::Max(4, (Get-WindowHeight) - $(if ($plan.SelfUpdating.Count) { 21 } else { 20 }))) { switch ($_.Kind) { 'kit' { 0 } 'self' { 1 } default { 2 } } }
+            # single pip packages (unticked) are one summary row here; the pick screen lists them
+            $rows = @(@($plan.Kit | ForEach-Object { @{ Kind = 'kit'; P = $_ } }) + @($plan.SelfUpdating | ForEach-Object { @{ Kind = 'self'; P = $_ } }) + @($plan.Other | ForEach-Object { @{ Kind = 'pc'; P = $_ } }) + @($plan.Managers | ForEach-Object { @{ Kind = 'mgr'; P = $_ } }))
+            if ($plan.ManagersOff.Count) { $rows += @{ Kind = 'pipoff'; P = $null } }
+            $hasPick = $plan.SelfUpdating.Count -or $plan.ManagersOff.Count
+            $trim = Get-TrimmedRows $rows ([Math]::Max(4, (Get-WindowHeight) - $(if ($hasPick) { 21 } else { 20 }))) { switch ($_.Kind) { 'kit' { 0 } 'self' { 1 } 'pipoff' { 1 } 'mgr' { 3 } default { 2 } } }
             $t = New-KitTable @(' ', 'App', 'From', 'To', 'Where', 'How') $Hex.Aqua
             foreach ($r in $trim.Rows) {
                 $p = $r.P
@@ -1015,27 +1019,34 @@ function Show-UpdateAll {
                     $to = if ($script:Updates.ContainsKey($p.Id)) { "[$($Hex.Yellow)]$(E $script:Updates[$p.Id])[/]" } elseif ($p.Update) { "[$($Hex.Gray)]its own updater[/]" } else { "[$($Hex.Gray)]latest[/]" }
                     if ($r.Kind -eq 'self') { Add-KitRow $t @("[$($Hex.Gray)]-[/]", (Limit-Markup "[$($Hex.Gray)]$(E $p.Name)[/]" 30), (Limit-Markup (E $from) 18), $to, "[$($Hex.Gray)]updates itself[/]", "[$($Hex.Gray)]left out[/]") }
                     else { Add-KitRow $t @("[$($Hex.Yellow) bold]$($Glyph.Up)[/]", (Limit-Markup "[$($Hex.Fg)]$(E $p.Name)[/]" 30), (Limit-Markup (E $from) 18), $to, "[$($Hex.Orange)]kit app[/]", (Get-MethodLabel $p)) }
+                } elseif ($r.Kind -eq 'mgr') {
+                    $mto = if ($p.Latest) { "[$($Hex.Yellow)]$(E $p.Latest)[/]" } else { "[$($Hex.Gray)]latest[/]" }
+                    Add-KitRow $t @("[$($Hex.Yellow) bold]$($Glyph.Up)[/]", (Limit-Markup "[$($Hex.Fg)]$(E $p.Name)[/]" 30), (Limit-Markup (E $p.Current) 18), (Limit-Markup $mto 18), (Limit-Markup "[$($Hex.Aqua)]$(E $p.Where)[/]" 16), (Limit-Markup (E $p.How) 26))
+                } elseif ($r.Kind -eq 'pipoff') {
+                    Add-KitRow $t @("[$($Hex.Gray)]-[/]", "[$($Hex.Gray)]$(Get-Plural $plan.ManagersOff.Count 'pip package')[/]", '', '', "[$($Hex.Gray)]pip[/]", "[$($Hex.Gray)]left out (tick to include)[/]")
                 } else {
                     Add-KitRow $t @("[$($Hex.Yellow) bold]$($Glyph.Up)[/]", (Limit-Markup "[$($Hex.Fg)]$(E $p.Name)[/]" 30), (Limit-Markup (E $p.Current) 18), (Limit-Markup "[$($Hex.Yellow)]$(E $p.Latest)[/]" 18), "[$($Hex.Blue)]other on this PC[/]", 'winget upgrade')
                 }
             }
-            $cap = "[$($Hex.Orange)]$(Get-Plural $plan.Kit.Count 'kit app')[/] [$($Hex.Gray)]$($Glyph.Dot)[/] [$($Hex.Blue)]$(Get-Plural $plan.Other.Count 'other app') on this PC[/]"
-            if ($plan.SelfUpdating.Count) { $cap += " [$($Hex.Gray)]$($Glyph.Dot) $($plan.SelfUpdating.Count) update themselves (left out)[/]" }
-            if ($plan.Excluded.Count) { $cap += " [$($Hex.Gray)]$($Glyph.Dot) $(@($plan.Excluded | Where-Object Why -ne 'in the catalogue').Count) skipped (pinned / unknown version)[/]" }
+            $cap = "[$($Hex.Orange)]$(Get-Plural $plan.Kit.Count 'kit app')[/] [$($Hex.Gray)]$($Glyph.Dot)[/] [$($Hex.Blue)]$(Get-Plural $plan.Other.Count 'other app')[/] [$($Hex.Gray)]$($Glyph.Dot)[/] [$($Hex.Aqua)]$(Get-Plural $plan.Managers.Count 'package')[/]"
+            if ($plan.SelfUpdating.Count) { $cap += " [$($Hex.Gray)]$($Glyph.Dot) $($plan.SelfUpdating.Count) update themselves[/]" }
+            if ($plan.ManagersOff.Count) { $cap += " [$($Hex.Gray)]$($Glyph.Dot) $($plan.ManagersOff.Count) pip left out[/]" }
+            $nExc = @($plan.Excluded | Where-Object Why -ne 'in the catalogue').Count
+            if ($nExc) { $cap += " [$($Hex.Gray)]$($Glyph.Dot) $nExc skipped (pinned / unknown version)[/]" }
             if ($trim.Hidden) { $cap += " [$($Hex.Gray)]$($Glyph.Dot) $($trim.Hidden) more not shown[/]" }
             $t.Caption = [Spectre.Console.TableTitle]::new($cap)
             Out-Render $t
         } else {
-            Say "  [$($Hex.Green)]$($Glyph.Ok) Everything is up to date[/] [$($Hex.Gray)](0 kit apps, 0 other apps on this PC)[/]"
+            Say "  [$($Hex.Green)]$($Glyph.Ok) Everything is up to date[/] [$($Hex.Gray)](0 kit apps, 0 other apps on this PC, 0 packages)[/]"
         }
         Say ''
         $items = @()
         if ($plan.Run.Count) {
             $verb = if ($script:DryRunOn) { 'Simulate' } else { 'Update' }
-            $items += @{ Key = 'go'; Label = "[$($Hex.Orange) bold]$($Glyph.Pointer) $verb all now[/] [$($Hex.Gray)]($(Get-Plural $plan.Run.Count 'app'): $($plan.Kit.Count) kit + $($plan.Other.Count) other)[/]" }
+            $items += @{ Key = 'go'; Label = "[$($Hex.Orange) bold]$($Glyph.Pointer) $verb all now[/] [$($Hex.Gray)]($(Get-Plural $plan.Run.Count 'item'): $($plan.Kit.Count) kit + $($plan.Other.Count) other + $($plan.Managers.Count) packages)[/]" }
         }
-        if ($plan.SelfUpdating.Count) {
-            $items += @{ Key = 'pick'; Label = "[$($Hex.Fg)]Choose which to update[/] [$($Hex.Gray)](apps that update themselves start unticked)[/]" }
+        if ($plan.SelfUpdating.Count -or $plan.ManagersOff.Count) {
+            $items += @{ Key = 'pick'; Label = "[$($Hex.Fg)]Choose which to update[/] [$($Hex.Gray)](self-updating apps and single pip packages start unticked)[/]" }
         }
         switch (Select-One -Title "[$($Hex.Fg) bold]Review[/] [$($Hex.Gray)](interactive and post-install items are never part of this)[/]" -Items $items -BackLabel 'Back') {
             'go' {
@@ -1046,10 +1057,14 @@ function Show-UpdateAll {
             'pick' {
                 Show-Header 'Choose updates'
                 $pitems = @()
-                foreach ($grp in @(@{ K = 'kit'; L = 'KIT APPS'; C = $Hex.Orange; P = @($plan.Kit); On = $true }, @{ K = 'self'; L = 'UPDATES ITSELF'; C = $Hex.Gray; P = @($plan.SelfUpdating); On = $false }, @{ K = 'pc'; L = 'OTHER ON THIS PC'; C = $Hex.Blue; P = @($plan.Other); On = $true })) {
+                foreach ($grp in @(@{ K = 'kit'; L = 'KIT APPS'; C = $Hex.Orange; P = @($plan.Kit); On = $true }, @{ K = 'self'; L = 'UPDATES ITSELF'; C = $Hex.Gray; P = @($plan.SelfUpdating); On = $false }, @{ K = 'pc'; L = 'OTHER ON THIS PC'; C = $Hex.Blue; P = @($plan.Other); On = $true }, @{ K = 'mgr'; L = 'PACKAGE MANAGERS'; C = $Hex.Aqua; P = @($plan.Managers); On = $true }, @{ K = 'pip'; L = 'PIP PACKAGES (can break pinned dependencies)'; C = $Hex.Gray; P = @($plan.ManagersOff); On = $false })) {
                     if (-not $grp.P.Count) { continue }
                     $pitems += New-PickItem "g:$($grp.K)" "[$($grp.C) bold]$($grp.L)[/]" -Group $grp.K -Header
-                    foreach ($x in $grp.P) { $pitems += New-PickItem "$($x.Id)" "[$($Hex.Fg)]$(E $x.Name)[/]" -Group $grp.K -On:$grp.On }
+                    foreach ($x in $grp.P) {
+                        $lbl = "[$($Hex.Fg)]$(E $x.Name)[/]"
+                        if ($grp.K -in 'mgr', 'pip' -and $x.Latest) { $lbl += " [$($Hex.Gray)]$(E $x.Current) -> $(E $x.Latest)[/]" }
+                        $pitems += New-PickItem "$($x.Id)" $lbl -Group $grp.K -On:$grp.On
+                    }
                 }
                 $pinned = @(
                     New-PickItem 'done' "[$($Hex.Orange) bold]$($Glyph.Pointer) Continue[/] [$($Hex.Gray)](enter)[/]"
@@ -1058,7 +1073,7 @@ function Show-UpdateAll {
                 $r = Show-Picker -Title @("[$($Hex.Fg) bold]Choose updates[/]") -Items $pitems -Pinned $pinned -Multi
                 if ($r.Action -eq 'back' -or ($r.Action -eq 'pinned' -and $r.Key -eq 'back')) { continue }
                 $ids = @($r.Selected | Where-Object { $_ -notlike 'g:*' } | ForEach-Object { [int]$_ })
-                $sel = @(@($plan.Kit) + @($plan.SelfUpdating) + @($plan.Other) | Where-Object { $ids -contains $_.Id })
+                $sel = @(@($plan.Kit) + @($plan.SelfUpdating) + @($plan.Other) + @($plan.Managers) + @($plan.ManagersOff) | Where-Object { $ids -contains $_.Id })
                 if (-not $sel.Count) { continue }
                 Invoke-RunWithRetry -Selection @(@(Get-KitRunOrder @($sel | Where-Object { $_.Id -gt 0 })) + @($sel | Where-Object { $_.Id -lt 0 })) -Mode 'update' -Title 'Updating'
                 $script:ScanDone = $false
@@ -1074,7 +1089,7 @@ function Show-Update {
     while ($true) {
         Show-Header 'Update'
         $items = @(
-            @{ Key = 'all'; Label = "[$($Hex.Orange) bold]$($Glyph.Up)[/] [$($Hex.Fg) bold]$(E 'Update everything'.PadRight(18))[/] [$($Hex.Gray)]installed kit apps with a newer version (AI tools too) + every other app winget can upgrade[/]" }
+            @{ Key = 'all'; Label = "[$($Hex.Orange) bold]$($Glyph.Up)[/] [$($Hex.Fg) bold]$(E 'Update everything'.PadRight(18))[/] [$($Hex.Gray)]kit apps (AI tools too), other apps winget can upgrade, Store, npm, pip, modules $($Glyph.Ell)[/]" }
             @{ Key = 'ai';  Label = "[$($Hex.Aqua) bold]$($Glyph.Up)[/] [$($Hex.Fg) bold]$(E 'Update AI tools'.PadRight(18))[/] [$($Hex.Gray)]only the AI tools installed here: Claude, Codex, Cursor, Antigravity $($Glyph.Ell)[/]" }
         )
         switch (Select-One -Title "[$($Hex.Fg) bold]Update[/]" -Items $items -BackLabel 'Back to main menu') {

@@ -24,7 +24,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:KitVersion  = '2.8.6'   # bump with user-visible changes (shown in the menu banner)
+$script:KitVersion  = '2.8.7'   # bump with user-visible changes (shown in the menu banner)
 $script:KitRoot     = $null
 $script:BaseData    = $null
 $script:Catalog     = @()
@@ -1089,6 +1089,17 @@ function Invoke-KitProcess {
         is killed (taskkill /T /F) and the result has TimedOut = $true.
     #>
     param([Parameter(Mandatory)][string]$FilePath, [string[]]$ArgumentList = @(), [int]$TimeoutSec = 0)
+    return (Wait-KitProcess -Handle (Start-KitProcess -FilePath $FilePath -ArgumentList $ArgumentList) -TimeoutSec $TimeoutSec)
+}
+
+function Start-KitProcess {
+    <#
+    First half of Invoke-KitProcess: start the child (own hidden console,
+    redirected streams, .cmd/.bat via cmd.exe) and begin reading its output.
+    Returns a handle for Wait-KitProcess. Several handles can run at once
+    (the package-manager listings of Update everything start together).
+    #>
+    param([Parameter(Mandatory)][string]$FilePath, [string[]]$ArgumentList = @())
     $file = $FilePath
     if (-not [IO.Path]::IsPathRooted($file)) {
         $cmd = Get-Command $file -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -1112,15 +1123,30 @@ function Invoke-KitProcess {
     $psi.StandardErrorEncoding = $enc
     try { $proc = [Diagnostics.Process]::Start($psi) } catch {
         $msg = $_.Exception.Message; if ($_.Exception.InnerException) { $msg = $_.Exception.InnerException.Message }
-        return @{ Ec = 1; Out = @(); Err = @("$msg"); Started = $false }
+        return @{ Started = $false; Err = "$msg"; FilePath = $FilePath; ArgLine = $argLine }
     }
+    try { $proc.StandardInput.Close() } catch {}
+    # Read both streams at once so a full stderr pipe cannot deadlock stdout.
+    return @{
+        Started = $true; Proc = $proc; FilePath = $FilePath; ArgLine = $argLine
+        So = $proc.StandardOutput.ReadToEndAsync(); Se = $proc.StandardError.ReadToEndAsync()
+        Clock = [Diagnostics.Stopwatch]::StartNew()
+    }
+}
+
+function Wait-KitProcess {
+    <#
+    Second half of Invoke-KitProcess: wait for a Start-KitProcess handle.
+    -TimeoutSec counts from the start (0 = no limit); on timeout the whole
+    process tree is killed. Returns @{ Ec; Out; Err; Started [; TimedOut] }.
+    #>
+    param([Parameter(Mandatory)]$Handle, [int]$TimeoutSec = 0)
+    if (-not $Handle.Started) { return @{ Ec = 1; Out = @(); Err = @($Handle.Err); Started = $false } }
+    $proc = $Handle.Proc; $so = $Handle.So; $se = $Handle.Se
     try {
-        try { $proc.StandardInput.Close() } catch {}
-        # Read both streams at once so a full stderr pipe cannot deadlock stdout.
-        $so = $proc.StandardOutput.ReadToEndAsync()
-        $se = $proc.StandardError.ReadToEndAsync()
         if ($TimeoutSec -gt 0) {
-            if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+            $left = [int][Math]::Max(0, ($TimeoutSec * 1000) - $Handle.Clock.ElapsedMilliseconds)
+            if (-not $proc.WaitForExit($left)) {
                 # Kill the whole tree: a grandchild holding the pipes would keep it alive otherwise.
                 # taskkill in its own hidden console, not `& exe` (that would switch the menu console's VT off)
                 try {
@@ -1134,7 +1160,7 @@ function Invoke-KitProcess {
                 try { [void]$proc.WaitForExit(5000) } catch {}
                 $outText = ''; if ($so.Wait(2000)) { $outText = $so.Result }
                 $errText = ''; if ($se.Wait(1000)) { $errText = $se.Result }
-                Write-KitLog "timed out after $TimeoutSec s, process tree killed: $FilePath $argLine"
+                Write-KitLog "timed out after $TimeoutSec s, process tree killed: $($Handle.FilePath) $($Handle.ArgLine)"
                 return @{ Ec = 1; Out = @(Split-KitOutputLines $outText); Err = @(@(Split-KitOutputLines $errText) + "timed out after $TimeoutSec s"); Started = $true; TimedOut = $true }
             }
         } else { $proc.WaitForExit() }
@@ -2884,10 +2910,16 @@ function Get-KitUpdateAllPlan {
                 in the catalogue), as winget-upgrade items. Left out: rows whose Id
                 is a catalogue winget/Store/fallback ID, pinned packages (`winget
                 pin`), unknown or ranged versions, truncated Ids.
+        Managers    = package-manager rows that start ticked (Get-KitManagerUpdates:
+                      Store, npm, pip itself, pipx, uv, modules, dotnet, Scoop,
+                      Chocolatey, rustup); in Run.
+        ManagersOff = single pip packages: listed, unticked, not in Run.
         -UpgradeLines / -Pinned inject winget output (tests); by default the
         lines of the last Get-KitUpdates are reused, else `winget upgrade` runs.
+        -ManagerItems injects the package-manager rows (tests; @() = none);
+        by default Get-KitManagerUpdates lists them.
     #>
-    param([Parameter(Mandatory)][hashtable]$Installed, [hashtable]$Updates = @{}, [string[]]$UpgradeLines = $null, [string[]]$Pinned = $null, [object[]]$Packages = $script:Catalog)
+    param([Parameter(Mandatory)][hashtable]$Installed, [hashtable]$Updates = @{}, [string[]]$UpgradeLines = $null, [string[]]$Pinned = $null, [object[]]$Packages = $script:Catalog, [object[]]$ManagerItems = $null)
     $kit = @(Get-KitCatalogUpdateSet -Installed $Installed -Updates $Updates -Packages $Packages)
     if ($null -eq $UpgradeLines) {
         if ($null -ne $script:LastUpgradeRaw) { $UpgradeLines = @($script:LastUpgradeRaw) }
@@ -2918,7 +2950,382 @@ function Get-KitUpdateAllPlan {
     # listed as "updates itself", left out of Run (a person can still tick them on the review screen)
     $self = @($kit | Where-Object SelfUpdates)
     $kit = @($kit | Where-Object { -not $_.SelfUpdates })
-    return [pscustomobject]@{ Kit = @($kit); SelfUpdating = @($self); Other = @($others); Run = @(@(Get-KitRunOrder $kit) + @($others)); Excluded = @($excluded) }
+    # package managers; a Store row winget already lists above (or a catalogue / pinned one) is dropped
+    if ($null -eq $ManagerItems) { $ManagerItems = @(Get-KitManagerUpdates -SkipNpm @($Packages | Where-Object { $_.Method -eq 'npm' } | ForEach-Object { $_.Ref })) }
+    $otherRefs = @{}; foreach ($o in $others) { $otherRefs[$o.Ref.ToLowerInvariant()] = $true }
+    $mgr = @()
+    foreach ($m in @($ManagerItems)) {
+        if ($m.Method -eq 'winget-upgrade') { $k = $m.Ref.ToLowerInvariant(); if ($kitRefs.ContainsKey($k) -or $pinSet.ContainsKey($k) -or $otherRefs.ContainsKey($k)) { continue } }
+        $mgr += $m
+    }
+    $mOn = @($mgr | Where-Object { $_.Default }); $mOff = @($mgr | Where-Object { -not $_.Default })
+    return [pscustomobject]@{ Kit = @($kit); SelfUpdating = @($self); Other = @($others); Managers = @($mOn); ManagersOff = @($mOff); Run = @(@(Get-KitRunOrder $kit) + @($others) + @($mOn)); Excluded = @($excluded) }
+}
+
+# ---------------------------------------------------------------- package managers (Update everything)
+# Microsoft Store, npm, pip, pipx, uv, PowerShell modules, dotnet tools, Scoop, Chocolatey and rustup:
+# each only when its manager is on this PC. The listings start together (Start-KitProcess), each with a
+# time limit; the updates run through Invoke-KitPackage (Invoke-KitMgrPackage), the per-user ones
+# (npm, pip in the user profile, pipx, uv, Scoop, dotnet tools, rustup, this user's modules) at the
+# signed-in user's normal rights when the kit is elevated (NoAdmin), the Store scan, Chocolatey and
+# all-users modules as administrator. Single pip packages start unticked and never run in /auto:
+# upgrading every global pip package can break packages that pin older versions.
+# Testing: MYWINKIT_SIMULATE_MANAGERS = none (no items) | sample (sample output, nothing runs).
+
+$script:MgrIdBase = 1000
+$script:StoreCimNs = 'root\cimv2\mdm\dmmap'
+$script:StoreCimClass = 'MDM_EnterpriseModernAppManagement_AppManagement01'
+$script:MgrMethods = @('store-scan', 'npm-global', 'pip', 'pipx-all', 'uv-all', 'psmodule', 'dotnet-tool', 'scoop-all', 'choco', 'rustup')
+
+function ConvertFrom-KitNpmOutdated {
+    <# `npm outdated -g --json` -> @{ Name; Current; Latest } (packages whose latest differs). #>
+    param([string]$Json)
+    if (-not "$Json".Trim()) { return @() }
+    try { $j = $Json | ConvertFrom-Json } catch { return @() }
+    if ($null -eq $j) { return @() }
+    $rows = @()
+    foreach ($pp in @($j.PSObject.Properties)) {
+        $cur = [string](Get-KitProp $pp.Value 'current'); $lat = [string](Get-KitProp $pp.Value 'latest')
+        if ($lat -and $cur -ne $lat) { $rows += [pscustomobject]@{ Name = [string]$pp.Name; Current = $cur; Latest = $lat } }
+    }
+    return @($rows | Sort-Object Name)
+}
+
+function ConvertFrom-KitPipOutdated {
+    <# `pip list --outdated --format=json` -> @{ Name; Current; Latest }. #>
+    param([string]$Json)
+    if (-not "$Json".Trim()) { return @() }
+    try { $j = @($Json | ConvertFrom-Json) } catch { return @() }
+    $rows = @()
+    # 5.1 hands a JSON array over as one object: @() + the inner foreach flatten both shapes
+    foreach ($x in $j) {
+        foreach ($e in @($x)) {
+            $n = [string](Get-KitProp $e 'name')
+            if ($n) { $rows += [pscustomobject]@{ Name = $n; Current = [string](Get-KitProp $e 'version'); Latest = [string](Get-KitProp $e 'latest_version') } }
+        }
+    }
+    return @($rows | Sort-Object Name)
+}
+
+function ConvertFrom-KitPyLauncherList {
+    <# `py -0p` lines (" -V:3.13 *   C:\...\python.exe") -> @{ Path; Tag }. #>
+    param([string[]]$Lines = @())
+    $out = @()
+    foreach ($l in @($Lines)) {
+        $m = [regex]::Match("$l", '^\s*-V:(\S+)\s+(?:\*\s+)?([A-Za-z]:\\.+?\.exe)\s*$')
+        if ($m.Success) { $out += [pscustomobject]@{ Path = $m.Groups[2].Value; Tag = $m.Groups[1].Value } }
+    }
+    return $out
+}
+
+function ConvertFrom-KitChocoOutdated {
+    <# `choco outdated -r` lines ("name|current|available|pinned") -> @{ Name; Current; Latest }; pinned ones left out. #>
+    param([string[]]$Lines = @())
+    $rows = @()
+    foreach ($l in @($Lines)) {
+        $f = "$l".Trim() -split '\|'
+        if ($f.Count -ge 4 -and $f[0] -and $f[3] -ne 'true' -and $f[1] -ne $f[2]) { $rows += [pscustomobject]@{ Name = $f[0]; Current = $f[1]; Latest = $f[2] } }
+    }
+    return $rows
+}
+
+function ConvertFrom-KitRustupCheck {
+    <# `rustup check` lines -> @{ Name; Current; Latest } for the toolchains with "Update available". #>
+    param([string[]]$Lines = @())
+    $rows = @()
+    foreach ($l in @($Lines)) {
+        $m = [regex]::Match("$l", '^\s*(\S+)\s+-\s+Update available\s*:\s*(\S+).*?->\s*(\S+)')
+        if ($m.Success) { $rows += [pscustomobject]@{ Name = $m.Groups[1].Value; Current = $m.Groups[2].Value; Latest = $m.Groups[3].Value } }
+    }
+    return $rows
+}
+
+function ConvertFrom-KitDotnetToolList {
+    <# `dotnet tool list -g` table -> package ids. #>
+    param([string[]]$Lines = @())
+    $ids = @(); $body = $false
+    foreach ($l in @($Lines)) {
+        if ("$l" -match '^-{4,}') { $body = $true; continue }
+        if ($body -and "$l".Trim()) { $ids += ("$l".Trim() -split '\s+')[0] }
+    }
+    return $ids
+}
+
+function ConvertFrom-KitToolNames {
+    <# `uv tool list` / `pipx list --short` -> tool names (lines "name vX" / "name X"; "- exe" lines and messages skipped). #>
+    param([string[]]$Lines = @())
+    return @(@($Lines) | Where-Object { "$_" -match '^[A-Za-z0-9][A-Za-z0-9._-]*\s+v?\d' } | ForEach-Object { ("$_".Trim() -split '\s+')[0] })
+}
+
+function Test-KitPythonUsable {
+    <# A python.exe whose packages pip may upgrade: a real file, not the WindowsApps alias/stub, not uv-managed, not EXTERNALLY-MANAGED. #>
+    param([string]$Path)
+    if (-not $Path -or $Path -match '\\WindowsApps\\' -or $Path -match '\\uv\\python\\') { return $false }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    if (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $Path) 'Lib\EXTERNALLY-MANAGED')) { return $false }
+    return $true
+}
+
+function Get-KitPythonLabel {
+    <# "3.13" from a py tag or a PythonNNN folder, else the folder name. #>
+    param([string]$Path, [string]$Tag = '')
+    if ($Tag -match '^\d+\.\d+') { return $Matches[0] }
+    $m = [regex]::Match($Path, '\\Python(\d)(\d+)[^\\]*\\')
+    if ($m.Success) { return "$($m.Groups[1].Value).$($m.Groups[2].Value)" }
+    return (Split-Path -Leaf (Split-Path -Parent $Path))
+}
+
+function Get-KitPythons {
+    <# Pythons to check with pip: `py -0p` + python/python3 on PATH, usable and deduplicated: @{ Path; Label; User }. #>
+    $found = @()
+    if (Get-Command py -CommandType Application -ErrorAction SilentlyContinue) {
+        $r = Invoke-KitProcess -FilePath 'py' -ArgumentList @('-0p') -TimeoutSec 15
+        if ($r.Started -and $r.Ec -eq 0) { $found += @(ConvertFrom-KitPyLauncherList -Lines $r.Out) }
+    }
+    foreach ($n in 'python', 'python3') {
+        foreach ($c in @(Get-Command $n -CommandType Application -All -ErrorAction SilentlyContinue)) { $found += [pscustomobject]@{ Path = $c.Path; Tag = '' } }
+    }
+    $seen = @{}; $out = @()
+    foreach ($f in $found) {
+        if (-not (Test-KitPythonUsable $f.Path)) { continue }
+        $k = $f.Path.ToLowerInvariant(); if ($seen.ContainsKey($k)) { continue }; $seen[$k] = $true
+        $user = $f.Path.StartsWith($env:USERPROFILE, [StringComparison]::OrdinalIgnoreCase)
+        $out += [pscustomobject]@{ Path = $f.Path; Label = (Get-KitPythonLabel -Path $f.Path -Tag $f.Tag); User = $user }
+    }
+    return $out
+}
+
+function Get-KitGalleryModules {
+    <#
+    PowerShell modules installed from the PowerShell Gallery (a PSGetModuleInfo.xml naming PSGallery),
+    per edition and scope: @{ Edition = '7'|'5.1'; Scope = 'CurrentUser'|'AllUsers'; Names }.
+    Reads folders only (no child process).
+    #>
+    $docs = [Environment]::GetFolderPath('MyDocuments')
+    $roots = @(
+        @{ Edition = '7'; Scope = 'CurrentUser'; Dir = (Join-Path $docs 'PowerShell\Modules') }
+        @{ Edition = '5.1'; Scope = 'CurrentUser'; Dir = (Join-Path $docs 'WindowsPowerShell\Modules') }
+        @{ Edition = '7'; Scope = 'AllUsers'; Dir = (Join-Path $env:ProgramFiles 'PowerShell\Modules') }
+        @{ Edition = '5.1'; Scope = 'AllUsers'; Dir = (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules') }
+    )
+    $out = @()
+    foreach ($r in $roots) {
+        if (-not (Test-Path -LiteralPath $r.Dir)) { continue }
+        $names = @()
+        foreach ($m in @(Get-ChildItem -LiteralPath $r.Dir -Directory -ErrorAction SilentlyContinue)) {
+            foreach ($v in @(Get-ChildItem -LiteralPath $m.FullName -Directory -ErrorAction SilentlyContinue)) {
+                $x = Join-Path $v.FullName 'PSGetModuleInfo.xml'
+                if ((Test-Path -LiteralPath $x) -and ([IO.File]::ReadAllText($x) -match '<S N="Repository">PSGallery</S>')) { $names += $m.Name; break }
+            }
+        }
+        if ($names.Count) { $out += [pscustomobject]@{ Edition = $r.Edition; Scope = $r.Scope; Names = @($names | Sort-Object -Unique) } }
+    }
+    return $out
+}
+
+function Test-KitStorePresent {
+    <# The Microsoft Store app is installed for this user (its package key in the AppModel repository). #>
+    $k = 'HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages'
+    return [bool](@(Get-ChildItem -LiteralPath $k -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -like 'Microsoft.WindowsStore_*' }).Count)
+}
+
+function New-KitMgrItem {
+    <# A package-manager row as a runnable item: negative Id (below -1000), group PKG, Where = the source shown on screen. #>
+    param([int]$N, [string]$Name, [string]$Method, [string]$Ref = '', [string]$Where, [string]$How, [string]$Current = '', [string]$Latest = '',
+        [switch]$Off, [switch]$User, [string]$Exe = '', [string[]]$Names = @(), [string]$Source = '')
+    $order = @{ PKG = @($script:Groups).Count + 2 }
+    $p = ConvertTo-KitPackage @{ Id = -($script:MgrIdBase + $N); Name = $Name; Group = 'PKG'; On = (-not $Off); Method = $Method; Ref = $Ref; Desc = $How; NoAdmin = [bool]$User; Exe = $Exe } $order 'pkg'
+    $p | Add-Member -NotePropertyName Current -NotePropertyValue $Current
+    $p | Add-Member -NotePropertyName Latest -NotePropertyValue $Latest
+    $p | Add-Member -NotePropertyName Where -NotePropertyValue $Where
+    $p | Add-Member -NotePropertyName How -NotePropertyValue $How
+    $p | Add-Member -NotePropertyName Names -NotePropertyValue @($Names)
+    $p | Add-Member -NotePropertyName Source -NotePropertyValue $Source
+    return $p
+}
+
+function Get-KitManagerSample {
+    <# MYWINKIT_SIMULATE_MANAGERS=sample: the raw outputs a PC with every manager could give (tests, screen renders). #>
+    return @{
+        Has = @{ npm = $true; pipx = $true; uv = $true; dotnet = $true; choco = $true; rustup = $true; scoop = $true; winget = $true }
+        Store = $true; ScoopApps = 2
+        Res = @{
+            npm = @{ Ec = 1; Started = $true; Out = @('{ "typescript": { "current": "5.6.2", "wanted": "5.9.3", "latest": "5.9.3" }, "@kilocode/cli": { "current": "1.0.0", "latest": "1.2.0" }, "npm": { "current": "10.9.0", "latest": "11.6.2" } }') }
+            pipx = @{ Ec = 0; Started = $true; Out = @('black 24.8.0', 'httpie 3.2.4') }
+            uv = @{ Ec = 0; Started = $true; Out = @('ruff v0.14.0', '- ruff.exe') }
+            dotnet = @{ Ec = 0; Started = $true; Out = @('Package Id      Version      Commands', '-------------------------------------', 'dotnet-ef       9.0.0        dotnet-ef') }
+            choco = @{ Ec = 0; Started = $true; Out = @('git|2.47.0|2.51.0|false', 'vlc|3.0.20|3.0.21|true') }
+            rustup = @{ Ec = 0; Started = $true; Out = @('stable-x86_64-pc-windows-msvc - Update available : 1.80.1 (3f5fd8dd4 2024-08-06) -> 1.91.0 (f8297e351 2025-10-28)', 'rustup - Up to date : 1.28.2') }
+            msstore = @{ Ec = 0; Started = $true; Out = @('Name             Id           Version Available Source', '------------------------------------------------------', 'Sample Store App 9NBLGGH4NNS1 1.2.0   1.3.0     msstore') }
+            'pip:0' = @{ Ec = 0; Started = $true; Out = @('[{"name": "pip", "version": "24.2", "latest_version": "25.3", "latest_filetype": "wheel"}, {"name": "requests", "version": "2.31.0", "latest_version": "2.32.5", "latest_filetype": "wheel"}]') }
+        }
+        Pythons = @([pscustomobject]@{ Path = 'C:\Python313\python.exe'; Label = '3.13'; User = $false })
+        Modules = @([pscustomobject]@{ Edition = '7'; Scope = 'CurrentUser'; Names = @('Terminal-Icons') })
+    }
+}
+
+function Get-KitManagerUpdates {
+    <#
+    .SYNOPSIS
+        Package-manager rows for Update everything (see the section comment above).
+    .DESCRIPTION
+        Each source only when its manager is on this PC; the listings start together and each has a
+        time limit (npm 60 s, pip 90 s per Python, pipx/uv/dotnet 30 s, choco 120 s, rustup 60 s,
+        winget msstore 120 s). -SkipNpm = npm package names the catalogue already updates.
+        Returns items (Method in $script:MgrMethods, or winget-upgrade with Source msstore), Default
+        on except single pip packages.
+    #>
+    param([string[]]$SkipNpm = @())
+    $sim = $env:MYWINKIT_SIMULATE_MANAGERS
+    if ($sim -eq 'none') { return @() }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    if ($sim -eq 'sample') {
+        $s = Get-KitManagerSample
+        $has = $s.Has; $res = $s.Res; $pythons = @($s.Pythons); $modules = @($s.Modules); $store = $s.Store; $scoopApps = $s.ScoopApps
+    } else {
+        $has = @{}
+        foreach ($m in 'npm', 'pipx', 'uv', 'dotnet', 'choco', 'rustup', 'scoop', 'winget') { $has[$m] = [bool](Get-Command $m -CommandType Application -ErrorAction SilentlyContinue) }
+        $pythons = @(Get-KitPythons)
+        $jobs = @{}
+        if ($has['npm']) { $jobs['npm'] = @{ H = (Start-KitProcess -FilePath 'npm' -ArgumentList @('outdated', '-g', '--json')); T = 60 } }
+        if ($has['pipx']) { $jobs['pipx'] = @{ H = (Start-KitProcess -FilePath 'pipx' -ArgumentList @('list', '--short')); T = 30 } }
+        if ($has['uv']) { $jobs['uv'] = @{ H = (Start-KitProcess -FilePath 'uv' -ArgumentList @('tool', 'list')); T = 30 } }
+        if ($has['dotnet']) { $jobs['dotnet'] = @{ H = (Start-KitProcess -FilePath 'dotnet' -ArgumentList @('tool', 'list', '-g')); T = 30 } }
+        if ($has['choco']) { $jobs['choco'] = @{ H = (Start-KitProcess -FilePath 'choco' -ArgumentList @('outdated', '-r', '--ignore-unfound')); T = 120 } }
+        if ($has['rustup']) { $jobs['rustup'] = @{ H = (Start-KitProcess -FilePath 'rustup' -ArgumentList @('check')); T = 60 } }
+        if ($has['winget']) { $jobs['msstore'] = @{ H = (Start-KitProcess -FilePath 'winget' -ArgumentList @('upgrade', '--source', 'msstore', '--accept-source-agreements', '--disable-interactivity')); T = 120 } }
+        for ($i = 0; $i -lt $pythons.Count; $i++) {
+            $jobs["pip:$i"] = @{ H = (Start-KitProcess -FilePath $pythons[$i].Path -ArgumentList @('-m', 'pip', 'list', '--outdated', '--format=json', '--disable-pip-version-check')); T = 90 }
+        }
+        $res = @{}
+        foreach ($k in @($jobs.Keys)) { $res[$k] = Wait-KitProcess -Handle $jobs[$k].H -TimeoutSec $jobs[$k].T }
+        $store = Test-KitStorePresent
+        $modules = @(Get-KitGalleryModules)
+        $scoopDir = if ($env:SCOOP) { $env:SCOOP } else { Join-Path $env:USERPROFILE 'scoop' }
+        $scoopApps = if ($has['scoop']) { @(Get-ChildItem -LiteralPath (Join-Path $scoopDir 'apps') -Directory -ErrorAction SilentlyContinue | Where-Object Name -ne 'scoop').Count } else { 0 }
+    }
+    $items = @(); $n = 0; $off = @()
+    function Get-Out([string]$Key) { if ($res.ContainsKey($Key) -and $res[$Key].Started -and -not $res[$Key]['TimedOut']) { return @($res[$Key].Out) }; return @() }
+
+    if ($store) { $n++; $items += New-KitMgrItem -N $n -Name 'Microsoft Store apps (all)' -Method 'store-scan' -Where 'Store' -How 'Store update scan' }
+    foreach ($row in @(ConvertFrom-KitWingetUpgradeText -Lines (Get-Out 'msstore'))) {
+        $n++; $items += New-KitMgrItem -N $n -Name $row.Name -Method 'winget-upgrade' -Ref $row.Id -Where 'Store' -How 'winget upgrade (msstore)' -Current $row.Version -Latest $row.Available -Source 'msstore'
+    }
+    $skip = @{}; foreach ($x in @($SkipNpm)) { if ($x) { $skip[([string]$x).ToLowerInvariant()] = $true } }
+    foreach ($row in @(ConvertFrom-KitNpmOutdated -Json ((Get-Out 'npm') -join "`n"))) {
+        if ($skip.ContainsKey($row.Name.ToLowerInvariant())) { continue }
+        $n++; $items += New-KitMgrItem -N $n -Name $row.Name -Method 'npm-global' -Ref $row.Name -Where 'npm' -How 'npm install -g' -Current $row.Current -Latest $row.Latest -User
+    }
+    if (@(ConvertFrom-KitToolNames -Lines (Get-Out 'pipx')).Count) { $n++; $items += New-KitMgrItem -N $n -Name "pipx apps ($(@(ConvertFrom-KitToolNames -Lines (Get-Out 'pipx')).Count))" -Method 'pipx-all' -Where 'pipx' -How 'pipx upgrade-all' -User }
+    if (@(ConvertFrom-KitToolNames -Lines (Get-Out 'uv')).Count) { $n++; $items += New-KitMgrItem -N $n -Name "uv tools ($(@(ConvertFrom-KitToolNames -Lines (Get-Out 'uv')).Count))" -Method 'uv-all' -Where 'uv' -How 'uv tool upgrade --all' -User }
+    for ($i = 0; $i -lt $pythons.Count; $i++) {
+        $py = $pythons[$i]
+        foreach ($row in @(ConvertFrom-KitPipOutdated -Json ((Get-Out "pip:$i") -join "`n"))) {
+            $n++
+            if ($row.Name -eq 'pip') { $items += New-KitMgrItem -N $n -Name "pip (Python $($py.Label))" -Method 'pip' -Ref 'pip' -Where "pip $($py.Label)" -How 'pip install --upgrade pip' -Current $row.Current -Latest $row.Latest -Exe $py.Path -User:$py.User }
+            else { $off += New-KitMgrItem -N $n -Name "$($row.Name) (Python $($py.Label))" -Method 'pip' -Ref $row.Name -Where "pip $($py.Label)" -How 'pip install --upgrade' -Current $row.Current -Latest $row.Latest -Exe $py.Path -User:$py.User -Off }
+        }
+    }
+    foreach ($m in $modules) {
+        $exe = if ($m.Edition -eq '7') { Get-KitPwshPath } else { Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe' }
+        if (-not $exe) { continue }
+        $who = if ($m.Scope -eq 'CurrentUser') { 'this user' } else { 'all users' }
+        $ed = if ($m.Edition -eq '7') { 'PowerShell 7' } else { 'Windows PowerShell' }
+        $n++; $items += New-KitMgrItem -N $n -Name "$ed modules, $who ($(@($m.Names).Count))" -Method 'psmodule' -Ref $m.Scope -Where 'PS Gallery' -How 'Update-PSResource' -Exe $exe -Names @($m.Names) -User:($m.Scope -eq 'CurrentUser')
+    }
+    $tools = @(ConvertFrom-KitDotnetToolList -Lines (Get-Out 'dotnet'))
+    if ($tools.Count) { $n++; $items += New-KitMgrItem -N $n -Name "dotnet global tools ($($tools.Count))" -Method 'dotnet-tool' -Where 'dotnet' -How 'dotnet tool update -g' -Names $tools -User }
+    if ($scoopApps -gt 0) { $n++; $items += New-KitMgrItem -N $n -Name "Scoop apps ($scoopApps)" -Method 'scoop-all' -Where 'Scoop' -How 'scoop update *' -User }
+    foreach ($row in @(ConvertFrom-KitChocoOutdated -Lines (Get-Out 'choco'))) {
+        $n++; $items += New-KitMgrItem -N $n -Name $row.Name -Method 'choco' -Ref $row.Name -Where 'Chocolatey' -How 'choco upgrade' -Current $row.Current -Latest $row.Latest
+    }
+    $rust = @(ConvertFrom-KitRustupCheck -Lines (Get-Out 'rustup'))
+    if ($rust.Count) { $n++; $items += New-KitMgrItem -N $n -Name "Rust toolchains ($($rust.Count))" -Method 'rustup' -Where 'rustup' -How 'rustup update' -Current $rust[0].Current -Latest $rust[0].Latest -User }
+    Write-KitLog ("managers: {0} items + {1} pip packages (off) in {2:N1} s; present: {3}" -f $items.Count, $off.Count, $sw.Elapsed.TotalSeconds, ((@($has.Keys | Where-Object { $has[$_] } | Sort-Object) + @(if ($pythons.Count) { "python x$($pythons.Count)" })) -join ', '))
+    return @(@($items) + @($off))
+}
+
+function ConvertTo-KitEncodedCommand([string]$Text) { return [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Text)) }
+
+function Get-KitMgrCommands {
+    <# The programs an update row runs: @{ File; Args; Text } each (several for dotnet tools and Scoop). #>
+    param([Parameter(Mandatory)]$Package)
+    $p = $Package
+    switch ($p.Method) {
+        'npm-global' { return @{ File = 'npm'; Args = @('install', '-g', "$($p.Ref)@latest"); Text = "npm install -g $($p.Ref)@latest" } }
+        'pip' { return @{ File = [string]$p.Exe; Args = @('-m', 'pip', 'install', '--upgrade', '--disable-pip-version-check', $p.Ref); Text = "python -m pip install --upgrade $($p.Ref) ($($p.Exe))" } }
+        'pipx-all' { return @{ File = 'pipx'; Args = @('upgrade-all'); Text = 'pipx upgrade-all' } }
+        'uv-all' { return @{ File = 'uv'; Args = @('tool', 'upgrade', '--all'); Text = 'uv tool upgrade --all' } }
+        'psmodule' {
+            $names = (@($p.Names) | ForEach-Object { ConvertTo-KitPsLiteral ([string]$_) }) -join ', '
+            $script = @"
+`$ErrorActionPreference = 'Continue'; `$bad = 0
+foreach (`$n in @($names)) {
+    try {
+        if (Get-Command Update-PSResource -ErrorAction SilentlyContinue) { Update-PSResource -Name `$n -Scope $($p.Ref) -TrustRepository -AcceptLicense -ErrorAction Stop }
+        else { Update-Module -Name `$n -Force -Confirm:`$false -ErrorAction Stop }
+        "updated `$n"
+    } catch { `$bad++; "FAILED `$n - `$(`$_.Exception.Message)" }
+}
+exit `$bad
+"@
+            return @{ File = [string]$p.Exe; Args = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', (ConvertTo-KitEncodedCommand $script)); Text = "Update-PSResource $(@($p.Names) -join ', ') -Scope $($p.Ref) ($(Split-Path -Leaf ([string]$p.Exe)))" }
+        }
+        'dotnet-tool' { return @(@($p.Names) | ForEach-Object { @{ File = 'dotnet'; Args = @('tool', 'update', '-g', $_); Text = "dotnet tool update -g $_" } }) }
+        'scoop-all' { return @(@{ File = 'scoop'; Args = @('update'); Text = 'scoop update' }, @{ File = 'scoop'; Args = @('update', '*'); Text = 'scoop update *' }) }
+        'choco' { return @{ File = 'choco'; Args = @('upgrade', $p.Ref, '-y', '--no-progress'); Text = "choco upgrade $($p.Ref) -y" } }
+        'rustup' { return @{ File = 'rustup'; Args = @('update'); Text = 'rustup update' } }
+    }
+    return @()
+}
+
+function Invoke-KitMgrPackage {
+    <#
+    Run one package-manager row (Invoke-KitPackage hands these over). -DeElevate = per-user manager
+    and an elevated kit: runs at the signed-in user's normal rights. The Store scan, Chocolatey and
+    all-users modules need administrator rights (blocked without). Same result buckets as the rest.
+    #>
+    param([Parameter(Mandatory)]$Package, [switch]$DryRun, [switch]$DeElevate, [scriptblock]$OnStatus)
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $p = $Package; $from = [string]$p.Current; $to = [string]$p.Latest
+    $notify = $OnStatus
+    function Step([string]$t) { if ($notify) { try { & $notify $t } catch {} } }
+    $note = ''; if ($DeElevate) { $note = ' (at normal user rights, not as admin)' }
+    $needsAdmin = ($p.Method -in 'store-scan', 'choco') -or ($p.Method -eq 'psmodule' -and $p.Ref -eq 'AllUsers')
+    if ($p.Method -eq 'store-scan') {
+        if ($DryRun) { return New-KitResult $p 'dryrun' '' '' 'ask the Microsoft Store to update all its apps (MDM UpdateScanMethod, as administrator)' '' $sw.Elapsed.TotalSeconds }
+        if (-not (Test-KitAdmin)) { return New-KitResult $p 'blocked' '' '' 'needs administrator rights: start the kit as administrator' '' $sw.Elapsed.TotalSeconds }
+        Step 'asking the Microsoft Store to update its apps'
+        try {
+            $ci = Get-CimInstance -Namespace $script:StoreCimNs -ClassName $script:StoreCimClass -ErrorAction Stop
+            $r = @($ci | Invoke-CimMethod -MethodName 'UpdateScanMethod' -ErrorAction Stop)
+            $rv = if ($r.Count) { Get-KitProp $r[0] 'ReturnValue' } else { 0 }
+            Write-KitLog "  store scan: ReturnValue $rv"
+            if ($null -eq $rv -or [int]$rv -eq 0) { return New-KitResult $p 'done' '' '' 'the Store is installing its updates in the background' '' $sw.Elapsed.TotalSeconds }
+            return New-KitResult $p 'failed' '' '' "Store update scan returned $rv" '' $sw.Elapsed.TotalSeconds
+        } catch { return New-KitResult $p 'failed' '' '' "Store update scan: $($_.Exception.Message)" '' $sw.Elapsed.TotalSeconds }
+    }
+    $cmds = @(Get-KitMgrCommands -Package $p)
+    if (-not $cmds.Count) { return New-KitResult $p 'failed' $from '' "unknown package-manager method '$($p.Method)'" '' $sw.Elapsed.TotalSeconds }
+    if ($DryRun) { return New-KitResult $p 'dryrun' $from $to ((@($cmds | ForEach-Object { $_.Text }) -join '; ') + $note) '' $sw.Elapsed.TotalSeconds }
+    if ($needsAdmin -and -not (Test-KitAdmin)) { return New-KitResult $p 'blocked' $from '' 'needs administrator rights: start the kit as administrator' '' $sw.Elapsed.TotalSeconds }
+    $restart = $false
+    foreach ($c in $cmds) {
+        Step "running $($c.Text)$note"
+        Write-KitLog "  run $($c.Text)$(if ($DeElevate) { '  (de-elevated)' })"
+        $r = Invoke-KitChild -FilePath $c.File -ArgumentList $c.Args -DeElevate:$DeElevate
+        $lines = @(@($r.Out) + @($r.Err))
+        foreach ($l in ($lines | Select-Object -Last 10)) { Write-KitLog "  | $l" }
+        if ($r.Ec -in 3010, 1641) { $restart = $true; continue }
+        if ($r.Ec -ne 0) {
+            $last = @($lines | Where-Object { "$_".Trim() } | Select-Object -Last 1)
+            $why = if ($last.Count) { "$($last[0])".Trim() } else { 'see log' }
+            if ($why.Length -gt 90) { $why = $why.Substring(0, 87) + '...' }
+            return New-KitResult $p 'failed' $from '' "$why (exit $($r.Ec))" '' $sw.Elapsed.TotalSeconds
+        }
+    }
+    if ($restart) { return New-KitResult $p 'restart' $from $to 'Windows restart needed' '' $sw.Elapsed.TotalSeconds }
+    return New-KitResult $p 'updated' $from $to '' '' $sw.Elapsed.TotalSeconds
 }
 
 # ---------------------------------------------------------------- unattended run (/auto)
@@ -2933,11 +3340,12 @@ function Get-KitAutoPlan {
       Skipped = Interactive and POST items it would otherwise touch
                 (recommended or installed): they need a person
       SelfUpdating = installed SelfUpdates apps with an update: left alone
-    Returns @{ Install; Update; Other; Skipped; SelfUpdating; Run } (Run = Install + Update, in run order, then Other).
-    -UpgradeLines / -Pinned pass through to Get-KitUpdateAllPlan (tests).
+      Managers = the package-manager rows that start ticked (never single pip packages)
+    Returns @{ Install; Update; Other; Managers; Skipped; SelfUpdating; Run } (Run = Install + Update, in run order, then Other, then Managers).
+    -UpgradeLines / -Pinned / -ManagerItems pass through to Get-KitUpdateAllPlan (tests).
     #>
-    param([Parameter(Mandatory)][hashtable]$Installed, [hashtable]$Updates = @{}, [string[]]$UpgradeLines = $null, [string[]]$Pinned = $null, [object[]]$Packages = $script:Catalog)
-    $all = Get-KitUpdateAllPlan -Installed $Installed -Updates $Updates -UpgradeLines $UpgradeLines -Pinned $Pinned -Packages $Packages
+    param([Parameter(Mandatory)][hashtable]$Installed, [hashtable]$Updates = @{}, [string[]]$UpgradeLines = $null, [string[]]$Pinned = $null, [object[]]$Packages = $script:Catalog, [object[]]$ManagerItems = $null)
+    $all = Get-KitUpdateAllPlan -Installed $Installed -Updates $Updates -UpgradeLines $UpgradeLines -Pinned $Pinned -Packages $Packages -ManagerItems $ManagerItems
     $install = @(); $skipped = @()
     foreach ($p in $Packages) {
         $isInst = $Installed.ContainsKey($p.Id)
@@ -2945,9 +3353,9 @@ function Get-KitAutoPlan {
         if (-not $isInst -and $p.Default) { $install += $p }
     }
     return [pscustomobject]@{
-        Install = @($install); Update = @($all.Kit); Other = @($all.Other); Skipped = @(Get-KitRunOrder $skipped)
+        Install = @($install); Update = @($all.Kit); Other = @($all.Other); Managers = @($all.Managers); Skipped = @(Get-KitRunOrder $skipped)
         SelfUpdating = @($all.SelfUpdating)
-        Run = @(@(Get-KitRunOrder (@($install) + @($all.Kit))) + @($all.Other))
+        Run = @(@(Get-KitRunOrder (@($install) + @($all.Kit))) + @($all.Other) + @($all.Managers))
     }
 }
 
@@ -3314,6 +3722,11 @@ function Invoke-KitPackage {
                 }
             }
 
+            { $_ -in $script:MgrMethods } {
+                # Package managers (Update everything): Store scan, npm, pip, pipx, uv, modules, dotnet, Scoop, Chocolatey, rustup
+                return (Invoke-KitMgrPackage -Package $p -DryRun:$DryRun -DeElevate:$de -OnStatus $OnStatus)
+            }
+
             default { throw "unknown method '$($p.Method)'" }
         }
     } catch {
@@ -3363,4 +3776,7 @@ Export-ModuleMember -Function Initialize-Kit, Get-KitVersion, Get-KitUpdates, Ge
     Get-KitWingetInstallArgs, Get-KitWingetResult, Get-KitInstallFolder, Get-KitBlockingProcesses, Get-KitInUse, Test-KitSmartAppControl, Test-KitAppControlBlock,
     Get-KitEnableRdpScript, Get-KitPwshMsixAsset, Test-KitResultOk,
     ConvertTo-KitCidr, Test-KitTailnetAddresses, Merge-KitAuthorizedKeys, Get-KitTailnetConfig, Get-KitTailnetState, Test-KitTailnetState,
-    Get-KitTailnetAdminScript, Get-KitTailscaleSetArgs, Invoke-KitTailnetSetup
+    Get-KitTailnetAdminScript, Get-KitTailscaleSetArgs, Invoke-KitTailnetSetup,
+    Start-KitProcess, Wait-KitProcess, ConvertFrom-KitNpmOutdated, ConvertFrom-KitPipOutdated, ConvertFrom-KitPyLauncherList,
+    ConvertFrom-KitChocoOutdated, ConvertFrom-KitRustupCheck, ConvertFrom-KitDotnetToolList, ConvertFrom-KitToolNames,
+    Test-KitPythonUsable, Get-KitPythonLabel, Get-KitPythons, Get-KitGalleryModules, Test-KitStorePresent, Get-KitManagerUpdates, Get-KitMgrCommands, Invoke-KitMgrPackage

@@ -22,6 +22,8 @@ New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 $env:MYWINKIT_STATE_DIR = Join-Path ([IO.Path]::GetTempPath()) ("my-win-kit-render-" + [guid]::NewGuid())
 # this copy's config/*.json (not GitHub main) and loader (no self-update)
 $env:MYWINKIT_CONFIG_URL = ([Uri](Join-Path $root 'config')).AbsoluteUri
+# Package managers: fixed sample rows (Store, npm, pip, ...), so screens do not depend on this PC and nothing slow runs
+$env:MYWINKIT_SIMULATE_MANAGERS = 'sample'
 $env:MYWINKIT_RAW_URL = 'file:///C:/nonexistent-my-win-kit-update-source'
 
 $screens = [ordered]@{
