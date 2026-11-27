@@ -57,7 +57,7 @@ Front door: [README.md](README.md). Docs index and ownership map: [docs/architec
   thing everywhere (see architecture.md → Modern menu → Glyphs).
 - **PowerShell variable names ignore case:** `$G` and `$g`, `$P` and `$p` are one variable. Never name a
   script-level table with a letter that a loop variable uses (this bit twice in the classic menu). `win11-tweaks.ps1` is the exception: it contains box-drawing characters and must keep
-  its UTF-8 BOM. `install.ps1` carries a BOM from history; harmless, keep it. Check with `head -c3 file | xxd`.
+  its UTF-8 BOM. `install.ps1` must have NO BOM: `irm | iex` keeps it as a character in front of `param(` and the text does not parse (test-config checks it). Check with `head -c3 file | xxd`.
 - **Line endings are LF** (pinned in `.gitattributes`): publish hash-compares with the OneDrive copies.
 - **No UI in `core.psm1`.** It returns result objects and reports progress through `-OnStatus`. Anything both
   menus need goes into core, so behaviour stays identical.

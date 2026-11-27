@@ -163,6 +163,10 @@ try {
     $o = & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -LiteralPath '$loader' -Raw | Invoke-Expression; 'STILL-OPEN'" 2>&1 | Out-String
     $log = Get-LatestLog $st5
     Check ($o -match 'downloading the kit' -and (Test-Path (Join-Path $st5 'app\9.9.9\install.ps1')) -and $log -match 'bootstrap ->' -and $log -match 'frontend: CLASSIC started' -and $o -match 'STILL-OPEN') 'irm | iex: empty $PSScriptRoot -> downloaded to app\9.9.9, started, caller shell not closed'
+    # irm keeps a UTF-8 BOM as a character in front of param(): the text would not parse (Get-Content above hides that)
+    $raw = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($loader)); $okParse = $true
+    try { [void][scriptblock]::Create($raw) } catch { $okParse = $false }
+    Check ($okParse -and [int][char]$raw[0] -ne 0xFEFF) 'irm | iex: install.ps1 has no BOM and parses as downloaded text'
     $env:MYWINKIT_BOOTSTRAP_ARGS = ''
 } finally {
     foreach ($n in $keepEnv.Keys) { [Environment]::SetEnvironmentVariable($n, $keepEnv[$n]) }

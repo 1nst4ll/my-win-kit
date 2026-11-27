@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     my-win-kit loader: keeps the kit up to date and picks the best menu this PC can run.
