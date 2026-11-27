@@ -7,6 +7,13 @@
 
 _A new session can start from this line, no handover needed._
 
+- **Kit v2.8.7 on branch `update-all-managers` (not merged, waiting for Daniel's go):** Daniel: "can you include
+  update all from windows store that is installed as well as pip npx and other packages". Update everything (and
+  `/auto`) now also covers the Microsoft Store (update scan, as admin), npm globals, pip itself, pipx, uv,
+  PowerShell Gallery modules, dotnet tools, Scoop, Chocolatey and rustup; single pip packages are listed unticked.
+  Read-only listing on the main PC: Store scan, 1 npm package, uv tools, pip in Python 3.14 and 3.13, PowerShell 7
+  and 5.1 modules ticked; 47 pip packages unticked. Listing time: ~4.5 s warm (38 s cold: pip fetching its index).
+  Not run for real yet. See CHANGELOG.
 - **Kit v2.8.6 is live (Tailnet setup):** PR #10 merged into `main` on 2026-11-26 (CI green) with Daniel's go ("merge both");
   version raised from 2.8.4 to 2.8.6 so it lands above PR #9. New **Tailnet setup** (catalogue Id 63, Remote access,
   off) + `config/tailnet.json`. Daniel: "add to the kit script that will setup the machine to work in my tailnet";
@@ -97,7 +104,7 @@ _A new session can start from this line, no handover needed._
 | Apps in `config/catalog.json` | 60 total: 33 in the recommended set, 22 DEV (off), 3 POST (off), Tailnet setup (off); 3 removed (Perplexity 8, Samsung Quick Share 33, Python 3.13 41). NoAdmin: 6 (OneDrive, VS Code, GitHub Desktop, Cursor, Claude Code CLI, Antigravity IDE). SelfUpdates: 8 (Office, Chrome, OneDrive, Dropbox, Acrobat Reader, Teams, WhatsApp, AnyDesk). Unsigned: 1 (Hermes) |
 | By method | 45 winget, 2 Store, 6 script, 2 direct, 1 npm, 4 builtin. AI-flagged (Update AI tools): 9 (Claude Desktop, Claude Code CLI, KiloCode CLI, Cursor, Codex CLI, Antigravity IDE, Antigravity, Antigravity CLI, Hermes Agent) |
 | Next free app Id | 64 (above every Id in Packages, Removed, RetiredIds; use it when adding an app to `config/catalog.json` by hand) |
-| Kit version | 2.8.6 (`$script:KitVersion` in src/core.psm1) |
+| Kit version | 2.8.6 on `main`; 2.8.7 on branch `update-all-managers` (`$script:KitVersion` in src/core.psm1) |
 | Shared settings | `removeShortcuts` true, `dryRunByDefault` false, `elevateAtStart` true; `autoInstallEssentials` true (was `autoInstallPwsh`, still read) |
 | Modern menu needs | PowerShell 7.4+, PwshSpectreConsole ≥ 2.3 (tested with 2.6.3 on pwsh 7.7.0); no GitHub CLI or sign-in |
 | Startup (this PC) | ~750 ms launch → banner → quit, plus the config fetch (5 small files). The essentials checks add ~0.3 s when everything is already set up (core import ~55 ms, Terminal settings compare ~260 ms in 5.1) |

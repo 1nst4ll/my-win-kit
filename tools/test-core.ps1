@@ -205,7 +205,7 @@ try {
 
 Write-Host 'unattended run plan (Get-KitAutoPlan on injected data, no scan):'
 $inj = @{ 2 = '8.1'; 36 = '1.100'; 46 = '2.0.1'; 47 = '1.0.0'; 59 = ''; 61 = '24.04' }
-$plan = Get-KitAutoPlan -Installed $inj -Updates @{ 2 = '8.9' } -UpgradeLines @() -Pinned @() -Packages $cat
+$plan = Get-KitAutoPlan -Installed $inj -Updates @{ 2 = '8.9' } -UpgradeLines @() -Pinned @() -Packages $cat -ManagerItems @()
 $inIds = @($plan.Install | ForEach-Object Id); $upIds = @($plan.Update | ForEach-Object Id); $skIds = @($plan.Skipped | ForEach-Object Id)
 $recMissing = @($cat | Where-Object { $_.Default -and -not $inj.ContainsKey($_.Id) } | ForEach-Object Id)
 Check (($inIds | Sort-Object) -join ',' -eq (($recMissing | Sort-Object) -join ',')) "installs every recommended app that is missing ($($inIds.Count))"
@@ -240,7 +240,7 @@ $wu = @(
 )
 $rows = @(ConvertFrom-KitWingetUpgradeText -Lines $wu)
 Check ($rows.Count -eq 8 -and $rows[2].Id -eq 'Gyan.FFmpeg' -and $rows[2].Version -eq '9.0.2' -and $rows[2].Available -eq '9.1' -and $rows[2].Source -eq 'winget') "parses the first table only ($($rows.Count) rows; footer and explicit-targeting table left out)"
-$ap = Get-KitUpdateAllPlan -Installed @{ 37 = '2.55.0.5'; 36 = '1.140.0'; 18 = '2.2540.1.0'; 46 = '2.0.1'; 59 = '' } -Updates @{ 37 = '2.56.1'; 36 = '1.148.0'; 18 = '2.2546.3.0' } -UpgradeLines $wu -Pinned @('Some.Pinned') -Packages $cat
+$ap = Get-KitUpdateAllPlan -Installed @{ 37 = '2.55.0.5'; 36 = '1.140.0'; 18 = '2.2540.1.0'; 46 = '2.0.1'; 59 = '' } -Updates @{ 37 = '2.56.1'; 36 = '1.148.0'; 18 = '2.2546.3.0' } -UpgradeLines $wu -Pinned @('Some.Pinned') -Packages $cat -ManagerItems @()
 $kitIds = @($ap.Kit | ForEach-Object Id | Sort-Object); $oth = @($ap.Other | ForEach-Object Ref)
 Check (($kitIds -join ',') -eq '36,37,46') "kit half: catalogue apps with updates + native updater, not the Interactive Chris Titus prompt -> [$($kitIds -join ',')]"
 Check ((@($ap.SelfUpdating | ForEach-Object Id) -join ',') -eq '18' -and @($ap.Run | Where-Object Id -eq 18).Count -eq 0) "SelfUpdates: WhatsApp (18, updates itself) listed apart and left out of Run -> [$(@($ap.SelfUpdating | ForEach-Object Name) -join ', ')]"
@@ -251,7 +251,58 @@ Check (@($ap.Other | Where-Object { $_.Id -ge 0 -or $_.Method -ne 'winget-upgrad
 $ff = $ap.Other[0]
 $r = Invoke-KitPackage -Package $ff -DryRun
 Check ($r.Status -eq 'dryrun' -and $r.From -eq '9.0.2' -and $r.To -eq '9.1' -and $r.Detail -eq 'winget upgrade Gyan.FFmpeg') "dry run of an other app: $($r.Detail) ($($r.From) -> $($r.To))"
-Check (@(Get-KitUpdateAllPlan -Installed @{} -UpgradeLines @() -Pinned @() -Packages $cat).Run.Count -eq 0) 'nothing installed, nothing to upgrade -> empty plan'
+Check (@(Get-KitUpdateAllPlan -Installed @{} -UpgradeLines @() -Pinned @() -Packages $cat -ManagerItems @()).Run.Count -eq 0) 'nothing installed, nothing to upgrade -> empty plan'
+
+Write-Host 'package managers in Update everything (sample outputs, nothing runs):'
+$npmRows = @(ConvertFrom-KitNpmOutdated -Json '{ "typescript": { "current": "5.6.2", "wanted": "5.9.3", "latest": "5.9.3" }, "same": { "current": "1.0.0", "latest": "1.0.0" } }')
+Check ($npmRows.Count -eq 1 -and $npmRows[0].Name -eq 'typescript' -and $npmRows[0].Latest -eq '5.9.3') 'npm outdated JSON: outdated packages only'
+Check (@(ConvertFrom-KitNpmOutdated -Json '').Count -eq 0 -and @(ConvertFrom-KitNpmOutdated -Json '{}').Count -eq 0) 'npm outdated: empty output / {} -> nothing'
+$pipRows = @(ConvertFrom-KitPipOutdated -Json '[{"name": "pip", "version": "24.2", "latest_version": "25.3", "latest_filetype": "wheel"}, {"name": "requests", "version": "2.31.0", "latest_version": "2.32.5", "latest_filetype": "wheel"}]')
+Check ($pipRows.Count -eq 2 -and $pipRows[0].Name -eq 'pip' -and $pipRows[1].Latest -eq '2.32.5') 'pip list --outdated JSON (array, both editions)'
+Check (@(ConvertFrom-KitPipOutdated -Json '[]').Count -eq 0) 'pip: [] -> nothing'
+$pyl = @(ConvertFrom-KitPyLauncherList -Lines @(' -V:3.14 *        C:\Users\u\AppData\Local\Programs\Python\Python314\python.exe', ' -V:3.13          C:\Python313\python.exe', ' -V:Astral/CPython3.11.15 C:\Users\u\AppData\Roaming\uv\python\cpython-3.11.15-windows-x86_64-none\python.exe'))
+Check ($pyl.Count -eq 3 -and $pyl[0].Tag -eq '3.14' -and $pyl[1].Path -eq 'C:\Python313\python.exe') 'py -0p lines -> paths + tags'
+Check (-not (Test-KitPythonUsable 'C:\Users\u\AppData\Local\Microsoft\WindowsApps\python.exe') -and -not (Test-KitPythonUsable $pyl[2].Path)) 'Store alias and uv-managed Pythons are skipped'
+Check ((Get-KitPythonLabel -Path 'C:\Python313\python.exe') -eq '3.13' -and (Get-KitPythonLabel -Path 'x' -Tag '3.12') -eq '3.12') 'Python label from tag or PythonNNN folder'
+$ch = @(ConvertFrom-KitChocoOutdated -Lines @('git|2.47.0|2.51.0|false', 'vlc|3.0.20|3.0.21|true', 'Chocolatey v2.4.1'))
+Check ($ch.Count -eq 1 -and $ch[0].Name -eq 'git') 'choco outdated -r: pinned left out'
+$ru = @(ConvertFrom-KitRustupCheck -Lines @('stable-x86_64-pc-windows-msvc - Update available : 1.80.1 (3f5fd8dd4 2024-08-06) -> 1.91.0 (f8297e351 2025-10-28)', 'rustup - Up to date : 1.28.2'))
+Check ($ru.Count -eq 1 -and $ru[0].Latest -eq '1.91.0') 'rustup check: toolchains with an update'
+Check ((@(ConvertFrom-KitDotnetToolList -Lines @('Package Id      Version      Commands', '-------------------------------------', 'dotnet-ef       9.0.0        dotnet-ef')) -join ',') -eq 'dotnet-ef') 'dotnet tool list -g -> ids'
+Check ((@(ConvertFrom-KitToolNames -Lines @('ruff v0.14.0', '- ruff.exe', 'black 24.8.0', 'No tools installed')) -join ',') -eq 'ruff,black') 'uv / pipx tool lists -> names'
+
+$env:MYWINKIT_SIMULATE_MANAGERS = 'none'
+Check (@(Get-KitManagerUpdates).Count -eq 0) 'MYWINKIT_SIMULATE_MANAGERS=none -> no rows'
+$env:MYWINKIT_SIMULATE_MANAGERS = 'sample'
+$mi = @(Get-KitManagerUpdates -SkipNpm @('@kilocode/cli'))
+$byM = @{}; foreach ($x in $mi) { $byM[$x.Method] = 1 + [int]$byM[$x.Method] }
+Check (@('store-scan', 'npm-global', 'pip', 'pipx-all', 'uv-all', 'psmodule', 'dotnet-tool', 'scoop-all', 'choco', 'rustup', 'winget-upgrade' | Where-Object { -not $byM.ContainsKey($_) }).Count -eq 0) "sample: a row for every manager ($(@($byM.Keys | Sort-Object) -join ', '))"
+Check (@($mi | Where-Object { $_.Method -eq 'npm-global' -and $_.Ref -eq '@kilocode/cli' }).Count -eq 0) 'npm packages the catalogue updates are not listed twice'
+Check (@($mi | Where-Object { $_.Id -gt -1001 }).Count -eq 0 -and @($mi | Where-Object { $_.Group -ne 'PKG' }).Count -eq 0) 'rows: Ids below -1000, group PKG'
+$pipOff = @($mi | Where-Object { -not $_.Default })
+Check ($pipOff.Count -eq 1 -and $pipOff[0].Ref -eq 'requests' -and @($mi | Where-Object { $_.Method -eq 'pip' -and $_.Ref -eq 'pip' -and $_.Default }).Count -eq 1) 'pip itself ticked, single pip packages unticked'
+$userM = @($mi | Where-Object NoAdmin | ForEach-Object Method | Sort-Object -Unique)
+Check (($userM -join ',') -eq 'dotnet-tool,npm-global,pipx-all,psmodule,rustup,scoop-all,uv-all' -and @($mi | Where-Object { $_.Method -in 'store-scan', 'choco' -and $_.NoAdmin }).Count -eq 0) "per-user managers run at normal user rights from an elevated kit ($($userM -join ','))"
+Check ((Test-KitDeElevate -Package (@($mi | Where-Object Method -eq 'npm-global')[0]) -IsAdmin $true) -and -not (Test-KitDeElevate -Package (@($mi | Where-Object Method -eq 'choco')[0]) -IsAdmin $true)) 'routing: npm de-elevated, Chocolatey elevated'
+$mp = Get-KitUpdateAllPlan -Installed @{} -UpgradeLines @() -Pinned @() -Packages $cat -ManagerItems $mi
+Check ($mp.Managers.Count -eq ($mi.Count - 1) -and $mp.ManagersOff.Count -eq 1 -and @($mp.Run | Where-Object { $_.Ref -eq 'requests' }).Count -eq 0) 'plan: Managers in Run, pip packages in ManagersOff only'
+$wuS = @('Name             Id           Version Available Source', '------------------------------------------------------', 'Sample Store App 9NBLGGH4NNS1 1.2.0   1.3.0     msstore')
+$mp2 = Get-KitUpdateAllPlan -Installed @{} -UpgradeLines $wuS -Pinned @() -Packages $cat -ManagerItems $mi
+Check (@($mp2.Run | Where-Object { $_.Ref -eq '9NBLGGH4NNS1' }).Count -eq 1 -and @($mp2.Other | Where-Object { $_.Ref -eq '9NBLGGH4NNS1' }).Count -eq 1) 'a Store app winget upgrade already lists is not added twice'
+$ma = Get-KitAutoPlan -Installed @{} -UpgradeLines @() -Pinned @() -Packages $cat -ManagerItems $mi
+Check ($ma.Managers.Count -eq $mp.Managers.Count -and @($ma.Run | Where-Object { $_.Method -eq 'pip' -and $_.Ref -ne 'pip' }).Count -eq 0) '/auto: package managers yes, single pip packages never'
+$env:MYWINKIT_SIMULATE_ADMIN = '0'
+$drs = @($mi | ForEach-Object { Invoke-KitPackage -Package $_ -Mode update -DryRun })
+Check (@($drs | Where-Object Status -ne 'dryrun').Count -eq 0) "dry run of every manager row: dryrun ($(@($drs | Where-Object Status -ne 'dryrun' | ForEach-Object { "$($_.Name)=$($_.Status) $($_.Detail)" }) -join '; '))"
+Check ((@($drs | Where-Object Name -eq 'typescript')[0].Detail) -eq 'npm install -g typescript@latest' -and (@($drs | Where-Object Method -eq 'scoop-all')[0].Detail) -eq 'scoop update; scoop update *') 'dry-run text names the exact commands'
+$chR = Invoke-KitPackage -Package (@($mi | Where-Object Method -eq 'choco')[0]) -Mode update
+$stR = Invoke-KitPackage -Package (@($mi | Where-Object Method -eq 'store-scan')[0]) -Mode update
+Check ($chR.Status -eq 'blocked' -and $stR.Status -eq 'blocked' -and $chR.Detail -like '*administrator*') 'not elevated: Store scan and Chocolatey are blocked (needs admin), nothing runs'
+$psCmd = @(Get-KitMgrCommands -Package (@($mi | Where-Object Method -eq 'psmodule')[0]))
+$psText = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($psCmd[0].Args[-1]))
+$tk = $null; $pe = $null; [void][Management.Automation.Language.Parser]::ParseInput($psText, [ref]$tk, [ref]$pe)
+Check ($psCmd.Count -eq 1 -and $psText.Contains("'Terminal-Icons'") -and $psText.Contains('-Scope CurrentUser') -and -not @($pe).Count) 'module update script: names + scope, parses'
+Remove-Item Env:MYWINKIT_SIMULATE_ADMIN, Env:MYWINKIT_SIMULATE_MANAGERS -ErrorAction SilentlyContinue
 
 Write-Host 'failure reasons (a short line instead of "see log"):'
 $fl = & (Get-Module core) { Get-KitFailLine -Out @('Updating Hermes Agent...', "Program 'hermes.exe' failed to run: An Application Control policy has blocked this file.", '') }

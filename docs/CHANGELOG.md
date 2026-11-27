@@ -2,6 +2,23 @@
 
 > Append-only. New entries on top. Don't edit old ones except to fix an error.
 
+## 2026-11-26: v2.8.7 (branch `update-all-managers`): Update everything covers the package managers
+
+- Daniel: "can you include update all from windows store that is installed as well as pip npx and other
+  packages". Update everything (Spectre review + classic `L` 1) and `/auto` now add, each only when its manager is
+  on the PC: a Microsoft Store update scan (CIM `UpdateScanMethod`, as administrator) plus Store apps from
+  `winget upgrade --source msstore`, npm global packages, pip itself in every Python, pipx and uv tools, PowerShell
+  Gallery modules (per edition and scope), dotnet global tools, Scoop, Chocolatey and rustup.
+- Single pip packages are listed but unticked and never run in `/auto` (bulk pip upgrades can break pinned
+  dependencies); *Choose which to update* ticks them. `npx` needs no row of its own (it runs npm packages).
+- Per-user managers run at the signed-in user's normal rights from an elevated kit (`NoAdmin` rows); the Store
+  scan, Chocolatey and all-users modules need admin and are reported as blocked without it.
+- `Invoke-KitProcess` is now `Start-KitProcess` + `Wait-KitProcess`, so the listings run in parallel. On the main
+  PC (read-only): ~4.5 s warm, 38 s on the first run (pip fetching its index for 52 packages).
+- Tests: test-core checks every parser on sample output, the plan / `/auto` split, the dry run of every row,
+  "blocked without admin", the module update script; smoke-tui, smoke-loader and render-screens use
+  `MYWINKIT_SIMULATE_MANAGERS=sample` (fixed rows, nothing slow runs).
+
 ## 2026-11-26: v2.8.6 (branch `tailnet-setup`, built as v2.8.4): Tailnet setup
 
 - Version raised from 2.8.4 to 2.8.6 at merge time, so PCs already on v2.8.5 (PR #9) pick it up.

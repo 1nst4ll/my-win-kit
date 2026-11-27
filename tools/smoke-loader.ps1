@@ -38,6 +38,7 @@ $localPrefs = Join-Path $env:MYWINKIT_STATE_DIR 'local-settings.json'
 # test THIS copy: no self-update to whatever is on GitHub main
 $env:MYWINKIT_RAW_URL = 'file:///C:/nonexistent-my-win-kit-update-source'
 $env:MYWINKIT_CONFIG_URL = ([Uri](Join-Path $root 'config')).AbsoluteUri   # this copy's config, not GitHub main
+$env:MYWINKIT_SIMULATE_MANAGERS = 'sample'   # package managers: fixed sample rows, nothing slow runs
 $env:MYWINKIT_SIMULATE_WT = 'present'
 $env:MYWINKIT_SIMULATE_INSTALL = ''
 $env:MYWINKIT_SIMULATE_SAC = 'off'   # Smart App Control on this PC must not change the results
